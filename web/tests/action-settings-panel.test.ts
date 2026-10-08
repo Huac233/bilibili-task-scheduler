@@ -238,6 +238,14 @@ interface Scenario {
    * to that field's read rather than to the page.
    */
   choiceFails?: boolean
+  /**
+   * Whether the options read is still out when the assertions run.
+   *
+   * The reading no answer can reach, and the one the three flags above cannot stand in for: the request
+   * is recorded and then never settles, so the form's own `choiceOf` answers the `null` that
+   * `missingReason(null)` words — which is the state the form is drawn in on its first frame.
+   */
+  choicePending?: boolean
 }
 
 /**
@@ -265,6 +273,13 @@ function query(url: string, name: string): string {
 /** The route without its query, so a fixture compares against a path rather than a whole URL. */
 function pathOf(url: string): string {
   return url.split('?')[0] ?? url
+}
+
+/** The read names this page asked for, in the order it asked — one request per field. */
+function askedFields(): string[] {
+  return requests
+    .filter(request => request.url.includes('/api/action-settings/options'))
+    .map(request => query(request.url, 'field'))
 }
 
 /** The Task that names the per-Target action, as the Task list answers it, in the scenario's status. */
@@ -378,6 +393,12 @@ http.defaults.adapter = async config => {
   const url = search === '' ? (config.url ?? '') : `${config.url ?? ''}?${search}`
   const body = config.data === undefined ? undefined : JSON.parse(String(config.data))
   requests.push({ method, url, body })
+  // A request that is out and has not come back. Recorded above on purpose, so the state under test is a
+  // real ask in flight rather than a form that never asked; the promise is never settled, so the form
+  // waits on it for as long as the test lives.
+  if (scenario.choicePending === true && pathOf(url).endsWith('/api/action-settings/options')) {
+    return new Promise<never>(() => {})
+  }
   const data = fixtureFor(method, url, body)
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
@@ -545,6 +566,25 @@ function workBlockOf(label: string): HTMLElement {
  */
 function buttonsIn(element: HTMLElement): string[] {
   return [...element.querySelectorAll('button')].map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())
+}
+
+/**
+ * The note one choice field falls back to when it has no list — the element whose class says which
+ * reading that field is in.
+ *
+ * Found **structurally** rather than by class, and that is not a style choice: which of the three classes
+ * it carries is what the test below is about, so a lookup naming one of them would be asserting the
+ * answer. It is the field container's child that holds no checkbox, which is the shape the template
+ * draws — the group *or* the note, never both.
+ */
+function choiceNoteOf(): HTMLElement {
+  const container = document.querySelector<HTMLElement>('.param-form .choice')
+  if (container === null) throw new Error('the parameter form drew no choice field')
+  const note = [...container.children].find(
+    (child): child is HTMLElement => child instanceof HTMLElement && child.querySelector('[role="checkbox"]') === null
+  )
+  if (note === undefined) throw new Error('the choice field drew a list where the fixture has none')
+  return note
 }
 
 beforeEach(() => {
@@ -1068,8 +1108,10 @@ describe('an action’s parameters', () => {
     expect(text()).toContain('一个可选项都没有')
     expect(text()).not.toContain('正在读取可选项')
     // …and it is drawn as an answer rather than as a failure. The template reads the same union for the
-    // colour (`note-empty` for `ok`, `missing` for everything else, 「only a failure is coloured as one」),
-    // and no test held that half before these two.
+    // colour, one class per reading: `note-empty` for an answer that holds nothing, `missing` for a
+    // refusal alone, and `note-pending` for a read that has not come back — so 「only a failure is coloured
+    // as one」 is the claim both assertions here hold this element to, and the third reading is pinned by
+    // the test below.
     const note = document.querySelector<HTMLElement>('.param-form .note-empty')
     expect(note?.textContent).toContain('一个可选项都没有')
     expect(document.querySelectorAll('.param-form .missing')).toHaveLength(0)
@@ -1105,6 +1147,38 @@ describe('an action’s parameters', () => {
     // And the field itself is still on the screen with its own label, so a refused read is reported on
     // the field rather than taking the form down — the value a person already had is still saveable.
     expect(text()).toContain(GIFT_FIELD.label)
+  })
+
+  /**
+   * The third reading the template's own comment divides, and the one the class binding drew wrongly.
+   *
+   * `choiceOf` answers `null` while a read is in flight — the state this form is in on its first frame,
+   * and the only state `missingReason(null)` words — and a two-way test on `kind` (`'ok'`, or everything
+   * else) read that as `.missing`, `--row-danger`: 「正在读取可选项…」 drawn in the failure's colour over a request
+   * with nothing wrong with it, in a form whose own comment says only a failure is coloured as one. The
+   * binding grew the reading it was missing rather than the comment losing the claim, and the wait is a
+   * name of its own because 「等」 and 「一个空答案」 are two different things that have to be told apart by name.
+   *
+   * Red before the change: the row carried `missing` while no answer had arrived.
+   */
+  it('draws a choice read that is still in flight as a wait, not as a failure', async () => {
+    scenario = { carried: false, finished: 0, choice: { kind: 'ok', items: [GIFT_ITEM] }, choicePending: true }
+    await mountPanel()
+    await clickInRow('亲密度任务', '设置参数')
+
+    const note = choiceNoteOf()
+    // The in-flight reading's own sentence, so the element under these assertions is the one being read —
+    // and that sentence is one `missingReason` gets for `null`, so it is backed by a line of code.
+    expect(note.textContent).toContain('正在读取可选项')
+    // A wait is not a failure, so it may not carry the failure's class…
+    expect(note.classList.contains('missing')).toBe(false)
+    // …and it carries one of its own, which is what makes the three readings tellable apart on screen.
+    expect(note.classList.contains('note-pending')).toBe(true)
+    // Already true before the change, and asserted so the three classes are pinned as a set: an in-flight
+    // read is its own reading rather than the empty answer under another name.
+    expect(note.classList.contains('note-empty')).toBe(false)
+    // And the ask really is out — the wait is a request in flight rather than a form that never asked.
+    expect(askedFields()).toContain(GIFT_FIELD.name)
   })
 
   /**

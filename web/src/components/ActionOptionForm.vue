@@ -173,6 +173,24 @@ function itemsOf(field: ActionOptionField): readonly ActionChoiceItem[] {
 }
 
 /**
+ * Which class one field's note is drawn with — one per reading `missingReason` words.
+ *
+ * **Three readings, three classes, and only the refusal is a failure.** `choiceOf` answers `null` while the
+ * read is in flight, so a two-way test on `kind` — `'ok'`, or everything else — drew the in-flight row as
+ * `.missing`, `--row-danger`: 「正在读取可选项…」 in the failure's colour on the first frame of the form, over a
+ * request with nothing wrong with it. The reading that arrived empty is not a failure either — it is the
+ * *source's* answer — so it keeps the quiet class it already had, and the wait needs one of its own rather
+ * than a reuse of that name: a wait and an empty answer are two different facts, and the class names are
+ * how the two are told apart. Which colour each name resolves to is the stylesheet's business, and the
+ * stylesheet's comment states the rule this function has to keep.
+ */
+function choiceNoteClass(field: ActionOptionField): string {
+  const choice = choiceOf(field)
+  if (choice === null) return 'note-pending'
+  return choice.kind === 'ok' ? 'note-empty' : 'missing'
+}
+
+/**
  * One item's line, and what to say where a list has none — both from `./choice-notes.js`.
  *
  * They are imported rather than written here because the preferences page draws the same two
@@ -288,7 +306,7 @@ async function save(): Promise<void> {
             control: a read in flight, a read that failed, and a read that succeeded on an empty
             source. `missingReason` holds the sentences; only a failure is coloured as one.
           -->
-          <div v-else :class="choiceOf(field)?.kind === 'ok' ? 'note-empty' : 'missing'">
+          <div v-else :class="choiceNoteClass(field)">
             {{ missingReason(choiceOf(field)) }}
           </div>
         </div>
@@ -375,6 +393,18 @@ async function save(): Promise<void> {
  */
 .missing {
   color: var(--row-danger);
+  font-size: 13px;
+}
+
+/*
+ * And the reading that has no answer yet is neither of those: the request is out, `missingReason(null)`
+ * says so in the wait's own sentence, and it draws in the quiet colour the rest of this form's read-outs
+ * use — the same colour the empty answer resolves to, since neither of them is a fault. It is a name of
+ * its own rather than a reuse of `.note-empty` because a wait and an answer of nothing are two different
+ * facts, and a test has to be able to tell the two apart by name.
+ */
+.note-pending {
+  color: var(--row-quiet);
   font-size: 13px;
 }
 
