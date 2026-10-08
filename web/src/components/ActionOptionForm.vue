@@ -366,19 +366,26 @@ async function save(): Promise<void> {
   gap: 4px;
 }
 
+/*
+ * The three colours this form draws are the app palette's, read by name rather than written here:
+ * `App.vue` publishes the seven roles from the live theme, and the form is mounted both inside the
+ * panel — which has a palette to inherit from either way — and from `TaskDetailView.vue`. The greys
+ * that were `#888` are a step darker now, which is what taking the role rather than a literal means:
+ * the theme owns the quiet colour, and this form had one of its own for no reason.
+ */
 .missing {
-  color: #d03050;
+  color: var(--row-danger);
   font-size: 13px;
 }
 
 /* A read that succeeded on an empty source: an answer, not a failure, so it is not coloured as one. */
 .note-empty {
-  color: #888;
+  color: var(--row-quiet);
   font-size: 13px;
 }
 
 .hint {
-  color: #888;
+  color: var(--row-quiet);
   font-size: 13px;
 }
 

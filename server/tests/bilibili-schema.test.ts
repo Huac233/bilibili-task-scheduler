@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { danmuInfoSchema, navSchema, roomInfoSchema, roomInitSchema } from '../src/bilibili/types.js'
+import { anchorNameSchema, danmuInfoSchema, navSchema, roomInfoSchema, roomInitSchema } from '../src/bilibili/types.js'
 
 /**
  * Response-shape regression tests.
@@ -132,6 +132,67 @@ describe('room get_info response', () => {
     }
     const result = roomInfoSchema.safeParse(payload)
     expect(result.success).toBe(true)
+  })
+})
+
+/**
+ * The read that answers the Anchor's name, and the one thing about it that can be got wrong silently.
+ */
+describe('anchor name response (getInfoByRoom)', () => {
+  /**
+   * The field the reader consumes, at the level the response actually nests it.
+   *
+   * `anchor_info.base_info.uname` — and the block is worth pinning at this depth because the shape a
+   * reference implementation's room type suggests is a flat `anchor_info: { uname }`, whose `uname`
+   * read is `undefined`. That is the failure this case exists to make loud: a name that is silently
+   * `undefined` is indistinguishable from a room reporting none.
+   *
+   * `face` rides along beside the declared field, and undeclared siblings are the point of it: this
+   * payload is hundreds of keys at the top level, so a read that only survives a hand-trimmed body is
+   * the read that breaks on the next upstream addition.
+   */
+  it('reads the Anchor’s name out of the nested anchor block', () => {
+    const result = anchorNameSchema.safeParse({
+      code: 0,
+      message: '0',
+      data: { anchor_info: { base_info: { uname: '炫神_', face: 'https://i0.hdslb.com/bfs/face/x.jpg' } } }
+    })
+
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.data?.anchor_info.base_info.uname).toBe('炫神_')
+    }
+  })
+
+  /**
+   * The refusal, which is a shape the code has to survive.
+   *
+   * `19002000`（获取初始化数据失败）is the code this endpoint answers for a room it will not initialise.
+   * The fixture is the *shape* a refusal takes on this family — a code and its words, no payload — and
+   * what it pins is the property `fetchAnchorName` stands on: a reader that demanded an anchor before
+   * reading the code would report a shape problem where Bilibili had named a state. (It is not a saved
+   * body: no `getInfoByRoom` refusal is captured in this repo, so the code comes from the endpoint's own
+   * reference test rather than from a response this build has seen.)
+   */
+  it('parses a refusal that carries no data, keeping the code', () => {
+    const result = anchorNameSchema.safeParse({
+      code: 19002000,
+      message: '获取初始化数据失败',
+      msg: '获取初始化数据失败'
+    })
+
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.code).toBe(19002000)
+      expect(result.data.data ?? undefined).toBeUndefined()
+    }
+  })
+
+  /** The other side of the depth: a success that lost the block is a contract change, not a name-less room. */
+  it('rejects a success whose anchor block was flattened to where it never was', () => {
+    const flattened = { code: 0, data: { anchor_info: { uname: '炫神_' } } }
+
+    expect(anchorNameSchema.safeParse(flattened).success).toBe(false)
   })
 })
 

@@ -1,18 +1,6 @@
 <script setup lang="ts">
-import {
-  NAlert,
-  NButton,
-  NCard,
-  NEmpty,
-  NInput,
-  NSpin,
-  NSwitch,
-  NTag,
-  useDialog,
-  useMessage,
-  useThemeVars
-} from 'naive-ui'
-import { type CSSProperties, computed, onMounted, onUnmounted, ref } from 'vue'
+import { NAlert, NButton, NCard, NEmpty, NInput, NSpin, NSwitch, NTag, useDialog, useMessage } from 'naive-ui'
+import { onMounted, onUnmounted, ref } from 'vue'
 
 import { describeError } from '../api/client.js'
 import { accountApi, actionSettingApi, platformApi, taskApi } from '../api/endpoints.js'
@@ -96,30 +84,6 @@ import { namingNote } from './naming-note.js'
 const catalog = usePlatformStore()
 const message = useMessage()
 const dialog = useDialog()
-const themeVars = useThemeVars()
-
-/**
- * The panel's palette, read from the live theme rather than written into the stylesheet.
- *
- * Every colour in this component's styles used to be a hex literal (`#888`, `#333`, `#fafafa`, …), which
- * is one theme's private copy of a fact the theme already owns: under a dark theme the page would have
- * stayed light while the rest of the app went dark, and the two would have disagreed about the same row.
- * They land here as custom properties — one name per role — and the stylesheet reads the name rather than
- * the literal. `AppFooter.vue` is the same instrument on one element; a panel with this many roles needs
- * the names to be declared once.
- */
-const themeStyle = computed<CSSProperties>(() => {
-  const vars = themeVars.value
-  return {
-    '--row-title': vars.textColor1,
-    '--row-body': vars.textColor2,
-    '--row-quiet': vars.textColor3,
-    '--row-line': vars.borderColor,
-    '--row-surface': vars.actionColor,
-    '--row-danger': vars.errorColor,
-    '--row-radius': vars.borderRadiusSmall
-  }
-})
 
 /** The action whose switch is mid-flight, so only that row shows as loading. */
 const pending = ref<string | null>(null)
@@ -445,18 +409,34 @@ function asShownRead(field: ActionOptionField, source: string): ActionShownRead 
  *
  * **Two channels feed the list, and the union is the whole of the rule.** A `choice` field's source
  * is one of them, because a field's read is displayed *and* tickable; `descriptor.shownReads` is the
- * other, which exists for the read no field could carry. The two are mutually exclusive by
- * declaration — a read a field already names as its `source` is not repeated in `shownReads` — so
- * nothing has to be merged away here. A field that names no source is left out rather than drawn: the
- * route answers that name with a 400, so a heading for it would be a claim no read can settle, and
- * the row would sit on 「正在读取可选项…」 for ever.
+ * other, which exists for the read no field could carry. The two are mutually exclusive *by
+ * declaration* — a read a field already names as its `source` is not repeated in `shownReads` — and
+ * that declaration is the one thing here no line of code enforces, which is why the second channel is
+ * filtered against the first below rather than trusted. A field that names no source is left out
+ * rather than drawn: the route answers that name with a 400, so a heading for it would be a claim no
+ * read can settle, and the row would sit on 「正在读取可选项…」 for ever.
  */
 function shownReadsOf(entry: PlatformEntry): readonly ActionShownRead[] {
   if (entry.descriptor.needsTarget) return []
   const fromFields = choiceFieldsOf(entry).flatMap(field =>
     field.source === undefined ? [] : [asShownRead(field, field.source)]
   )
-  return [...fromFields, ...(entry.descriptor.shownReads ?? [])]
+
+  // **A name the fields already declared is dropped, and that is the one line behind the sentence above
+  // the list.** The two channels are disjoint *by declaration* — the rule is written in
+  // `ActionShownRead` (`web/src/types/api.ts`), in `shownReadOf`
+  // (`server/src/actions/action-options.ts`) and in `server/src/platform/types.ts`'s `shownReads` — and
+  // no line of code checks it: `descriptorsWithDeclarations` merges the two tables without validating
+  // them. Concatenating them here would draw one read twice, keyed `fact-${fact.name}` both times, which
+  // is the collision `web/tests/nspace-fragment.test.ts` pins for `NSpace`'s literal `key: 1`. The
+  // field's declaration wins because it is the one the parameter form also fills from — the same order
+  // the options route resolves a doubled name in, a `choice` field first and a `shownReads` entry second
+  // — so a violating descriptor degrades to one row instead of two. `web/tests/account-level-facts.test.ts`
+  // pins that with a descriptor that breaks the rule on purpose.
+  const declared = new Set(fromFields.map(read => read.name))
+  const fromShown = (entry.descriptor.shownReads ?? []).filter(read => !declared.has(read.name))
+
+  return [...fromFields, ...fromShown]
 }
 
 /** What one read answered, or null while that read has not landed. */
@@ -766,7 +746,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="panel" :style="themeStyle">
+  <div class="panel">
     <NAlert v-if="error !== ''" type="error">{{ error }}</NAlert>
 
     <!--
@@ -1067,6 +1047,12 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/*
+ * The seven `--row-*` names every colour below reads are declared in one place, `App.vue`, and
+ * published on the root element — so this stylesheet declares no colour of its own and neither does
+ * any other. The panel used to declare the palette itself, on `.panel`; the parameter form, which is
+ * also mounted from `TaskDetailView.vue` where there is no `.panel`, could not read that.
+ */
 .panel {
   display: flex;
   flex-direction: column;

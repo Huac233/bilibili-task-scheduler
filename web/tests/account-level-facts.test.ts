@@ -1,7 +1,7 @@
 import { NDialogProvider, NMessageProvider } from 'naive-ui'
 import { createPinia } from 'pinia'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, h, nextTick, ref } from 'vue'
 
 import { http } from '../src/api/client.js'
 import ActionSettingsPanel from '../src/components/ActionSettingsPanel.vue'
@@ -110,6 +110,51 @@ const INTIMACY_TASKS = {
 
 const ALL_ACTIONS = [CLEAR_OUT, INTIMACY_TASKS]
 
+/** The doubled declaration's own label, spelled once: the pin asserts the page does *not* draw it. */
+const DOUBLED_SHOWN_LABEL = '留量的直播间（这是那条读的第二次声明）'
+
+/**
+ * A descriptor that **breaks the documented rule on purpose** — that is the whole of what it is for.
+ *
+ * The two channels are disjoint by declaration: `ActionShownRead` (`web/src/types/api.ts`),
+ * `shownReadsOf`'s own comment and its server-side twin all say that a read a `choice` field already
+ * names as its `source` is not repeated in `descriptor.shownReads`. **No line of code checks that** —
+ * `descriptorsWithDeclarations` merges the two tables without validating them, and the panel
+ * concatenates the two halves — so this fixture declares the followed-rooms read in both, with the same
+ * `name` (the key the options route is asked by, and the one the template's `fact-${fact.name}` key
+ * collides on). It is the descriptor the page would meet the day a Platform published one, and it is
+ * the only fixture in this file that nobody should ever write for real.
+ */
+const DOUBLED_READ = {
+  key: 'clear_out_doubled',
+  action: 'reconcile',
+  label: '清仓（同一条读声明了两次）',
+  description: '把即将过期的免费道具送出去，而且同一条读被两个通道各声明了一次。',
+  costly: false,
+  needsTarget: false,
+  needsLibrary: false,
+  maxMessageLength: 0,
+  defaultIntervalSeconds: 300,
+  minIntervalSeconds: 60,
+  optionFields: [FOLLOW_FIELD],
+  shownReads: [
+    {
+      name: FOLLOW_FIELD.name,
+      label: DOUBLED_SHOWN_LABEL,
+      help: '这一行本来不该出现：它的来源已经在字段里声明过一次了。',
+      source: FOLLOW_FIELD.source
+    }
+  ]
+}
+
+/**
+ * The catalogue this scenario renders: the two by default, and the rule-breaking one only where a test
+ * asks for it. Opt-in because a third row moves every assertion that counts rows or requests.
+ */
+function actionsOf(): readonly (typeof ALL_ACTIONS)[number][] {
+  return scenario.doubledRead === true ? [...ALL_ACTIONS, DOUBLED_READ] : ALL_ACTIONS
+}
+
 const ACCOUNTS = [
   { id: 1, platform: 'douyu', displayName: '测试账号', avatar: '', externalId: '456918967', createdAt: 0 }
 ]
@@ -130,11 +175,31 @@ interface Scenario {
   followedRooms: unknown
   /** …and for the medal read. Two answers, so one failing does not hide the other. */
   medalRooms: unknown
+  /**
+   * Whether that read is answered at all, per read.
+   *
+   * A request that never came back is a different event from a 200 that says a source could not
+   * answer, and it is the only one the route cannot put in its own vocabulary: the page's `catch`
+   * turns a rejection into the same `unavailable` reading. Per read, because the case worth pinning is
+   * one read refusing while the other answers — the page asks one request per name for exactly that.
+   */
+  followedRoomsFails?: boolean
+  medalRoomsFails?: boolean
   /** Whether `GET /api/accounts` answers at all. */
   accountListFails?: boolean
   /** Whether it answers with no account on the Platform. */
   accountListEmpty?: boolean
+  /**
+   * Whether the catalogue this scenario renders includes the descriptor that breaks the two-channel
+   * rule. Opt-in, and only the pin for that violation asks for it: a third row would move every
+   * assertion in this file that counts rows or requests.
+   */
+  doubledRead?: boolean
 }
+
+/** The sentence a refused read is shown with: the request's own failure, which the page prints. */
+const FOLLOW_READ_REFUSED = '这次读关注的直播间时请求没有回来，所以这一条读不到。'
+const MEDAL_READ_REFUSED = '这次读牌子直播间时请求没有回来，所以这一条读不到。'
 
 interface RecordedRequest {
   readonly method: string
@@ -163,6 +228,11 @@ function pathOf(url: string): string {
  * `GET /api/action-settings/options` applies so that a page reaching for a knob's list is never handed
  * the display-only answer for the same name. The two are disjoint by declaration; a name in neither
  * resolves to `''`, which is what the fixture answers with rather than borrowing either read's list.
+ *
+ * Read off `CLEAR_OUT` for every action on purpose: the one descriptor that declares the same name in
+ * both channels (`DOUBLED_READ`) declares it as the same field with the same source, so the name
+ * resolves to the same read whichever row asked — which is the route's answer too, since it is the
+ * *field*'s lookup that wins there.
  */
 function sourceOf(name: string): string {
   const field = CLEAR_OUT.optionFields.find(candidate => candidate.name === name)
@@ -172,12 +242,12 @@ function sourceOf(name: string): string {
 function fixtureFor(method: string, url: string): unknown {
   const route = pathOf(url)
   if (route.endsWith('/api/platforms')) {
-    return { ok: true, platforms: [{ key: 'douyu', label: '斗鱼', actions: ALL_ACTIONS }] }
+    return { ok: true, platforms: [{ key: 'douyu', label: '斗鱼', actions: actionsOf() }] }
   }
   if (route.endsWith('/api/action-settings')) {
     return {
       ok: true,
-      settings: ALL_ACTIONS.map(action => ({ platform: 'douyu', actionKey: action.key, enabled: true, options: {} }))
+      settings: actionsOf().map(action => ({ platform: 'douyu', actionKey: action.key, enabled: true, options: {} }))
     }
   }
   if (route.endsWith('/api/accounts')) {
@@ -195,16 +265,21 @@ function fixtureFor(method: string, url: string): unknown {
     // and 清仓 has one read in each, so this is the union the page asks for rather than a second path.
     const field = query(url, 'field')
     const source = sourceOf(field)
+    const follows = source === 'douyu.followedRooms'
+    // A rejection rather than an answer: this is the event the route has no vocabulary for, so the
+    // page's own `catch` is what turns it into a sentence. The message is the sentence it prints.
+    if (follows && scenario.followedRoomsFails === true) throw new Error(FOLLOW_READ_REFUSED)
+    if (!follows && scenario.medalRoomsFails === true) throw new Error(MEDAL_READ_REFUSED)
     return {
       ok: true,
       field,
       source,
-      choice: source === 'douyu.followedRooms' ? scenario.followedRooms : scenario.medalRooms
+      choice: follows ? scenario.followedRooms : scenario.medalRooms
     }
   }
   if (route.endsWith('/api/action-settings/workflow')) {
     const actionKey = query(url, 'actionKey')
-    const descriptor = ALL_ACTIONS.find(action => action.key === actionKey)
+    const descriptor = actionsOf().find(action => action.key === actionKey)
     if (descriptor === undefined) throw new Error(`no fixture action ${actionKey}`)
     return {
       ok: true,
@@ -304,6 +379,21 @@ function factsBlockOf(label: string): HTMLElement | null {
   return rowElement(label).querySelector<HTMLElement>('.account-facts')
 }
 
+/**
+ * One read's own line inside that block, flattened.
+ *
+ * Scoped to the read rather than to the block on purpose: the two reads are two sentences about two
+ * sources, and the moment both readings are on the screen at once a block-wide `toContain` cannot say
+ * which of them it found — which is precisely the pair of sentences this file exists to keep apart.
+ */
+function factOf(rowLabel: string, factLabel: string): string {
+  const fact = [...rowElement(rowLabel).querySelectorAll<HTMLElement>('.fact')].find(
+    candidate => (candidate.querySelector('.fact-label')?.textContent ?? '').trim() === factLabel
+  )
+  if (fact === undefined) throw new Error(`no fact for ${factLabel} in ${rowLabel}`)
+  return (fact.textContent ?? '').replace(/\s+/g, ' ')
+}
+
 /** Clicks one row's own button, then lets the request chain it starts land. */
 async function clickInRow(rowLabel: string, buttonLabel: string): Promise<void> {
   const button = [...rowElement(rowLabel).querySelectorAll('button')].find(
@@ -320,6 +410,39 @@ function askedFields(): string[] {
     .filter(request => request.url.includes('/api/action-settings/options'))
     .map(request => query(request.url, 'field'))
 }
+
+/**
+ * The read names one action was asked for, in the order it asked.
+ *
+ * Scoped to the action for the same reason `factOf` is scoped to the read: once the catalogue holds an
+ * action that declares one read twice, a page-wide list of names cannot say *whose* second ask it is.
+ */
+function fieldsAskedFor(actionKey: string): string[] {
+  return requests
+    .filter(
+      request => request.url.includes('/api/action-settings/options') && request.url.includes(`actionKey=${actionKey}`)
+    )
+    .map(request => query(request.url, 'field'))
+}
+
+/**
+ * Everything the runtime warned about while something ran.
+ *
+ * A spy rather than a count, because the warning this file asserts the *absence* of is Vue's own —
+ * `patchKeyedChildren`'s 「Duplicate keys found during update」 — and nothing here raises it deliberately:
+ * what the pin needs is whether the real runtime said it. `stop` is called in a `finally`, so a failing
+ * assertion cannot leave the console muted for the rest of the file.
+ */
+function listenForWarnings(): { readonly lines: string[]; readonly stop: () => void } {
+  const lines: string[] = []
+  const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+    lines.push(args.map(argument => String(argument)).join(' '))
+  })
+  return { lines, stop: () => spy.mockRestore() }
+}
+
+/** Vue's own sentence for a keyed fragment whose keys collide. Long, so no rendered text can form it. */
+const DUPLICATE_KEYS = 'Duplicate keys found during update'
 
 beforeEach(() => {
   document.body.innerHTML = ''
@@ -448,6 +571,61 @@ describe('the account-level facts a preferences page shows', () => {
   })
 
   /**
+   * A read whose request did not come back is the page's own sentence, and it is not the empty answer.
+   *
+   * The route cannot answer this one. `ChoiceView`'s `unavailable` is a *200 that says why a source
+   * could not answer*, and the third case — the request itself never returned — is a rejection, which
+   * the page's own `catch` in `loadAccountReads` turns into the same vocabulary. That catch is what
+   * this test covers and the scenario above does not: with the fixture answering a value in every
+   * case, replacing the catch's sentence with a successful read of nothing (`{ kind: 'ok', items: [] }`)
+   * left the whole web suite green, and the page would tell somebody their account follows no rooms
+   * when the truth is that nothing came back.
+   */
+  it('says a read that failed failed, and does not draw it as an empty answer', async () => {
+    scenario = {
+      followedRooms: { kind: 'ok', items: [FOLLOWED_ITEM] },
+      medalRooms: { kind: 'ok', items: [MEDAL_ITEM] },
+      followedRoomsFails: true
+    }
+    await mountPanel()
+
+    const facts = (factsBlockOf('清仓')?.textContent ?? '').replace(/\s+/g, ' ')
+    // The failure's own words — and never the empty answer's, which is what the mutation above makes
+    // this read say.
+    expect(facts).toContain(FOLLOW_READ_REFUSED)
+    expect(facts).not.toContain('一个可选项都没有')
+    expect(facts).not.toContain('电棍的直播间')
+    // And the read that did answer is still drawn: one request failing is not the page going blind.
+    expect(facts).toContain('小苏的直播间')
+  })
+
+  /**
+   * The reverse, with both readings on the screen at once.
+   *
+   * An answer of nothing is an answer — a sentence about the source, not about the request — and the
+   * two are told apart per read rather than over the block: 「读不到」 beside one list and 「读到了但是空的」
+   * beside the other is the whole reason the route answers per name. A page that collapsed them would
+   * be telling a person their account follows no rooms while it was holding the other read's list.
+   */
+  it('draws an empty answer as an answer beside a read that failed, each under its own read', async () => {
+    scenario = {
+      followedRooms: { kind: 'ok', items: [] },
+      medalRooms: { kind: 'ok', items: [MEDAL_ITEM] },
+      medalRoomsFails: true
+    }
+    await mountPanel()
+
+    const followed = factOf('清仓', FOLLOW_FIELD.label)
+    expect(followed).toContain('一个可选项都没有')
+    expect(followed).not.toContain(MEDAL_READ_REFUSED)
+
+    const medal = factOf('清仓', MEDAL_READ.label)
+    expect(medal).toContain(MEDAL_READ_REFUSED)
+    expect(medal).not.toContain('一个可选项都没有')
+    expect(medal).not.toContain('小苏的直播间')
+  })
+
+  /**
    * A read that landed is what lets the page assert anything about the account.
    *
    * An empty account list is also what a failed read leaves behind, so the sentence about absence may
@@ -482,5 +660,94 @@ describe('the account-level facts a preferences page shows', () => {
     expect(shown).toContain('这个平台还没有绑定账号')
     expect(shown).not.toContain('账号列表这次没读到')
     expect(askedFields()).toEqual([])
+  })
+
+  /**
+   * The invariant the facts-line's second half rests on, pinned with a descriptor that breaks it.
+   *
+   * 「不参与参数的那几条，只看不改」 holds only while the two channels are disjoint — a read a `choice`
+   * field names as its `source` may not also appear in `descriptor.shownReads` — and nothing checks
+   * that: `descriptorsWithDeclarations` merges the two tables without validating them, so the panel
+   * itself drops a name the fields already declared (`shownReadsOf`) rather than trusting the rule. This
+   * descriptor is the input that line exists for: `DOUBLED_READ` violates the rule **on purpose**, and
+   * it is the only fixture in this file meant to be wrong — a rule nothing can break is a rule nothing
+   * holds.
+   *
+   * Red before the change: the panel concatenated the two halves, so the read was drawn twice — two
+   * `.fact` rows, both keyed `fact-pourRoom`, and two requests for the one name.
+   */
+  it('draws one row for a read a violating descriptor declares in both channels', async () => {
+    scenario = {
+      followedRooms: { kind: 'ok', items: [FOLLOWED_ITEM] },
+      medalRooms: { kind: 'ok', items: [MEDAL_ITEM] },
+      doubledRead: true
+    }
+
+    const heard = listenForWarnings()
+    try {
+      await mountPanel()
+      const row = rowElement(DOUBLED_READ.label)
+
+      // One row for the one read — and it is the declaration the field made, which is also the order the
+      // options route resolves a doubled name in (a `choice` field first, a `shownReads` entry second):
+      // one name is one read, and the field's is the one the parameter form fills from as well.
+      expect(row.querySelectorAll('.fact')).toHaveLength(1)
+      expect(factOf(DOUBLED_READ.label, FOLLOW_FIELD.label)).toContain('电棍的直播间')
+      // The second declaration is not drawn at all, so the row does not claim the read twice over.
+      expect(rowOf(DOUBLED_READ.label)).not.toContain(DOUBLED_SHOWN_LABEL)
+
+      // One ask for one read: the name is what the route is asked by, so a second ask would be this page
+      // asking one read as two facts.
+      expect(fieldsAskedFor(DOUBLED_READ.key)).toEqual([FOLLOW_FIELD.name])
+
+      // And no two rows landed on the same `fact-….` key, which is the trap `nspace-fragment.test.ts`
+      // pins for `NSpace`'s literal `key: 1`. **This one alone is not a red-before pin, and it says so**:
+      // with two rows both keyed `fact-pourRoom` it passed, because Vue looks for a colliding key only
+      // when the diff cannot take a fast path and a fact list that never changes takes one every time.
+      // What it catches is the collision reaching that path — the day the list gains or loses a row — and
+      // the control below is what shows the instrument hears Vue at all.
+      expect(heard.lines.filter(line => line.includes(DUPLICATE_KEYS))).toEqual([])
+    } finally {
+      heard.stop()
+    }
+  })
+
+  /**
+   * The instrument on its own, so the absence asserted above cannot be this file's silence.
+   *
+   * Vue says 「Duplicate keys found during update」 only when the diff cannot take one of its fast paths:
+   * a keyed list whose keys collide but whose children never change stays quiet — which is the case in
+   * the panel, where `shownReadsOf` is a function of the descriptor and the list of facts is therefore
+   * the same on every render. So the smallest list that does raise it is mounted here: three keyed
+   * children, two of them keyed alike, reordered so no prefix or suffix fast path applies.
+   */
+  it('hears Vue when a keyed list really does carry one key twice', async () => {
+    const first = { id: 11, text: '同一把钥匙的第一行' }
+    const second = { id: 11, text: '同一把钥匙的第二行' }
+    const third = { id: 33, text: '另一把钥匙的一行' }
+    const items = ref([first, second, third])
+
+    const host = document.createElement('div')
+    document.body.append(host)
+    hosts.push(host)
+
+    const heard = listenForWarnings()
+    try {
+      createApp({
+        render: () =>
+          h(
+            'div',
+            items.value.map(item => h('span', { key: item.id }, item.text))
+          )
+      }).mount(host)
+      await settle()
+
+      items.value = [third, first, second]
+      await settle()
+    } finally {
+      heard.stop()
+    }
+
+    expect(heard.lines.some(line => line.includes(DUPLICATE_KEYS))).toBe(true)
   })
 })

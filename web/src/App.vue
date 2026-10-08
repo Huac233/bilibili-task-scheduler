@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { GlobalThemeOverrides } from 'naive-ui'
-import { dateZhCN, NConfigProvider, NDialogProvider, NMessageProvider, zhCN } from 'naive-ui'
+import { dateZhCN, NConfigProvider, NDialogProvider, NMessageProvider, useThemeVars, zhCN } from 'naive-ui'
+import { defineComponent, watchEffect } from 'vue'
 
 /**
  * Root component.
@@ -37,10 +38,56 @@ const themeOverrides: GlobalThemeOverrides = {
     borderRadius: '5px'
   }
 }
+
+/**
+ * The row palette: the one place its seven names are declared.
+ *
+ * **Why it is declared here and not where the colours are drawn.** `ActionSettingsPanel.vue`'s
+ * stylesheet and `ActionOptionForm.vue`'s both read these names, and the form is mounted from two
+ * places — the panel, which had a `.panel` element to hang them on, and `TaskDetailView.vue`, which
+ * has none. A declaration inside either component is a palette with two homes, and the day one is
+ * reworded the same row is two greys. Declared once at the root, every page and every component below
+ * inherits them, which is what the hoist was for.
+ *
+ * **Why a component rather than this file's own setup.** `useThemeVars()` reads the nearest
+ * `NConfigProvider` by injection and answers with the library's own light defaults when there is none
+ * above it — and this component's setup runs *before* the provider its template renders. Six of the
+ * seven roles come out the same either way, so the mistake is silent; `--row-radius` is the one that
+ * betrays it, because this app overrides `borderRadiusSmall` to 6px against a 2px default
+ * (`web/tests/theme-tokens.test.ts` pins that difference). The reader below is a descendant of the
+ * provider, so it publishes the theme this app configures.
+ *
+ * **Why the root element rather than a wrapper.** Custom properties are inherited, so `<html>` reaches
+ * every element without a second node between `#app` and the shell — whose sticky footer is a flex
+ * column, and where the height in that chain sits is load-bearing (see `AppShell.vue`).
+ *
+ * `AppFooter.vue` reads the theme directly, for one quote and its link. It declares no names at all,
+ * so it is not a second home for these and is left as it is.
+ */
+const ThemeTokens = defineComponent({
+  name: 'ThemeTokens',
+  setup() {
+    const vars = useThemeVars()
+
+    watchEffect(() => {
+      const root = document.documentElement.style
+      root.setProperty('--row-title', vars.value.textColor1)
+      root.setProperty('--row-body', vars.value.textColor2)
+      root.setProperty('--row-quiet', vars.value.textColor3)
+      root.setProperty('--row-line', vars.value.borderColor)
+      root.setProperty('--row-surface', vars.value.actionColor)
+      root.setProperty('--row-danger', vars.value.errorColor)
+      root.setProperty('--row-radius', vars.value.borderRadiusSmall)
+    })
+
+    return () => null
+  }
+})
 </script>
 
 <template>
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="themeOverrides">
+    <ThemeTokens />
     <NMessageProvider>
       <NDialogProvider>
         <RouterView />

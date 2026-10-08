@@ -3,7 +3,15 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fetchNav } from '../../bilibili/auth.js'
 import { BiliHttp, BiliHttpError, DEFAULT_TIMEOUT_MS } from '../../bilibili/http.js'
 import { type LikeGate, LikeRefusal, likeGate, likeWithFallback } from '../../bilibili/like.js'
-import { fetchRoomInfo, isLive, RoomRefusedError, resolveRoom, sendDanmaku, WbiKeyStore } from '../../bilibili/live.js'
+import {
+  fetchAnchorName,
+  fetchRoomInfo,
+  isLive,
+  RoomRefusedError,
+  resolveRoom,
+  sendDanmaku,
+  WbiKeyStore
+} from '../../bilibili/live.js'
 import {
   fetchMedalPanel,
   fetchMedalTasks,
@@ -316,13 +324,26 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     throw error
   }
 
-  // The title is cosmetic — the room resolved, which is all the caller needs — so a
-  // failure here must not block creating the task.
+  // **The label, and why this is the read that fills it.** `TargetInfo.title` is what a person reads
+  // back: 「已解析：…」 beside the box they pasted into (`ActionSettingsPanel.vue`), and a task row's
+  // `targetTitle`. So it has to name something they recognise, and for a Room that is the Anchor. The
+  // two endpoints this resolve already talks to carry no user name at all — `room_init` answers room
+  // id, uid and status, `get_info` answers uid, title and the areas — and `get_info`'s `title` is the
+  // broadcast's **subject line**, which changes with the stream and is not a name: room 84074 read
+  // 「贴人」 while its Anchor is 「炫神_」, and filling this field from that is the defect this read
+  // replaces. The name lives in the payload the room's own page reads (`getInfoByRoom`,
+  // `anchor_info.base_info.uname`), so `fetchAnchorName` is where it comes from now. It **replaces**
+  // that title read rather than joining it: the name is the only fact this member wants, and the
+  // request count stays what it was.
+  //
+  // Cosmetic in the one sense that matters here — the room resolved, which is all the caller needs — so a
+  // failure must not block creating the task.
   let title = ''
   try {
-    title = (await fetchRoomInfo(http, room.room_id)).title
+    title = await fetchAnchorName(http, room.room_id)
   } catch {
-    // Ignored: a task with no title is still a task.
+    // Ignored: a task with no name is still a task, and an empty `title` is what the page already
+    // renders as 「目标 <room id>」.
   }
 
   return {
@@ -331,9 +352,12 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     key: String(room.room_id),
     title,
     anchorId: String(room.uid),
-    // Empty on purpose: Bilibili's room endpoints do not return the streamer's
-    // display name (it takes a separate profile call), and the code this replaced
-    // hardcoded the same empty string rather than inventing one.
+    // Empty, and for a different reason than this line used to give: this adapter *does* read the
+    // Anchor's display name now, but it belongs in `title` — the field the echo and a task row draw —
+    // and `anchorName` is the create form's second, smaller tag, which would then print one name
+    // twice. (The comment it replaces said no room endpoint carries the name and that it would take a
+    // separate profile call. The first half was true of the two endpoints this member talked to, and
+    // false of the room page's own payload, which is where the name turned out to be.)
     anchorName: '',
     // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.
     liveStatus: room.live_status

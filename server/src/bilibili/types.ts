@@ -191,6 +191,44 @@ export type RoomInfo = z.infer<typeof roomInfoDataSchema>
  */
 export const roomInfoSchema = envelopedOptionalData(roomInfoDataSchema.nullable())
 
+/**
+ * `/xlive/web-room/v1/index/getInfoByRoom` — the payload the live room **page** itself reads.
+ *
+ * Declared for exactly one field, and that field is the whole reason the read exists:
+ * `anchor_info.base_info.uname` is the Anchor's display name. Neither endpoint a Room is looked up
+ * through carries a user name — `room_init` answers `room_id`/`short_id`/`uid`/`live_status` and
+ * `get_info` answers `uid`/`title`/areas — so neither of them is a source for this field at all, and
+ * a guess at one has no way to tell "no name" from "renamed".
+ *
+ * **The name sits one level deeper than a reference implementation's room type suggests.** The block
+ * that carries it is `anchor_info.base_info`, not `anchor_info`: a `uname` read straight off
+ * `anchor_info` is `undefined`, which is the kind of wrong answer that still looks like a value.
+ *
+ * Everything else this payload carries — the page's entire module tree, tens of KB of it — is left
+ * undeclared, for the reason `roomInitDataSchema` gives: an unused field declared turns an upstream
+ * change into a hard failure of a read whose whole job is a cosmetic name.
+ */
+export const anchorNameDataSchema = z.object({
+  anchor_info: z.object({
+    base_info: z.object({
+      uname: z.string()
+    })
+  })
+})
+
+/**
+ * The same envelope as the two room reads above, and for the same reason: the code has to survive the
+ * parse. This endpoint's own documented refusal is `19002000`（获取初始化数据失败）— a room it will not
+ * initialise — and a reader that demanded an anchor before reading the code would report a shape
+ * problem where Bilibili had named a state.
+ *
+ * A `data` that *is* present still has to carry the anchor block, also as above: a read that succeeds
+ * and says nothing about the anchor is a contract change, and the loud reading of it — `fetchAnchorName`
+ * throws, its caller keeps the task without a name — leaves a trace, where an optional block would
+ * quietly answer `''` for both states.
+ */
+export const anchorNameSchema = envelopedOptionalData(anchorNameDataSchema.nullable())
+
 /** Values of `live_status` across the room endpoints. */
 export const LiveStatus = {
   Offline: 0,

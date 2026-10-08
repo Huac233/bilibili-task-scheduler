@@ -229,7 +229,25 @@ interface Scenario {
    * sentence about the accounts is only supported by one of the two fixtures.
    */
   accountListEmpty?: boolean
+  /**
+   * Whether the options read is refused at the transport level, for the gift field alone.
+   *
+   * `choice` above is the route's *own* failure vocabulary — a 200 that says a source could not answer
+   * — and this is the third case, which that vocabulary cannot carry: a request that never came back.
+   * Only the form's own `catch` in `loadChoices` words it, and per field, because the sentence belongs
+   * to that field's read rather than to the page.
+   */
+  choiceFails?: boolean
 }
+
+/**
+ * The sentence a refused read is shown with, and it is a whole sentence on purpose.
+ *
+ * It is used in negative assertions — 「the empty list's sentence is not this one」 — so it has to be long
+ * enough that no two adjacent rendered strings can spell it out: this repository's own false red came
+ * from a four-digit code matched inside a timestamp beside a 「+100」, and `AGENTS.md` made the rule of it.
+ */
+const CHOICE_READ_REFUSED = '这次读礼物清单时请求没有回来，所以这一档读不到，重新打开一次参数试试。'
 
 interface RecordedRequest {
   readonly method: string
@@ -301,6 +319,10 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
     return { ok: true, tasks: scenario.carried ? [carrierTask(), ACCOUNT_TASK] : [ACCOUNT_TASK] }
   }
   if (route.endsWith('/api/action-settings/options')) {
+    // One field's read refused rather than answered: a rejection is the event the route has no
+    // vocabulary for, so what the form says about it comes from its own `catch` — the half a fixture
+    // that always answers a value cannot reach. The message is the sentence the form prints.
+    if (scenario.choiceFails === true && query(url, 'field') === GIFT_FIELD.name) throw new Error(CHOICE_READ_REFUSED)
     return { ok: true, field: 'giftAllowlist', source: 'douyu.backpack', choice: scenario.choice }
   }
   if (route.endsWith('/api/action-settings/workflow')) {
@@ -1036,12 +1058,53 @@ describe('an action’s parameters', () => {
     await clickInRow('亲密度任务', '设置参数')
 
     expect(text()).not.toContain('网页会话已失效')
+    // The refused read's own sentence, which this answer is not: the two are one blank space with two
+    // readings, and the whole reason `ChoiceView` is a union rather than a list that can be empty.
+    expect(text()).not.toContain(CHOICE_READ_REFUSED)
     expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(0)
     // An empty answer is an answer: `ok` with no items is the source saying it holds nothing, and
     // 「正在读取可选项…」 left a person waiting for a list that had already arrived. It is also not the
     // failure's red sentence — 「读到了但是空的」 and 「读不到」 are different readings of one blank space.
     expect(text()).toContain('一个可选项都没有')
     expect(text()).not.toContain('正在读取可选项')
+    // …and it is drawn as an answer rather than as a failure. The template reads the same union for the
+    // colour (`note-empty` for `ok`, `missing` for everything else, 「only a failure is coloured as one」),
+    // and no test held that half before these two.
+    const note = document.querySelector<HTMLElement>('.param-form .note-empty')
+    expect(note?.textContent).toContain('一个可选项都没有')
+    expect(document.querySelectorAll('.param-form .missing')).toHaveLength(0)
+  })
+
+  /**
+   * A refused read is a sentence, and never an empty list — including when the refusal is that the
+   * request never came back.
+   *
+   * The two tests above cover the route's own answers: `unavailable` (a 200 that says a source could
+   * not answer) and `ok` with nothing in it. This is the third case, and it is the one the route has no
+   * vocabulary for — a rejection, which the form's own `catch` in `loadChoices` is the only thing that
+   * words. No fixture ever made that request fail, so a `catch` answering `{ kind: 'ok', items: [] }`
+   * had no test to fail — the same idiom as the panel's own per-read catch, and the twin of the pin
+   * `account-level-facts.test.ts` holds for it.
+   */
+  it('says a choice read that failed failed, and does not draw it as an empty list', async () => {
+    scenario = { carried: false, finished: 0, choice: { kind: 'ok', items: [GIFT_ITEM] }, choiceFails: true }
+    await mountPanel()
+    await clickInRow('亲密度任务', '设置参数')
+
+    // The failure's own words, and never the empty answer's.
+    expect(text()).toContain(CHOICE_READ_REFUSED)
+    expect(text()).not.toContain('一个可选项都没有')
+    // Nothing is drawn as a control either: a list of nothing and a refused read would look alike.
+    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(0)
+    // It is drawn as a failure — the red is half of 「读不到」 — and as the same sentence the form shows
+    // for a source that answered `unavailable`, because a refused request and a source that could not
+    // answer are one reading at this end of the wire.
+    const note = document.querySelector<HTMLElement>('.param-form .missing')
+    expect(note?.textContent).toContain(CHOICE_READ_REFUSED)
+    expect(document.querySelectorAll('.param-form .note-empty')).toHaveLength(0)
+    // And the field itself is still on the screen with its own label, so a refused read is reported on
+    // the field rather than taking the form down — the value a person already had is still saveable.
+    expect(text()).toContain(GIFT_FIELD.label)
   })
 
   /**

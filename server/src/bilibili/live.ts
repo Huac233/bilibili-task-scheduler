@@ -1,6 +1,8 @@
 import { fetchNav } from './auth.js'
 import { type BiliHttp, BiliHttpError } from './http.js'
+import { ROOM_INFO_BY_ROOM_URL } from './medal.js'
 import {
+  anchorNameSchema,
   type DanmuInfo,
   danmuInfoSchema,
   LiveStatus,
@@ -15,8 +17,8 @@ import {
 import { encodeWbi, extractWbiKeys, type WbiKeys } from './wbi.js'
 
 /**
- * Live-room operations: resolving room ids, reading live status, and sending
- * danmaku.
+ * Live-room operations: resolving room ids, reading live status, reading an
+ * anchor's name, and sending danmaku.
  *
  * The write path is the interesting one. Bilibili requires three things to
  * accept a danmaku:
@@ -168,6 +170,49 @@ export async function fetchRoomInfo(http: BiliHttp, roomId: number): Promise<Roo
   }
 
   return room
+}
+
+/**
+ * The Anchor's display name for one room — the one read that answers it.
+ *
+ * **The endpoint is `medal.ts`'s constant, imported rather than spelled again.** It is one endpoint
+ * with two readers now: that module reads `data.like_info_v3` for the like gate, this one reads
+ * `data.anchor_info.base_info.uname` for a Room's label. A second literal here would be the same
+ * fact with two homes, and the day Bilibili moves the path exactly one of them would break — the
+ * module that no longer reads it is the one that would go unnoticed. That module's header also
+ * records the endpoint's own contract, which this read relies on and states nowhere else: **no WBI
+ * and no csrf are needed**, so it answers the cookie-less client `resolveTarget` runs on.
+ *
+ * **Named for the room, not for a user id, and that is the design decision here.** A name can be had
+ * from a profile call as well (`live_user/v1/UserInfo/get_anchor_in_room?roomid=`, whose
+ * `data.info.uname` the 直播 field tables list), and a caller that already holds a uid could ask
+ * `live_user/v1/Master/info`. Neither is chosen: a caller that is *resolving a room* holds the room
+ * id, and this is the payload the room's own page reads, so the name a room reports is the name
+ * this build shows. It also keeps `resolveTarget` at one read beyond the room lookup.
+ *
+ * `roomId` is the real room id, never the number in a pasted URL: `room_init` maps the short id to
+ * it, and every caller here holds the real one.
+ *
+ * A throw is transport or a refusal, exactly as `fetchRoomInfo`'s is — the two share the idiom
+ * rather than a helper because the reader, the sentence and the key they take all differ. This read
+ * is decorative to its only caller, which decides for itself what a failure means.
+ */
+export async function fetchAnchorName(http: BiliHttp, roomId: number): Promise<string> {
+  const url = `${ROOM_INFO_BY_ROOM_URL}?room_id=${String(roomId)}`
+  // The code first, then the anchor, the way both readers above read theirs: this endpoint's refusal is
+  // a code (`19002000` 获取初始化数据失败), and a reader that demanded an anchor before reading it would
+  // report a shape problem where Bilibili had named a state.
+  const response = await http.getJson(url, anchorNameSchema)
+  if (response.code !== 0) {
+    throw new RoomRefusedError(
+      response.code,
+      http.redact(refusalWordsOf(response.code, response.msg, response.message))
+    )
+  }
+
+  // A room that reports no name answers `''`, which is what "nothing to say" has to look like: the
+  // caller's fallback is about there being no name, and an invented one would read as a real answer.
+  return response.data?.anchor_info.base_info.uname ?? ''
 }
 
 /**

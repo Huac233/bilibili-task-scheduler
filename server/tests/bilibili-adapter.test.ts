@@ -12,7 +12,8 @@ import { ActionKey, TaskAction } from '../src/repo/tasks.js'
  * The Bilibili adapter, tested at the seam.
  *
  * The network is mocked at exactly the boundaries this adapter has: `live.js` —
- * one HTTP call each in `resolveRoom` / `fetchRoomInfo` / `sendDanmaku` — and the
+ * one HTTP call each in `resolveRoom` / `fetchAnchorName` / `fetchRoomInfo` /
+ * `sendDanmaku` — and the
  * global `fetch`, which the session check (`auth.ts`'s `fetchNav`) really goes
  * through. The adapter itself is the real one, and so is `navSchema`, which is why
  * the rejection-envelope case below can pin the schema's optional `data` rather
@@ -31,8 +32,9 @@ import { ActionKey, TaskAction } from '../src/repo/tasks.js'
  * Nothing here touches a real account or a real room.
  */
 
-const { resolveRoomMock, fetchRoomInfoMock, sendDanmakuMock, fetchMock } = vi.hoisted(() => ({
+const { resolveRoomMock, fetchAnchorNameMock, fetchRoomInfoMock, sendDanmakuMock, fetchMock } = vi.hoisted(() => ({
   resolveRoomMock: vi.fn(),
+  fetchAnchorNameMock: vi.fn(),
   fetchRoomInfoMock: vi.fn(),
   sendDanmakuMock: vi.fn(),
   fetchMock: vi.fn()
@@ -45,6 +47,7 @@ vi.mock('../src/bilibili/live.js', async importOriginal => {
   return {
     ...actual,
     resolveRoom: resolveRoomMock,
+    fetchAnchorName: fetchAnchorNameMock,
     fetchRoomInfo: fetchRoomInfoMock,
     sendDanmaku: sendDanmakuMock
   }
@@ -62,6 +65,15 @@ const CREDENTIALS = JSON.stringify({
 
 /** A blob with no cookie jar: unreadable, and fixable only by a person re-binding. */
 const UNREADABLE_CREDENTIALS = '{}'
+
+/**
+ * The Anchor's name, as the read that answers it returns one.
+ *
+ * The reported case's own pair, and the reason this file has a name fixture at all: room `84074`'s
+ * 标题 was 「贴人」 — the broadcast's subject line — while the Anchor is 「炫神_」, and the label beside
+ * the box the person pasted into named the wrong one of the two.
+ */
+const ANCHOR_NAME = '炫神_'
 
 const NAV_PATH = '/x/web-interface/nav'
 
@@ -128,6 +140,7 @@ beforeEach(() => {
 
   answerNav({ code: 0, data: { isLogin: true, mid: 987654, uname: 'tester' } })
   resolveRoomMock.mockResolvedValue(room(1))
+  fetchAnchorNameMock.mockResolvedValue(ANCHOR_NAME)
   fetchRoomInfoMock.mockResolvedValue({
     room_id: 22637261,
     short_id: 0,
@@ -517,17 +530,62 @@ describe('resolveTarget', () => {
     const target = await bilibiliPlatform.resolveTarget(input)
 
     expect(resolveRoomMock).toHaveBeenCalledWith(expect.anything(), expected)
+    // The name is asked of the room the paste maps to, not of the number that was pasted:
+    // `getInfoByRoom` takes the real id, exactly as every write endpoint does.
+    expect(fetchAnchorNameMock).toHaveBeenCalledWith(expect.anything(), 22637261)
     // The real room id, not the number that was pasted: every write endpoint wants
     // the id `room_init` maps to.
     expect(target).toEqual({
       key: '22637261',
-      title: '标题',
+      // The label a person reads, which is a **name**: 「已解析：炫神_」 beside the input, and a task
+      // row's `targetTitle`. Never the room's 标题 — see the case below, where both are on offer.
+      title: ANCHOR_NAME,
       anchorId: '12345',
-      // Empty on purpose: the room endpoints do not carry the streamer's display
-      // name, and inventing one would be worse than admitting it is unknown.
+      // Empty, and now for a different reason than it used to be: this adapter *does* read the
+      // Anchor's name (into `title`, which is the field both the echo and a task row draw), and
+      // `anchorName` is the create form's second, smaller tag — filling both would print one name
+      // twice on that form.
       anchorName: '',
       liveStatus: 1
     })
+  })
+
+  /**
+   * The reported defect, with the owner's own strings.
+   *
+   * Room `84074`'s 标题 was 「贴人」 while its Anchor is 「炫神_」, and the 「已解析：…」 line beside the box
+   * he pasted into named the 标题. `toBe` rather than `not.toContain('贴人')` on purpose: equality says
+   * the subject line never reached the field, and says it without a two-character marker whose
+   * absence a fixture's own data could produce by accident.
+   */
+  it('names the Anchor rather than the room’s 标题, which the room payload also carries', async () => {
+    resolveRoomMock.mockResolvedValue({ room_id: 84074, short_id: 0, uid: 12345, live_status: 1, live_time: 1 })
+
+    const target = await bilibiliPlatform.resolveTarget('84074')
+
+    expect(target.title).toBe(ANCHOR_NAME)
+    expect(target.key).toBe('84074')
+    // The read that answers the 标题 was *replaced*, not joined: a resolve asks the Platform for the
+    // name and nothing else beyond the room lookup, so the count of requests this path makes is
+    // unchanged.
+    expect(fetchRoomInfoMock).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A name that is empty is not a name, and the field says so.
+   *
+   * The page renders an empty `title` as 「目标 <room id>」 (`ActionSettingsPanel.vue`'s `echoOf`), which
+   * is the fallback this field has always had for a room it could not name. Substituting the 标题 here
+   * is the one thing that must not happen: that is the string the reported defect put in this field,
+   * and a person cannot tell it from a name.
+   */
+  it('leaves the label empty when the room reports no Anchor name at all', async () => {
+    fetchAnchorNameMock.mockResolvedValue('')
+
+    const target = await bilibiliPlatform.resolveTarget('22637261')
+
+    expect(target.title).toBe('')
+    expect(target.key).toBe('22637261')
   })
 
   /**
@@ -616,12 +674,14 @@ describe('resolveTarget', () => {
     await expect(bilibiliPlatform.resolveTarget('22637261')).rejects.toBeInstanceOf(BiliHttpError)
   })
 
-  it('does not let a cosmetic title failure block a task', async () => {
-    fetchRoomInfoMock.mockRejectedValue(new Error('get_info failed for 22637261: code -352'))
+  it('does not let a cosmetic name read block a task, and leaves the field empty rather than filled', async () => {
+    fetchAnchorNameMock.mockRejectedValue(new Error('getInfoByRoom answered code -352'))
 
     const target = await bilibiliPlatform.resolveTarget('22637261')
 
     expect(target.key).toBe('22637261')
+    // `''` is the state the page renders as 「目标 22637261」: a name this build could not read is not a
+    // reason to put the room's 标题 in a field a person reads as a name.
     expect(target.title).toBe('')
   })
 })
