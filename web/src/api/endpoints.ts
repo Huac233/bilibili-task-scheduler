@@ -16,6 +16,7 @@ import type {
   SendLog,
   StoredRule,
   SystemEvent,
+  TargetFactRead,
   TargetInfo,
   Task,
   TaskEditPatch,
@@ -160,6 +161,30 @@ export const actionSettingApi = {
       params: { platform, actionKey }
     })
     return data.workflow
+  },
+
+  /**
+   * What one Target's own panel says about it, for the action aimed at that Target.
+   *
+   * The half the preferences page structurally cannot show, and the design's split read from the other
+   * side: that page reads for an *account* — the route behind a choice source is handed an account id
+   * and no target — while a Room's 形象, the bait in use and the window the service reports belong to
+   * one Room, which only the page in front of a Task knows.
+   *
+   * Failure is a value here too, and so is the absence of a read: `unavailable` carries the sentence,
+   * and `none` says this build serves no such read for that action at all — which a page answers by
+   * drawing nothing, because a failure sentence over a read nobody wired would be a lie about a Room.
+   */
+  async targetFacts(
+    platform: string,
+    actionKey: string,
+    accountId: number,
+    targetKey: string
+  ): Promise<TargetFactRead> {
+    const { data } = await http.get<{ ok: boolean; facts: TargetFactRead }>('/api/action-settings/target-facts', {
+      params: { platform, actionKey, accountId, targetKey }
+    })
+    return data.facts
   }
 }
 

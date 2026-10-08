@@ -12,6 +12,7 @@ import {
   type ActionOptionField,
   flattenOptions
 } from '../types/api.js'
+import { itemLabel, missingReason, noAccountReason } from './choice-notes.js'
 
 /**
  * One action's parameters, built out of the action's own field list.
@@ -131,12 +132,7 @@ async function loadChoices(): Promise<void> {
     if (field.name in choices.value || pendingReads.has(field.name)) continue
 
     if (props.accountId === null) {
-      choices.value[field.name] = {
-        kind: 'unavailable',
-        reason: props.accountsLoaded
-          ? '这个平台还没有绑定账号，读不到可选项。'
-          : '账号列表这次没读到，所以不知道这个平台有没有绑定账号，可选项也就读不到。'
-      }
+      choices.value[field.name] = { kind: 'unavailable', reason: noAccountReason(props.accountsLoaded) }
       continue
     }
 
@@ -177,38 +173,12 @@ function itemsOf(field: ActionOptionField): readonly ActionChoiceItem[] {
 }
 
 /**
- * What to say where a choice field has no list, in the words of the answer that produced it.
+ * One item's line, and what to say where a list has none — both from `./choice-notes.js`.
  *
- * **Three states, and only the first one is "loading".** `null` is a read still in flight;
- * `unavailable` carries the source's own sentence about why it could not answer; and `ok` with no
- * items is a *successful* read of a source that holds nothing. Drawing that last one as 「正在读取可选项…」
- * left a person waiting for a list that had already arrived — and it collapsed exactly the distinction
- * the route's `ChoiceView` union was built to carry: an account with nothing in it and a read that
- * failed are different sentences, and a form that gives them one rendering is telling somebody their
- * account is empty when the truth is that the session expired (or the reverse).
+ * They are imported rather than written here because the preferences page draws the same two
+ * readings above the form, out of the same read: this module is where those sentences have their one
+ * home, so the item beside a checkbox and the item in the displayed list cannot be worded apart.
  */
-function missingReason(field: ActionOptionField): string {
-  const choice = choiceOf(field)
-  if (choice === null) return '正在读取可选项…'
-  if (choice.kind === 'unavailable') return choice.reason
-  return '这个来源这次读到了，但里面一个可选项都没有。'
-}
-
-/**
- * One item's line: the name, how many the account holds, and the Platform's own marking.
- *
- * `costsSomething === true` is the only marking printed, and 「平台标了付费道具」 is the whole of what
- * is claimed. A `false` prints nothing rather than 「免费」: the Platform's own flags on this payload
- * do not separate free from paid — which is exactly why a person has to choose this list by hand —
- * so the form must not turn "no marking" into a promise about the price.
- */
-function itemLabel(item: ActionChoiceItem): string {
-  const parts: string[] = []
-  if (item.count !== null && item.count > 0) parts.push(`持有 ${String(item.count)}`)
-  if (item.costsSomething === true) parts.push('平台标了付费道具')
-  return parts.length === 0 ? item.label : `${item.label}（${parts.join('、')}）`
-}
-
 function checkedOf(field: ActionOptionField): string[] {
   const value = values.value[field.name]
   return Array.isArray(value) ? value : []
@@ -319,7 +289,7 @@ async function save(): Promise<void> {
             source. `missingReason` holds the sentences; only a failure is coloured as one.
           -->
           <div v-else :class="choiceOf(field)?.kind === 'ok' ? 'note-empty' : 'missing'">
-            {{ missingReason(field) }}
+            {{ missingReason(choiceOf(field)) }}
           </div>
         </div>
 
@@ -344,15 +314,22 @@ async function save(): Promise<void> {
     <!--
       What a list does, drawn only where a list is (`hasChoiceField`).
 
-      This note used to say the opposite of the truth — that the repository had never captured a gift
-      request and that ticking the list therefore sent nothing — while the adapter this same field
-      feeds had a captured request in `server/tests/captured/` and posted it for real. What a list
-      can honestly promise is what the code reads it as: the ids ticked are the items the action
-      **may** act on. Whether it acts is the switch beside it, which is a different control with a
-      different answer.
+      **The words are the list's, not one action's.** This note used to say 「清单决定哪些可以送；…这份清单不会
+      让任何一件东西出去」, which was true while a gift allowlist was the only choice field in the build and
+      became a different action's private fact the moment an action declared a list of *rooms* to pour into:
+      「送」 and 「东西」 are about sending gifts, and this form draws every action's fields without knowing
+      which action it is filling in. What is true of every list is what the code reads it as — the ticked
+      values are what the action **may** act on, and whether it acts at all is the switch (`runner.ts` reads
+      the switch before it dispatches either executor and answers a shut one with `switchOffReport`) — so the
+      note says that, and the concrete meaning of *these* values stays where it belongs: the field's own
+      `help`, written by the action that reads it.
+
+      The other half of this note's history is below: it once claimed the repository had never captured a
+      gift request, while the adapter this same field feeds had one in `server/tests/captured/` and posted
+      it for real.
     -->
     <NAlert v-if="hasChoiceField" type="info" :bordered="false">
-      清单决定哪些可以送；动作开关决定到底送不送。开关关着的时候，这份清单不会让任何一件东西出去。
+      这份清单决定这个动作可以动哪些；动作开关决定它到底动不动。开关关着的时候，这个动作什么都不会做。
     </NAlert>
 
     <div class="actions">

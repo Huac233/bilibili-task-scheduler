@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ACTIVITY_SIGN_SUCCESS, classifyError } from '../src/platform/douyu/errors.js'
 import { douyuPlatform } from '../src/platform/douyu/index.js'
 import type { ActionOutcome, PlatformAccount } from '../src/platform/types.js'
 import { ActionKey } from '../src/repo/tasks.js'
@@ -62,6 +64,8 @@ interface Recorded {
 interface Scripted {
   readonly json: unknown
   readonly setCookie?: string
+  /** A reply as the service wrote it, byte for byte. Wins over `json` when present. */
+  readonly text?: string
 }
 
 const CSRF_PATH = '/h5nc/csrf/getCsrfCookie'
@@ -103,6 +107,19 @@ let script: Script
 /** The pool's own numbers, as the live run of 2026-10-08 reported them. */
 const MEASURED_POOL = { ywTotal: 38400, joinTotal: 192, clockLeftTime: 107999 }
 
+/**
+ * The one `doSign` body this repo holds from the service, verbatim.
+ *
+ * Read out of `captured/` rather than retyped as an object literal, and that is the point of the
+ * directory: this body carries a field no version of this code models (`redirectUrl`), which is exactly
+ * what a hand-written stub loses. `.gitattributes` keeps the file byte-exact (`-text`), so what the stub
+ * answers below is what Douyu answered.
+ */
+const CAPTURED_SIGN_SUCCESS = readFileSync(
+  new URL('./captured/douyu-activity-sign-31200.json', import.meta.url),
+  'utf8'
+)
+
 function freshScript(): Script {
   return {
     csrf: { json: { error: 0, msg: 'ok' } },
@@ -115,7 +132,8 @@ function freshScript(): Script {
     // anything out of it.
     clock: { json: { error: 0, data: { nobodyHasModelledThis: 1 }, msg: '' } },
     activityStatus: { json: { error: 0, data: { todaySigned: 0 }, msg: '' } },
-    activitySign: { json: { error: 31200, msg: '签到成功!', data: {} } }
+    // The activity's own success answer, as captured on 2026-10-09 03:20:35 — not a paraphrase of it.
+    activitySign: { json: {}, text: CAPTURED_SIGN_SUCCESS }
   }
 }
 
@@ -154,7 +172,9 @@ async function fetchStub(input: string | URL, init?: RequestInit): Promise<Respo
   const responseHeaders = new Headers({ 'content-type': 'application/json' })
   if (answer.setCookie !== undefined) responseHeaders.set('set-cookie', answer.setCookie)
 
-  return new Response(JSON.stringify(answer.json), { status: 200, headers: responseHeaders })
+  // A captured reply goes back as the bytes it arrived as; only a made-up one is serialised here.
+  const body = answer.text ?? JSON.stringify(answer.json)
+  return new Response(body, { status: 200, headers: responseHeaders })
 }
 
 beforeEach(() => {
@@ -235,6 +255,47 @@ describe('the activity sign-in gate', () => {
 
     expect(sentTo(ACTIVITY_SIGN_PATH)).toHaveLength(1)
     expect(outcome).toMatchObject({ outcome: 'done', code: '31200', failure: 'none' })
+  })
+
+  it('takes the captured 31200 as today’s signature, and reads no reward out of it', async () => {
+    const outcome = await outcomeOf([ActionKey.ActivitySign], BEFORE_WINDOW)
+
+    // The name is asserted through the constant rather than as a bare number, so the reading this
+    // test pins is the one the code states. It moved once: `31200` was named for 「签到成功无礼包」
+    // (the page's enum entry), and the capture settled the other direction — the service's own `msg`
+    // is 「签到成功!」 and the same second's ledger entry is 「签到礼包」. So the code means the
+    // signature landed, and `classifyError` parks the day on it because there is nothing left to do.
+    expect(outcome).toMatchObject({ outcome: 'done', failure: 'none' })
+    expect(outcome.code).toBe(String(ACTIVITY_SIGN_SUCCESS))
+    expect(classifyError(ACTIVITY_SIGN_SUCCESS)).toBe('action_stop')
+
+    // And the body is still not a receipt: `data: {}` is what the capture answered for this endpoint,
+    // so the 20 积分 that did land is a fact from the ledger — a read this action does not make. A
+    // detail naming a figure would be inventing one.
+    expect(outcome.detail).not.toMatch(/积分|礼包/)
+  })
+
+  it('sends an empty csrfToken and no cookie — the shape a live run has signed with, not the page’s', async () => {
+    await reconcile([ActionKey.ActivitySign], BEFORE_WINDOW)
+
+    const sign = onlyRequestTo(ACTIVITY_SIGN_PATH)
+
+    // Deliberately *not* the captured request's shape, and the difference is recorded rather than
+    // drifting: the page mints a token first (`POST /japi/carnival/nc/common/generateCsrf` answers
+    // `Set-Cookie: cvl_csrf_token` with `Max-Age=300`) and then sends it in **both** places — the cookie
+    // header and this field. This build holds no web session and sends the field empty with no cookie,
+    // which is the shape the 2026-10-08 ledger entry (`签到礼包 +20`) is attributed to.
+    expect(sign.body).toBe('csrfToken=&signAlias=20250521OPFOY_qd2&useJiYan=false')
+    expect(sign.cookie).toBeNull()
+    expect(sign.headers).toEqual([
+      'accept',
+      'content-type',
+      'origin',
+      'referer',
+      'token',
+      'user-agent',
+      'x-requested-with'
+    ])
   })
 
   it('skips the write entirely when today is already signed', async () => {

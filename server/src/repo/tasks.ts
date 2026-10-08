@@ -70,7 +70,16 @@ export const ActionKey = {
    * 顺带算完成任务），这个只读服务端报的任务清单、只结算不花钱的那部分。见 `platform/douyu/index.ts`
    * 里它的长注。
    */
-  IntimacyTasks: 'intimacy_tasks'
+  IntimacyTasks: 'intimacy_tasks',
+  /**
+   * 把即将过期的免费道具送进一个指定直播间。
+   *
+   * **它必须在这里，而且是这条规则唯一的一次**：adapter 的每一个动作都由这个表命名，清仓的
+   * 收件房间来自偏好设置而不是任务的目标（`needsTarget: false`），所以这条映射是它被调度器
+   * 指名、被 `action_settings`（键是 (人, 平台, 动作)）存下参数的唯一途径。见
+   * `platform/douyu/index.ts` 里它自己的长注。
+   */
+  Clearout: 'clearout_props'
 } as const
 export type ActionKey = (typeof ActionKey)[keyof typeof ActionKey]
 

@@ -17,14 +17,17 @@ import {
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { describeError } from '../api/client.js'
-import { taskApi } from '../api/endpoints.js'
+import { actionSettingApi, taskApi } from '../api/endpoints.js'
+import ActionOptionForm from '../components/ActionOptionForm.vue'
 import ActionRecordList from '../components/ActionRecordList.vue'
 import TaskEditDialog from '../components/TaskEditDialog.vue'
 import { usePlatformStore } from '../stores/platform.js'
 import {
   type Account,
+  type ActionDescriptor,
   type ActionLog,
   type ActionLogDay,
+  type ActionOptionField,
   type ActionOutcome,
   actionLogRows,
   describeLiveStatus,
@@ -36,6 +39,7 @@ import {
   type SendLog,
   TASK_STATUS_LABEL,
   TASK_STATUS_TAG,
+  type TargetFactRead,
   TaskAction,
   type TaskWithProgress
 } from '../types/api.js'
@@ -124,6 +128,91 @@ function actionLabel(value: TaskWithProgress): string {
 function targetLabel(value: TaskWithProgress): string {
   if (value.targetTitle !== '') return value.targetTitle
   return value.targetKey !== '' ? `目标 ${value.targetKey}` : '账号自身'
+}
+
+/**
+ * The Action's own catalogue entry — the source of both its name and the fields it reads.
+ *
+ * Null while the catalogue is on its way, and for an action a newer build wrote that this one cannot
+ * name. The parameters card below is drawn only once this is known, because a form is built out of
+ * the field list and nothing may be invented for one that has no declaration: an empty form would
+ * read as "there is something here you cannot see".
+ */
+const descriptor = computed<ActionDescriptor | null>(() =>
+  task.value === null ? null : catalog.descriptorOf(task.value.platform, task.value.actionKey)
+)
+
+/**
+ * The parameters, and **the one thing this page must not do with them**.
+ *
+ * They belong to the *Action*: the store is `action_settings`, keyed by (person, platform, action), so
+ * two Tasks naming one action run with one set of values. This page offers them for editing because
+ * this is where a person is standing when a value turns out to be wrong — and it offers **these**
+ * values, through the store, never a copy on the Task. A copy would be one fact with two homes, and
+ * the second home is the one nobody updates: the run reads `action_settings`.
+ */
+const optionFields = computed<readonly ActionOptionField[]>(() => descriptor.value?.optionFields ?? [])
+
+/**
+ * What is stored for this Task's action, as the parameter form is handed it.
+ *
+ * The fallback for an action nothing is stored for is the store's shared constant; `optionsOf`'s own
+ * note says why a shared reference rather than a fresh `{}` (the form watches this value). The switch
+ * the write carries is read from the same store — and it is the server's own answer, because a
+ * descriptor is only in hand once the catalogue and the switches landed together.
+ */
+function storedOptionsOf(current: TaskWithProgress): unknown {
+  return catalog.optionsOf(current.platform, current.actionKey)
+}
+
+/**
+ * The facts of this Task's Target, or `null` while there is nothing to show.
+ *
+ * **`none` never reaches this ref.** An action this build serves no read for draws no card at all, and
+ * the route is the only thing that knows which actions those are: `TargetFactRegistry.read` answers
+ * `null` for them and the route turns that into `none`, so the distinction is made where the knowledge
+ * is rather than guessed at here.
+ */
+/**
+ * What this page's card can hold: the route's answer with the one member that draws nothing removed.
+ *
+ * Named rather than left as `TargetFactRead`, and that removal is the invariant `loadTargetFacts`
+ * keeps: `none` means this build serves no read for that action, and no card is drawn for it at all —
+ * so a page that could hold `none` would have a branch drawing a failure sentence over a read nobody
+ * wrote, which is a claim about a Room that nothing established.
+ */
+type ShownFacts = Exclude<TargetFactRead, { readonly kind: 'none' }>
+
+const targetFacts = ref<ShownFacts | null>(null)
+
+/**
+ * Reads what that Room's own panel says, for the Room this Task carries.
+ *
+ * **A Task with no Target draws nothing and asks nothing**: the read behind these facts is a per-Room
+ * read, and an account-scoped action has no Room to read. That is the same discriminator the design
+ * splits its two pages by — read here from the Task's own `targetKey`, because this page holds one
+ * Task rather than a catalogue entry.
+ *
+ * A request that never landed is reported in the read's own terms (`unavailable`), because the answer
+ * that would have distinguished "no read for this action" from "the read failed" is the one that did
+ * not arrive — and the sentence names the read rather than the Room or the action, so it stays true
+ * whichever of the two it was.
+ */
+async function loadTargetFacts(current: TaskWithProgress): Promise<void> {
+  targetFacts.value = null
+  if (current.targetKey === '') return
+
+  try {
+    const read = await actionSettingApi.targetFacts(
+      current.platform,
+      current.actionKey,
+      current.accountId,
+      current.targetKey
+    )
+    targetFacts.value = read.kind === 'none' ? null : read
+  } catch (cause: unknown) {
+    targetFacts.value = { kind: 'unavailable', reason: `这个目标的实情这次没读到：${describeError(cause)}` }
+  }
 }
 
 /**
@@ -265,6 +354,12 @@ async function load(): Promise<void> {
     loading.value = false
   }
 
+  // The Target's own facts, and only for a Task that carries one: the read behind them is about one
+  // Room. It is a read of its own rather than part of the detail above, because it is a live look at a
+  // Platform and the page's own configuration is the database's answer — a failure on this side must
+  // not take the page down with it.
+  if (task.value !== null) await loadTargetFacts(task.value)
+
   // Send attempts are the only thing `send_logs` holds; a reconcile task would pay for a query whose
   // answer is always empty.
   if (task.value?.action !== TaskAction.Send) return
@@ -292,6 +387,9 @@ watch(taskId, () => {
   account.value = null
   logs.value = []
   logsError.value = ''
+  // The address is a different Room's page, so the previous Room's facts must not stand for one frame
+  // under a heading that says they are this Task's.
+  targetFacts.value = null
   void load()
 })
 </script>
@@ -340,6 +438,87 @@ watch(taskId, () => {
         </NDescriptions>
 
         <NAlert v-if="task.lastError !== ''" type="error" class="mt">{{ task.lastError }}</NAlert>
+      </NCard>
+
+      <!--
+        The action's own parameters, and the reason they may be edited from here at all.
+
+        **Whose they are is stated, not implied.** They live in `action_settings` under (person,
+        platform, action), so a write here moves every Task naming this action — which is exactly what
+        the note says, and the note is the whole of what makes an in-place write honest. What the page
+        does *not* do is copy them onto the Task: one home for one value, and it is the home the run
+        reads.
+
+        This card is drawn whenever the catalogue knows the action, so the way through to the
+        preferences page exists for every Task — including one whose action reads nothing, where it
+        says so rather than drawing an empty form.
+      -->
+      <NCard v-if="descriptor !== null" title="这个动作的参数">
+        <NSpace vertical :size="12">
+          <div v-if="optionFields.length > 0" class="hint">
+            这个参数属于<strong>动作</strong>，不只属于这条任务——改它，你其他几条同动作的任务也跟着变。
+          </div>
+          <div v-else class="hint">这个动作没有可设置的参数。</div>
+
+          <!--
+            The same form the preferences page draws, over the same store — handed the Task's own
+            `accountId` rather than one read off the accounts list (this page never reads that list,
+            and the Task's row always carries the id), and `accounts-loaded` as `true` because the
+            flag is consulted only when there is no id at all. A Task whose account row is gone is
+            answered by the route's own 「账号不存在」, which is a true sentence about this page's
+            situation rather than a claim about a list nobody read.
+          -->
+          <ActionOptionForm
+            v-if="optionFields.length > 0"
+            :platform-key="task.platform"
+            :descriptor="descriptor"
+            :account-id="task.accountId"
+            :accounts-loaded="true"
+            :stored-options="storedOptionsOf(task)"
+          />
+
+          <!-- No `@saved` handler on purpose: the write lands in the store this form re-seeds from,
+               and nothing else on this page is built out of the stored options. -->
+
+          <NButton size="small" @click="router.push({ name: 'action-settings' })">去偏好设置</NButton>
+        </NSpace>
+      </NCard>
+
+      <!--
+        The Target's own facts — the half of the design's split that belongs to this page.
+
+        The heading says 「这个目标的实情」 and the note beside it says why they are here rather than on
+        the preferences page: that page reads for an *account*, and the route behind a choice source is
+        handed an account id and no target, so it has no Room to ask about. This page has one, from the
+        address, and that is the whole of the reason the two pages show different things.
+
+        Two answers reach this card and a third never does: `ok` draws the facts, `unavailable` draws
+        the sentence (the same refusal the read's own `describeError` gave), and `none` — an action this
+        build serves no read for — leaves the card undrawn, because a failure sentence over a read
+        nobody wrote would be a claim about a Room that nothing established.
+      -->
+      <NCard v-if="targetFacts !== null" title="这个目标的实情">
+        <NSpace vertical :size="8">
+          <div class="hint">
+            这些是这条任务的目标自己的实情：偏好设置页是按账号读的，它手上没有直播间，所以这些事实只在这一页出现。
+          </div>
+
+          <NSpace v-if="targetFacts.kind === 'ok' && targetFacts.items.length > 0" vertical :size="4">
+            <div v-for="fact in targetFacts.items" :key="`fact-${fact.name}`" class="fact-row">
+              <span class="fact-name">{{ fact.label }}</span>
+              <span class="fact-value">{{ fact.value }}</span>
+            </div>
+          </NSpace>
+
+          <!-- A read that landed and holds nothing is an answer, and the third of the three readings
+               a blank can be: nothing forces a Platform to report a fact about a Room, and drawing
+               nothing over it would leave a person unable to tell it from a read that failed. -->
+          <div v-else-if="targetFacts.kind === 'ok'" class="hint">
+            这次读到了，但这个动作在这个目标上没有可显示的实情。
+          </div>
+
+          <div v-else class="err">{{ targetFacts.reason }}</div>
+        </NSpace>
       </NCard>
 
       <NCard size="small" title="任务操作">
@@ -577,6 +756,23 @@ watch(taskId, () => {
   gap: 10px;
   font-size: 13px;
   padding: 2px 0;
+}
+
+.fact-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.fact-name {
+  width: 112px;
+  flex-shrink: 0;
+  color: #888;
+}
+
+.fact-value {
+  color: #333;
 }
 
 .time {

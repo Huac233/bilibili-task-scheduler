@@ -56,27 +56,49 @@ export const CLIENT_SIGN_ALREADY_SIGNED = 6305
 /**
  * `doSign`'s "today is already signed", and a success for the same reason `6305` is.
  *
- * The name is right and the **provenance is not a capture**: the activity page's own
- * error table reads `31015 = 今日已签到`. No `doSign` response body is kept in this
- * repo at all — the only two saved calls answered `9001 请求校验不通过` with a non-empty
- * `csrfToken` (§2.5) — so nothing here may read as though this number was measured.
+ * The name is right and the **provenance is still not a capture**. The activity page's own
+ * error table reads `31015 = 今日已签到`, and that table is all this number has ever had: the
+ * 2026-10-09 capture was searched for it across every text response in the file and answered
+ * **zero**, because the account it belongs to signed exactly once that night — one `doSign`
+ * cannot produce "already signed". So this number now has a measured absence as well as an
+ * unmeasured presence.
+ *
+ * What rests on it is worth naming, because it is more than a comment: the code is in
+ * `ACTION_STOP_CODES` through the name below, so `classifyError(31015)` parks the day's work
+ * rather than retrying it, and `signActivity` accepts it as this endpoint's OK code. Both are
+ * reads of a page-bundle enum entry nobody has seen on the wire. They are kept anyway, and the
+ * direction is the reason: a number that never arrives costs nothing, while dropping it would
+ * turn a real "already signed" into a refusal that the scheduler retries against a **write**.
+ *
+ * The one `doSign` body this repo does hold is `ACTIVITY_SIGN_SUCCESS`'s; see it for what a
+ * first-time call actually answers.
  */
 export const ACTIVITY_ALREADY_SIGNED = 31015
 
 /**
- * `doSign`'s other success, and **the name is the correction**: signed, no gift.
+ * `doSign`'s success code, and **the name is the correction**: the signature landed.
  *
- * It used to be `ACTIVITY_SIGN_SUCCESS`, which claimed more than the code means. The
- * same page table that gives `31015` reads `31200 = 签到成功无礼包`, so a run that gets
- * this number has signed and been handed nothing — a different fact from "the activity
- * paid out", and one a reader of the old name had no way to tell apart. It shares the
- * parked classification anyway, because either way today's signature is in and there
- * is nothing left to attempt; `protocol.ts` accepts it as this endpoint's OK code.
+ * It used to be `ACTIVITY_SIGN_NO_GIFT`, on the strength of the activity page's error table,
+ * which reads `31200 = 签到成功无礼包`. That reading is neither what the service says nor what
+ * the account got. The captured call (2026-10-09 03:20:35) answered
+ * `{"error":31200,"msg":"签到成功!","data":{},"redirectUrl":""}` — the service's own sentence,
+ * with no 「无礼包」 in it — and the ledger entry written in that same second is
+ * `{"num":20,"extraMsg":"签到礼包"}`. So the enum entry is a label for the code, not a claim
+ * about this activity's payout, and 「signed, handed nothing」 was a claim the evidence
+ * contradicts rather than a caution the old name was erring on the safe side of.
  *
- * Provenance as above: the page's table is the source, and no response body carrying
- * `31200` exists in this repo (§2.5).
+ * Two halves of the old reading do survive, and they are why this constant still carries a
+ * caveat at all: the *body* carries no award (`data: {}` is measured, and `redirectUrl` is the
+ * only other field), so nothing may report a figure read out of this response — what the
+ * activity paid is in `redeemPoints/pointRecord`, a read this action does not make; and the
+ * code is not a statement that the gift was granted *to this build's request shape* either, for
+ * the same reason.
+ *
+ * Provenance, since that is the thing this file keeps getting wrong: **this one is a capture**,
+ * not a page bundle. It is `tests/captured/douyu-activity-sign-31200.json`, byte for byte, and
+ * `douyu-wire.test.ts` replies with those bytes through the real protocol.
  */
-export const ACTIVITY_SIGN_NO_GIFT = 31200
+export const ACTIVITY_SIGN_SUCCESS = 31200
 
 /**
  * Codes that mean the day's goal is already met.
@@ -87,7 +109,7 @@ export const ACTIVITY_SIGN_NO_GIFT = 31200
 export const ACTION_STOP_CODES: readonly number[] = [
   CLIENT_SIGN_ALREADY_SIGNED,
   ACTIVITY_ALREADY_SIGNED,
-  ACTIVITY_SIGN_NO_GIFT
+  ACTIVITY_SIGN_SUCCESS
 ]
 
 /** Maps one business code to the caller's next move. */
@@ -134,8 +156,10 @@ export interface DouyuFailure {
  * One outcome, success or refusal.
  *
  * `code` is carried on the success side too, because on Douyu the code *is* the
- * outcome: `31200` (signed, no gift) and `31015` (today is already signed) both mean
- * the activity signature is in place — and neither means the activity paid out.
+ * outcome: `31200` (today's signature landed) and `31015` (today was already signed)
+ * both mean the activity signature is in place. **Neither means the activity paid out,
+ * and neither says it did not**: the payout is a ledger entry elsewhere, and `31200`'s
+ * captured body answers `data: {}`, so a reward read off either code would be invented.
  */
 export type DouyuResult<T> = { readonly ok: true; readonly code: number; readonly data: T } | DouyuFailure
 

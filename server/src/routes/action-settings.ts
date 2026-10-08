@@ -158,6 +158,109 @@ type ChoiceView =
   | { readonly kind: 'ok'; readonly items: readonly ChoiceItemView[] }
   | { readonly kind: 'unavailable'; readonly reason: string }
 
+/**
+ * One thing read live about one Target, as the page in front of a Task reads it.
+ *
+ * The sibling of `ChoiceItemView`, and narrower than anything a Platform returns for the same reason:
+ * `name` is a stable key the page never renders, `label` says what the fact is about (「形象」,
+ * 「在用鱼饵」), and `value` is the fact itself as a sentence a person reads. **No identifier travels
+ * in `value`**: the Room's own id is on the page already, and what these facts carry is states and
+ * quantities rather than ids.
+ */
+export interface TargetFactView {
+  readonly name: string
+  readonly label: string
+  readonly value: string
+}
+
+/**
+ * What one read of a Target's own facts produced, or why there is none.
+ *
+ * The union `ChoiceRead` is, for the union's own reason: an account we could not ask about and a Room
+ * whose panel reports nothing are opposite facts, and a page that drew them alike would be telling a
+ * person their 形象 is not set when the truth is that their session expired.
+ */
+export type TargetFactRead =
+  | { readonly kind: 'ok'; readonly items: readonly TargetFactView[] }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+
+/**
+ * One read of one Target's facts, as a Platform supplies it.
+ *
+ * Handed the account id and the Target the Task carries, and nothing else: the credential is read out
+ * of the account inside the reader, so no part of it passes through here — the rule `ChoiceSource.read`
+ * keeps as well.
+ *
+ * **The Target parameter is what this mechanism has and a choice source does not**, and the reason is
+ * the design's own split rather than a second concept: a choice is *stored* in a cell keyed by
+ * (person, platform, action), so it has to mean the same thing for every Task naming that action,
+ * while a fact about a Room is read for the Room in front of a person and is never stored at all.
+ */
+export type TargetFactReader = (accountId: number, targetKey: string) => Promise<TargetFactRead>
+
+/**
+ * The key one registered read is filed under.
+ *
+ * `\u0000` for the reason `settingKey` below uses it: it cannot occur in a Platform key or an action
+ * key, so the composite cannot alias — `('a\0b', 'c')` and `('a', 'b\0c')` are different keys here,
+ * which a `/`-joined key would not guarantee.
+ */
+function targetFactKey(platformKey: string, actionKey: string): string {
+  return `${platformKey}\u0000${actionKey}`
+}
+
+/**
+ * The registered target-fact reads, keyed by (Platform, action).
+ *
+ * Keyed that way because that is what a page standing in front of one Task knows: the action its Task
+ * names. **Not keyed by the Target, and that is not an omission** — the Target is the *argument* of a
+ * read rather than part of its name, so one registration serves every Room an action is aimed at.
+ *
+ * A registry rather than a switch, and read out of `AppContext` rather than reached for, for the
+ * reasons `ChoiceSourceRegistry` is: a suite has to be able to answer without a Platform, and the
+ * properties this build promises about a live read are then assertions rather than hopes.
+ *
+ * **`read` answers `null` when this build serves no read for that action**, which is a different answer
+ * from a read that failed: the page draws nothing for the first and a sentence for the second, because
+ * an action nobody wrote a read for is not an action whose read went wrong.
+ *
+ * Nothing here throws. A reader's own contract is to answer, so reaching the catch means a bug in one —
+ * which a person still has to be told about in the page's terms rather than as a stack trace.
+ */
+export class TargetFactRegistry {
+  private readonly readers = new Map<string, TargetFactReader>()
+
+  register(platformKey: string, actionKey: string, reader: TargetFactReader): void {
+    this.readers.set(targetFactKey(platformKey, actionKey), reader)
+  }
+
+  async read(
+    platformKey: string,
+    actionKey: string,
+    accountId: number,
+    targetKey: string
+  ): Promise<TargetFactRead | null> {
+    const reader = this.readers.get(targetFactKey(platformKey, actionKey))
+    if (reader === undefined) return null
+
+    try {
+      return await reader(accountId, targetKey)
+    } catch (cause: unknown) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      return { kind: 'unavailable', reason: `读取这个目标的实情失败：${detail}` }
+    }
+  }
+}
+
+/**
+ * The facts one read answers with, or the answer that this build serves no such read.
+ *
+ * `none` is a member of the wire shape rather than a null the client has to interpret beside it: what
+ * the page needs to distinguish is three things — facts, a failed read, and an action nobody wrote a
+ * read for — and a union of three says so where `null` would say it in a comment on the other side.
+ */
+type TargetFactsView = TargetFactRead | { readonly kind: 'none' }
+
 const optionsQuerySchema = z.object({
   platform: z.string({ error: '请选择平台' }).min(1, '请选择平台'),
   actionKey: z.string({ error: '请选择动作' }).min(1, '请选择动作'),
@@ -169,6 +272,20 @@ const optionsQuerySchema = z.object({
 const workflowQuerySchema = z.object({
   platform: z.string({ error: '请选择平台' }).min(1, '请选择平台'),
   actionKey: z.string({ error: '请选择动作' }).min(1, '请选择动作')
+})
+
+const targetFactsQuerySchema = z.object({
+  platform: z.string({ error: '请选择平台' }).min(1, '请选择平台'),
+  actionKey: z.string({ error: '请选择动作' }).min(1, '请选择动作'),
+  accountId: z.coerce.number({ error: '请选择账号' }).pipe(z.int({ error: '账号 ID 无效' }).positive('账号 ID 无效')),
+  /**
+   * The Target whose facts are wanted, as the Task carries it.
+   *
+   * Required, and the emptiness is refused here rather than passed on: the read behind this asks a
+   * Platform about one Room, and a request with no Room in it is one this build has no answer for —
+   * answering it would mean asking the service about nothing.
+   */
+  targetKey: z.string({ error: '请提供目标' }).min(1, '请提供目标')
 })
 
 /**
@@ -313,6 +430,59 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
           : { kind: 'unavailable', reason: read.reason }
 
       return { ok: true, field: field.name, source: field.source, choice }
+    }
+  )
+
+  /**
+   * What one Target's own panel says about it, for the action aimed at that Target.
+   *
+   * **The half the preferences page structurally cannot show.** The design splits facts by
+   * `needsTarget`: an account-level action's facts belong to the preferences page, and a target-level
+   * action's belong to the task page — because only the task page knows *which* Room it is about. The
+   * route behind a choice source is handed an account id and no target, so this is a second read
+   * rather than a wider first one, and it keeps the first one's shape so a page has one way to read a
+   * live thing.
+   *
+   * Three answers and no fourth, and the third is what lets the page stay silent honestly:
+   *
+   *  - **`ok`** with the facts a Platform read for that Room — a 钓鱼 panel's 形象, the bait marked in
+   *    use, and the window the service reports for that Room's match.
+   *  - **`unavailable`** with a sentence: the account is gone, its credential does not parse, the
+   *    service refused, or the transport failed. Never an empty list, which would read as "this Room
+   *    has none of these" — a claim only the Platform's own answer may make.
+   *  - **`none`** when this build serves no such read for that action at all. A failure sentence here
+   *    would be blaming a read nobody wired, so the page draws nothing instead.
+   *
+   * The account is scoped through the caller, like every id this build is handed, and the action is
+   * looked up in the catalogue first: a request naming an action nobody declares is one this build has
+   * no answer for, and the catalogue is what says which actions exist.
+   */
+  app.get<{ Querystring: z.infer<typeof targetFactsQuerySchema> }>(
+    '/api/action-settings/target-facts',
+    { schema: { querystring: targetFactsQuerySchema } },
+    async (request: FastifyRequest<{ Querystring: z.infer<typeof targetFactsQuerySchema> }>, reply: FastifyReply) => {
+      const user = requireUser(request, reply, ctx)
+      if (user === null) return undefined
+
+      const query = request.query
+      const platform = platformFor(query.platform)
+      if (platform === null) return reply.code(400).send({ ok: false, error: `未知平台：${query.platform}` })
+
+      const descriptor = platform.actions.find(action => action.key === query.actionKey)
+      if (descriptor === undefined) {
+        return reply.code(400).send({ ok: false, error: `平台「${platform.label}」没有动作「${query.actionKey}」` })
+      }
+
+      const account = getAccount(ctx.db, user.id, query.accountId)
+      if (account === null) return reply.code(404).send({ ok: false, error: '账号不存在' })
+      if (account.platform !== platform.key) {
+        return reply.code(400).send({ ok: false, error: `账号不属于平台「${platform.label}」` })
+      }
+
+      const read = await ctx.targetFacts.read(platform.key, descriptor.key, account.id, query.targetKey)
+      const facts: TargetFactsView = read ?? { kind: 'none' }
+
+      return { ok: true, facts }
     }
   )
 

@@ -252,10 +252,10 @@ const ACTIONS: readonly ActionDescriptor[] = [
      * **The figures are the activity's own config** (第 1–6 天 20、第 7 天 20+30), kept
      * because this sentence is what a person reads *before* deciding whether to switch
      * the action on, and a rule without its numbers answers nothing. That is exactly
-     * what separates it from a run's `detail`: §2.5 records that the sign response
-     * carries no award — a first-time `31200` is said to answer `data: {}`, and no
-     * response body for either OK code has been captured in this repo — so a detail
-     * naming a figure would be inventing one, while a description repeating the
+     * what separates it from a run's `detail`: the sign response carries no award — the
+     * captured `31200` body answers `data: {}` — and the 20 积分 that does land is a
+     * ledger entry in `redeemPoints/pointRecord`, a read this action does not make. So a
+     * detail naming a figure would be inventing one, while a description repeating the
      * activity's published rule is reporting it.
      *
      * Nothing here reads that config, so a change on Douyu's side leaves this text
@@ -411,6 +411,49 @@ const ACTIONS: readonly ActionDescriptor[] = [
      */
     defaultIntervalSeconds: 300,
     minIntervalSeconds: 60
+  },
+  {
+    key: ActionKey.Clearout,
+    action: TaskAction.Reconcile,
+    label: '送出即将过期的免费道具',
+    /**
+     * The one sentence read *before* switching this on, and it has to carry five facts a person cannot
+     * get from anywhere else: this spends free 道具 by **sending them to one room as gifts** (public and
+     * not un-sendable), **which** items may go is a list he writes himself, **where** they go is a room
+     * he picks from the ones he follows, it only ever fires in the last 24 hours before an item expires,
+     * and **it holds back what 亲密度任务's gifting half still needs** — the last one because the coupling
+     * is invisible from the outside and the next reader would otherwise delete it as redundant.
+     *
+     * It also says what it does *not* do about the two things a person is most likely to assume: 唯一
+     * 收件房间 is one room and not every room, and it never touches 付费 gift ids (it cannot: it sends
+     * through `prop/donate`, where an item must come from the backpack).
+     *
+     * **The window is stated as a fact and not offered as a field**, and that is the design's own
+     * wording: a window a person can fill in wrong is not a good parameter, and one that is wrong in
+     * either direction loses items.
+     */
+    description:
+      '把账号里即将过期的免费道具（背包里的道具，例如粉丝荧光棒）送进一个你指定的直播间，一天里临近到期才动手：只送「允许使用的道具」清单里勾选、账号里真有的那些，只送「到期时刻在 24 小时内」的那些，最快的先送，一件一个请求，每送一件都按服务端的回包报出送了什么、送给了谁、有没有扣费。它是账号级动作：收件房间来自偏好设置里的「默认倾泻直播间」，不来自任务的目标。它每次动手前都会先读一遍持有粉丝牌的每个直播间今天还差几件礼物，把那么多件留给你「亲密度任务」的送礼那一半（续牌要用），只倒多出来的部分——所以它倒的会比背包里的总数少，这是有意的，不是漏了。清单里的道具没勾选时它一件都不送；清单里的道具一件都没有时它只报一句，不挑一件代替。',
+    /**
+     * **Costly, and for the same reason 亲密度任务 is.** Every item this action sends is a gift in a
+     * public room that cannot be taken back, and the only thing between a wrong run and an unearned
+     * donation is the switch a person has to turn on (`repo/action-settings.ts`: absence of a row means
+     * off). `costly` is that switch; the allowlist is *which* items may be spent, which is a different
+     * question and deliberately not an exemption from this one.
+     */
+    costly: true,
+    /**
+     * Account-scoped: the room the items go to is `默认倾泻直播间` in the action's own options, not the
+     * Task's target — which is also what makes the app's known `ChoiceSource` gap (a source is handed an
+     * account id and nothing else) harmless here, because both reads behind this action's fields are
+     * account-level: the rooms an account follows, and the medals it holds.
+     */
+    needsTarget: false,
+    needsLibrary: false,
+    maxMessageLength: 0,
+    /** Same reasoning as the other reconcile chores: daily, idempotent, no benefit to hurrying. */
+    defaultIntervalSeconds: 300,
+    minIntervalSeconds: 60
   }
 ]
 
@@ -469,13 +512,28 @@ const ACTIONS: readonly ActionDescriptor[] = [
  * kept apart from the service's `1005003` because one is a reading and the other is a verdict.
  * `unknown_fishing_stat` is a `fishing.stat` outside the three values the capture established, which
  * is a contract change and has to be visible rather than waited through.
+ *
+ * 清仓's are the same idea again, for an action whose two facts come from four different reads. `no_dump_room`
+ * and `no_prop_allowlist` are its two person-fixable settings states, and they are two because the next
+ * move differs: name a room, or write a list. `no_badges` is shared with 粉丝家园签到 — the badge wall
+ * listing nothing is one fact, and 清仓 reads it fail-closed rather than as "nothing to renew", because a wall
+ * this build failed to read a single row out of *is* an empty wall, and with no medal known there is no
+ * reservation to keep anything back for. `no_gift_held` is shared with
+ * 亲密度任务 for the same reason: the list is the owner's and is right, the backpack holds none of it today.
+ * `nothing_expiring`, `expiry_unknown` and `all_reserved` are the three states in which 清仓 deliberately
+ * sends nothing — respectively "nothing is inside the last 24 hours", "an item is held but its `met` could
+ * not be read, so this build will not guess that it is due", and "the reservation ate everything the
+ * allowlist holds". Only the middle one is a contract change a person has to look at; the other two are
+ * states the next sweep or the next day clears on its own.
  */
 const LocalCode = {
+  AllReserved: 'all_reserved',
   BadTarget: 'bad_target',
   BaitLow: 'bait_low',
   CsrfRejected: 'csrf_rejected',
   CsrfUnavailable: 'csrf_unavailable',
   DanmakuOwed: 'danmaku_owed',
+  ExpiryUnknown: 'expiry_unknown',
   GiftsSent: 'gifts_sent',
   GiftShort: 'gift_short',
   NoBadges: 'no_badges',
@@ -483,10 +541,13 @@ const LocalCode = {
   NoCharacter: 'no_character',
   NoCredential: 'no_credential',
   NoDayTasks: 'no_day_tasks',
+  NoDumpRoom: 'no_dump_room',
   NoGiftAllowlist: 'no_gift_allowlist',
   NoGiftHeld: 'no_gift_held',
+  NoPropAllowlist: 'no_prop_allowlist',
   NoVerdict: 'no_verdict',
   NoWebSession: 'no_web_session',
+  NothingExpiring: 'nothing_expiring',
   PaidTasksLeft: 'paid_tasks_left',
   Protocol: 'protocol',
   TasksDone: 'tasks_done',
@@ -1191,6 +1252,11 @@ async function reconcileAction(
       // The only per-Room action here, and the only one that takes `context` twice over: the room it
       // reads is the task's target and the options it honours are keyed by this action's own key.
       return await reconcileIntimacyTasks(context, credential)
+    case ActionKey.Clearout:
+      // Account-scoped, and the one action whose target comes from its *options* rather than from the
+      // Task: `默认倾泻直播间` is an account-level setting (see `reconcileClearout`), which is what makes
+      // it a row with an empty target key.
+      return await reconcileClearout(context, credential)
     case ActionKey.Fishing:
       // The other per-Room action, and the only one here that is a *cycle*: it casts, waits for an
       // instant the Platform names, and reels in — within one `reconcile`, because the wait is part
@@ -2032,6 +2098,20 @@ const GIFT_UNREACHED_CLAUSE = '赠送礼物那一半停了：有一次送礼请�
 const UNKNOWN_GIFT_ROW_CLAUSE = '有第二条「赠送礼物」任务，这一版一次只结算一条，没敢动它'
 const UNKNOWN_TASK_CLAUSE = '有一类任务这一版不认识，先看它一眼'
 
+/**
+ * 清仓的四个「这一轮什么都没倒」状态，各一句。
+ *
+ * 四条而不是一条，因为它们的下一步各不相同：清单里一件都没有（去弄一件）、还没到期（等）、到期时刻读不出来
+ * （有人得看一眼这一版是不是读错了字段）、以及被保留量吃光（等续牌那一半先送）。前两条和后一条都会自己过去，
+ * 中间那条不会。
+ */
+const NO_PROP_HELD_CLAUSE = '清仓没有动手：清单里的道具今天一件也没有，下一轮会再读一次背包'
+const NOTHING_EXPIRING_CLAUSE = '清仓没有动手：清单里还没有进入到期前 24 小时的道具，下一轮再看'
+const UNKNOWN_EXPIRY_CLAUSE =
+  '清仓没有动手：清单里有道具的到期时刻读不出来，这一版不会替它猜一个到期时刻——猜早了的代价是把不该倒的倒出去，而那件事不能撤销'
+const ALL_RESERVED_CLAUSE =
+  '清仓没有动手：这个账号现在的存货都被「亲密度任务」续牌要用的那一份占着，等它把今天那一半送出去，清仓会自己接着倒'
+
 /** One daily task, judged: the item a person reads, and what the record does when this item governs. */
 interface JudgedTask {
   readonly item: ActionItem
@@ -2258,32 +2338,23 @@ function roomDailyTasksOutcome(
 }
 
 /**
- * The gift ids this account's owner has allowed this action to spend, out of the action's own options.
+ * One of this adapter's option lists, read as gift/prop ids — **the one place that rule is written**.
  *
- * **The option's shape is this adapter's business** — `routes/action-settings.ts` stores whatever the
- * client sent precisely because `ActionDescriptor` describes no options — so the key and its contract
- * are stated here, once: `giftAllowlist` is an array of gift ids, each a string of digits (a JSON number
- * is read as the same id, because the UI has no reason to know which the seam wants).
+ * Two actions now store a list of ids under their own key (`giftAllowlist`, `propAllowlist`), and what
+ * makes the rule worth having once is the last paragraph of `giftAllowlistIn` below: an unreadable list
+ * must read as an *empty* one, because that can only ever make an action send less. A second copy of
+ * this loop would be a second chance to get that direction wrong.
  *
- * **An unreadable or empty list means no allowlist, and that is the safety property rather than a
- * convenience.** The owner's own reason is on record — 「签到等途径会送便宜的付费道具」 — so the backpack
- * holds paid items, and the Platform offers **no first-party "free" flag** (`priceType` is two different
- * fields under one name, and the numeric `2` appears on paid items too). A list that failed to parse can
- * therefore only make this action send *less*, never more.
- *
- * This is the gate `sendRowGifts` is handed, and it is a **gate** rather than a preference: a list is
- * read as an empty one unless it parses, so the state it produces is a report naming what is missing
- * rather than a send made on a guess.
+ * A JSON number is read as the same id as its digits, because the UI has no reason to know which of the
+ * two the seam wants.
  */
-function giftAllowlistIn(options: unknown): readonly string[] {
+function idListIn(options: unknown, name: string): readonly string[] {
   if (typeof options !== 'object' || options === null) return []
-  if (!('giftAllowlist' in options)) return []
-  const declared = options.giftAllowlist
+  const declared: unknown = (options as Record<string, unknown>)[name]
   if (!Array.isArray(declared)) return []
 
-  const entries: readonly unknown[] = declared
   const ids: string[] = []
-  for (const entry of entries) {
+  for (const entry of declared as readonly unknown[]) {
     const id = typeof entry === 'number' ? String(entry) : entry
     if (typeof id === 'string' && /^\d+$/.test(id)) ids.push(id)
   }
@@ -2291,13 +2362,138 @@ function giftAllowlistIn(options: unknown): readonly string[] {
 }
 
 /**
- * The gifting half's own verdicts: the four `DailyTaskVerdict` members a walk can reach.
+ * The gift ids this account's owner has allowed this action to spend, out of the action's own options.
+ *
+ * **The option's shape is this adapter's business** — `routes/action-settings.ts` stores whatever the
+ * client sent precisely because `ActionDescriptor` describes no options — so the key and its contract
+ * are stated here, once: `giftAllowlist` is an array of gift ids, each a string of digits.
+ *
+ * **An unreadable or empty list means no allowlist, and that is the safety property rather than a
+ * convenience.** The owner's own reason is on record — 「签到等途径会送便宜的付费道具」 — so the backpack
+ * holds paid items, and the Platform offers **no first-party "free" flag** (`priceType` is two different
+ * fields under one name, and the numeric `2` appears on paid items too). A list that failed to parse can
+ * therefore only make this action send *less*, never more.
+ *
+ * This is the gate `walkGifts` is handed, and it is a **gate** rather than a preference: a list is
+ * read as an empty one unless it parses, so the state it produces is a report naming what is missing
+ * rather than a send made on a guess.
+ */
+function giftAllowlistIn(options: unknown): readonly string[] {
+  return idListIn(options, 'giftAllowlist')
+}
+
+/**
+ * The room 「默认倾泻直播间」 names, or `null` when nothing usable is stored under it.
+ *
+ * A room *number*, checked by the same `roomIdOf` every other Douyu target goes through — the field's
+ * choices come from the follow list, whose ids are room numbers, so anything else in this cell is either
+ * a stale value or a hand-written one and neither may become a `roomId` of a gift POST.
+ */
+function dumpRoomIn(options: unknown): number | null {
+  if (typeof options !== 'object' || options === null) return null
+  const declared: unknown = (options as Record<string, unknown>)['dumpRoomId']
+  const text = typeof declared === 'number' ? String(declared) : typeof declared === 'string' ? declared.trim() : ''
+  return text === '' ? null : roomIdOf(text)
+}
+
+/* ------------------------------------------------------------------ *
+ * 每日任务清单的那一次读 —— 两个动作共用
+ * ------------------------------------------------------------------ */
+
+/**
+ * One Room's daily list, plus the one number two different actions need out of it.
+ *
+ * **This type exists because the same fact has two readers, and two readers is the defect.** 亲密度任务
+ * sends gifts for the 赠送礼物 row and 清仓 must hold items back so that sending still can — and both of
+ * those are "how many gifts does this room still want today", which is `taskTotal - taskNum` on that row
+ * of `userTaskList`. If each action read the room and subtracted for itself, the two could disagree about
+ * the same room in the same sweep, and the action whose whole job is *not* to eat the other one's stock
+ * would be the one that got it wrong. So the read and the subtraction live here, once, and both actions
+ * call this.
+ *
+ * The list travels beside the number rather than being thrown away: 亲密度任务 judges and reports **every**
+ * daily row, and the 赠送礼物 row alone cannot say whether a fourth `taskType` appeared.
+ */
+interface RoomGiftDemand {
+  /** The whole daily list this read returned, in the service's own order. */
+  readonly tasks: readonly RoomDailyTask[]
+  /**
+   * The first outstanding 赠送礼物 row, or `null` when there is none.
+   *
+   * `find` rather than a filter: two rows of this type has never been seen, and a caller that had to
+   * choose between them would be choosing without evidence. 亲密度任务 judges a second one `unknown`
+   * from the list it already has, and 清仓 reserves for the one this names.
+   */
+  readonly row: RoomDailyTask | null
+  /** `row.taskTotal - row.taskNum`, or `0` when the room wants no gift today. */
+  readonly owed: number
+}
+
+/**
+ * The derivation, as a pure function over one room's list — **the only place this file subtracts**.
+ *
+ * Outstanding is the service's own counter (`taskNum < taskTotal`), never `taskStatus`; see
+ * `roomDailyTaskSchema` for the weekly read a `taskStatus` judgement calls done. A room with no 赠送礼物
+ * row today owes nothing, and that is a reading rather than a fallback: the list is what the service says
+ * the day wants.
+ */
+function giftDemandIn(tasks: readonly RoomDailyTask[]): RoomGiftDemand {
+  const row = tasks.find(task => task.taskType === ROOM_TASK_ANY_GIFT && task.taskNum < task.taskTotal) ?? null
+  return { tasks, row, owed: row === null ? 0 : row.taskTotal - row.taskNum }
+}
+
+/**
+ * `userTaskList` for one room, with the gift remainder derived — the single reader, called by both actions.
+ *
+ * The nesting is `callGraded`'s and deliberately unchanged: a call that never reached Douyu (`!listed.ok`)
+ * and a verdict Douyu sent (`!listed.reply.ok`) stay two different states with two different grades, which
+ * is what the two callers already distinguish. Nothing here decides what a refusal means — that is the
+ * caller's, because 亲密度任务 reports it against a room it is working on and 清仓 reports it against a
+ * reservation it therefore cannot compute.
+ */
+async function readRoomGiftDemand(
+  credential: ParsedCredential,
+  roomId: number
+): Promise<GradedCall<DouyuResult<RoomGiftDemand>>> {
+  const listed = await callGraded(
+    '读取亲密度任务',
+    () => readRoomDailyTasks(credential.token, credential.webCookies, String(roomId)),
+    credential.token,
+    credential.webCookies
+  )
+  if (!listed.ok) return listed
+  if (!listed.reply.ok) {
+    return {
+      ok: true,
+      reply: {
+        ok: false,
+        code: listed.reply.code,
+        message: listed.reply.message,
+        classification: listed.reply.classification
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    reply: { ok: true, code: listed.reply.code, data: giftDemandIn(listed.reply.data) }
+  }
+}
+
+/**
+ * The four verdicts a gifting walk can reach.
  *
  * Spelled out rather than typed as `DailyTaskVerdict`, because a walk cannot produce `settled`, `paid`,
  * `waiting`, `gated` or `unknown` — those are decided from a row's own counter and type with no request at
  * all, and a walk that returned one would be claiming a reading it never took.
+ *
+ * Two actions reach these now, so they are states of a *walk* rather than of a daily row: `sent` (everything
+ * the walk wanted went out), `short` (it stopped with something still wanted — the stock ran out or this
+ * run's ceiling was reached), `unheld` (nothing was sendable at all, and the caller said why: 亲密度任务
+ * with a list the account holds none of, 清仓 with nothing inside the expiry window), and `failed` (a call
+ * did not work, or the service refused one).
  */
-type GiftRowVerdict = Extract<DailyTaskVerdict, 'sent' | 'short' | 'unheld' | 'failed'>
+type GiftVerdict = Extract<DailyTaskVerdict, 'sent' | 'short' | 'unheld' | 'failed'>
 
 /**
  * How many gifts one run will send, whatever the row's own counter says.
@@ -2317,7 +2513,7 @@ const GIFTS_MAX_PER_RUN = 10
  * `judgeDailyTask`, which is the only place that knows the row's own counter and its declared reward.
  */
 interface GiftRun {
-  readonly verdict: GiftRowVerdict
+  readonly verdict: GiftVerdict
   /** How many gifts went out. Decides the `detail`'s reading order and the console line's word. */
   readonly sent: number
   /**
@@ -2339,6 +2535,55 @@ interface SentGift {
   readonly anchorName: string
   readonly charge: GiftCharge
 }
+
+/**
+ * The words one gifting walk needs, supplied by the action that is walking.
+ *
+ * **Why the sender takes prose as a parameter, and why a sender at all.** Two actions now hand a gift
+ * to an anchor — 亲密度任务's 赠送礼物 half and 清仓 — and the one thing they must not each own is the
+ * loop that does it: the order (look, decide, then one POST at a time), the rule that a refusal stops
+ * the walk, the rule that a receipt with no readable backpack stops it too, and the fact that the
+ * endpoint's own `usedProp.balance`/`includePrice` are what say whether anything was charged. Those are
+ * the safety properties, and a second sender would be a second place for them to drift. What differs
+ * between the two callers is **what a run says about itself**, and that is what this carries.
+ */
+interface GiftWalkWords {
+  /** Closes the item's sentence when the backpack could not be read. */
+  readonly read: string
+  /** The same for a refusal from the send endpoint. */
+  readonly refused: string
+  /** The same for a send request that never came back. */
+  readonly unreached: string
+  /** The reason a walk gives, inside the item's own sentence, when it stops with nothing left to send. */
+  readonly exhausted: string
+  /** The record's trailing clause for that same stop — the two are one state and two audiences. */
+  readonly shortClause: string
+  /** What the record says when everything this walk wanted went out. The count is the run's own. */
+  readonly done: (sent: number) => string
+}
+
+/**
+ * What one walk wants, decided **from the stock the walk itself just read**.
+ *
+ * `want` is how many gifts this walk is trying to send and `pick` is which item goes next, given the
+ * stock a receipt left. Both are the caller's arithmetic — the sender has no opinion about which item a
+ * person allowed, or how many the day still wants — and both are answered *after* the read and *before*
+ * the first POST, which is what keeps "look, then decide, then send" unrepresentable any other way.
+ */
+interface GiftWalkPlan {
+  readonly want: number
+  readonly pick: (stock: readonly PropItem[]) => PropItem | null
+}
+
+/**
+ * The caller's answer to the stock it was shown: walk it, or send nothing and report `stop`.
+ *
+ * The second arm exists because two states a caller can be in are not states of the walk — 亲密度任务
+ * with nothing the account holds from the list, and 清仓 with nothing that is close enough to expiry to
+ * be worth sending. Both are decided before a single POST, and both need their own sentence, so they
+ * are the caller's to hand back rather than the sender's to guess at.
+ */
+type GiftWalkStart = { readonly walk: GiftWalkPlan } | { readonly stop: GiftRun }
 
 /**
  * The gift to send next: the first item **on the owner's list** that the backpack actually holds.
@@ -2406,25 +2651,76 @@ function giftActClause(sent: readonly SentGift[], reason: string): string {
   return `已送 ${String(sent.length)} 件${giftText}${to}、${chargeClauseOf(sent)}${why}`
 }
 
+/** 亲密度任务送礼那一半自己那几句话。见 `GiftWalkWords`。 */
+const INTIMACY_GIFT_WORDS: GiftWalkWords = {
+  read: GIFT_READ_CLAUSE,
+  refused: GIFT_REFUSED_CLAUSE,
+  unreached: GIFT_UNREACHED_CLAUSE,
+  exhausted: '背包里没有能送的东西了',
+  shortClause: GIFT_SHORT_CLAUSE,
+  done: sent => `赠送礼物那一半送了 ${String(sent)} 件，这条任务本轮做完`
+}
+
 /**
- * 赠送礼物 — the gifting half of 亲密度任务, and the only write in this file that cannot be un-sent.
+ * 赠送礼物 — 亲密度任务送礼那一半，也就是 `walkGifts` 的一个调用方。
+ *
+ * **要送几件是服务端自己的数：`taskTotal - taskNum`，从这次运行已经读过的那份任务清单上取。** 它由
+ * `giftDemandIn` 算出来（那个差额在这份文件里只有那一个家），这里只把它交给走法。这里不数本系统以前送过
+ * 几件，也不信任何本地计数：那个数就是这一天欠的，下一轮再读一次任务清单才是结算它的人 — 所以这一轮把它
+ * 送完了，记录里的计数仍然写着这一行「未结」。
+ *
+ * **清单上一件都没有时是那句话，不是一次失败的发送**：清单是业主的、是对的，而账号今天一件都没有 —
+ * `action_stop`，因为下一步是人的：去弄一件来，或者把已有的一件加进清单。
+ */
+async function sendRowGifts(
+  credential: ParsedCredential,
+  roomId: number,
+  owed: number,
+  allowlist: readonly string[],
+  log: (line: string) => void
+): Promise<GiftRun> {
+  return await walkGifts(
+    credential,
+    roomId,
+    INTIMACY_GIFT_WORDS,
+    stock => {
+      if (firstHeld(stock, allowlist) === null) {
+        return {
+          stop: {
+            verdict: 'unheld',
+            sent: 0,
+            act: '未发（清单里的礼物今天一件也没有）',
+            recordCode: LocalCode.NoGiftHeld,
+            clause: NO_GIFT_HELD_CLAUSE,
+            failure: 'action_stop'
+          }
+        }
+      }
+      return { walk: { want: owed, pick: current => firstHeld(current, allowlist) } }
+    },
+    log
+  )
+}
+
+/**
+ * One gifting walk, and **the only place in this file that hands an item to a room.**
+ *
+ * Two actions spend through it — 亲密度任务's 赠送礼物 half and 清仓 — and what they share is the part that
+ * must never be written twice.
  *
  * **The order is the safety property: look, decide, then send one at a time.**
  *
  *  1. `GET japi/prop/backpack/web/v5?rid=<R>` — what this account holds *now*. It is read before anything
- *     is sent because the two states that end a walk without sending are decided here: a list this
- *     account holds none of is a sentence rather than a failed send, and what is held is the bound under
- *     the task's own remainder.
- *  2. `POST japi/prop/donate/mainsite/v5` — one gift, `propCount=1`, and **its own receipt carries the
- *     whole updated backpack**, so the next round's count needs no second read.
- *  3. Repeat until the row's remainder is reached, the held stock runs out, this run's ceiling is hit, or
- *     a call fails.
- *
- * **The number to send is the server's own: `taskTotal - taskNum`, off the task list this run already
- * fetched.** Nothing here counts gifts this system has sent before, and nothing here trusts a local tally
- * of its own sends: the row's counter is what the day owes, the loop is bounded by that number, and the
- * *next* read of the task list is what confirms the work — which is why the record's counts still show
- * this row as 「未结」 when the run settles it.
+ *     is sent because every state that ends a walk without sending is decided from it: a list this
+ *     account holds none of, and 清仓's nothing-close-enough-to-expiry, are sentences rather than failed
+ *     sends, and what *is* held is the bound under what the walk wants.
+ *  2. `decide` is asked, **with the stock this read just returned and not with anything cached**, for how
+ *     many gifts this walk will try and which item goes next. That is the one seam in this function: an
+ *     action's own arithmetic (a task's remainder, a reservation) lives in its own `decide`, and the
+ *     sender has no opinion about either.
+ *  3. `POST japi/prop/donate/mainsite/v5` — one gift, `propCount=1`, and **its own receipt carries the
+ *     whole updated backpack**, so the next round's item needs no second read.
+ *  4. Repeat until `want` is reached, the held stock runs out, this run's ceiling is hit, or a call fails.
  *
  * **One at a time, and the receipts are why.** The reference implementation sends a whole batch in one
  * POST when the page has one selected; this sends `propCount=1` per call, as the capture did. Each answer
@@ -2434,23 +2730,21 @@ function giftActClause(sent: readonly SentGift[], reason: string): string {
  *
  * **A refusal stops the walk, and so does a call that never arrived** — for the same reason: a gift cannot
  * be un-sent, and a request with no answer may well have landed. What the walk knows afterwards is what
- * the receipts it *did* receive said, and it reports that much; the task list's counter on the next sweep
- * is what settles what actually reached the room.
+ * the receipts it *did* receive said, and it reports that much; the next read of the state that decided
+ * `want` is what settles what actually reached the room.
  *
- * **Nothing here reports a reward.** What the row pays is `intimacyBuff` on the task list; what this walk
+ * **Nothing here reports a reward.** What a task pays is `intimacyBuff` on the task list; what this walk
  * has is what the receipts said — how many gifts went out, what they were called, who received them, and
  * whether the endpoint declared them free.
  */
-async function sendRowGifts(
+async function walkGifts(
   credential: ParsedCredential,
   roomId: number,
-  task: RoomDailyTask,
-  allowlist: readonly string[],
+  words: GiftWalkWords,
+  decide: (stock: readonly PropItem[]) => GiftWalkStart,
   log: (line: string) => void
 ): Promise<GiftRun> {
   const rid = String(roomId)
-  const owed = task.taskTotal - task.taskNum
-  const bound = Math.min(owed, GIFTS_MAX_PER_RUN)
   const sent: SentGift[] = []
 
   /** The walk's one failure shape: what did go out, and what stopped it — with the failed call's grade. */
@@ -2468,31 +2762,25 @@ async function sendRowGifts(
     () => readGiftBackpack(credential.webCookies, rid),
     credential.webCookies
   )
-  if (!listed.ok) return failed(listed.detail, listed.code, 'retry', GIFT_READ_CLAUSE)
+  if (!listed.ok) return failed(listed.detail, listed.code, 'retry', words.read)
   if (!listed.reply.ok) {
     return failed(
       `读取礼物背包失败：${listed.reply.message}`,
       codeText(listed.reply.code),
       listed.reply.classification,
-      GIFT_READ_CLAUSE
+      words.read
     )
   }
 
+  const start = decide(listed.reply.data)
+  if ('stop' in start) return start.stop
+
+  // `GIFTS_MAX_PER_RUN` bounds both callers, and it lives here rather than in either of them: it is "how
+  // many gifts one sweep may send", which is a fact about this loop and not about a task list or a
+  // backpack. A caller's `want` is its own obligation; this is the runaway guard over it.
+  const bound = Math.min(start.walk.want, GIFTS_MAX_PER_RUN)
   let stock: readonly PropItem[] = listed.reply.data
-  let pick = firstHeld(stock, allowlist)
-  if (pick === null) {
-    // Decided before anything was sent, and that is what makes this a sentence rather than a failure: the
-    // list is the owner's and is right, while the account holds none of it today. `action_stop` because
-    // the next move is a person's — acquire one of the listed items, or add one he already holds.
-    return {
-      verdict: 'unheld',
-      sent: 0,
-      act: '未发（清单里的礼物今天一件也没有）',
-      recordCode: LocalCode.NoGiftHeld,
-      clause: NO_GIFT_HELD_CLAUSE,
-      failure: 'action_stop'
-    }
-  }
+  let pick = start.walk.pick(stock)
 
   while (pick !== null && sent.length < bound) {
     const propId = String(pick.id)
@@ -2502,13 +2790,13 @@ async function sendRowGifts(
       credential.webCookies
     )
 
-    if (!donated.ok) return failed(donated.detail, donated.code, 'retry', GIFT_UNREACHED_CLAUSE)
+    if (!donated.ok) return failed(donated.detail, donated.code, 'retry', words.unreached)
     if (!donated.reply.ok) {
       return failed(
         `赠送礼物失败：${donated.reply.message}`,
         codeText(donated.reply.code),
         donated.reply.classification,
-        GIFT_REFUSED_CLAUSE
+        words.refused
       )
     }
 
@@ -2516,7 +2804,9 @@ async function sendRowGifts(
     const gift: SentGift = { name: receipt.propName, anchorName: receipt.anchorName, charge: receipt.charge }
     sent.push(gift)
     // The console line names the room, which is exactly where an id belongs: the item a person reads says
-    // the anchor's name and never the number, and the two audiences are the split 鱼吧's walk makes.
+    // the anchor's name and never the number, and the two audiences are the split 鱼吧's walk makes. It is
+    // the same line whichever caller walked, deliberately: since one Task names one action
+    // (`reconcileSelectionFor`), the sweep's own prefix already says which action sent it.
     log(
       `赠送礼物「${gift.name === '' ? '未读出名字' : gift.name}」给${gift.anchorName === '' ? UNNAMED_ROOM : gift.anchorName}（房间 ${rid}）：${chargeClauseOf([gift])}`
     )
@@ -2531,37 +2821,36 @@ async function sendRowGifts(
         sent: sent.length,
         act: `已送 ${String(sent.length)} 件礼物、扣费情况读不出来（这次响应读不出背包：礼物名和接收主播也读不出来），本次不再往下送`,
         recordCode: LocalCode.GiftShort,
-        clause: GIFT_SHORT_CLAUSE,
+        clause: words.shortClause,
         failure: 'none'
       }
     }
 
     stock = receipt.backpack
-    pick = firstHeld(stock, allowlist)
+    pick = start.walk.pick(stock)
   }
 
-  if (sent.length >= owed) {
+  if (sent.length >= start.walk.want) {
     return {
       verdict: 'sent',
       sent: sent.length,
       act: giftActClause(sent, ''),
       recordCode: LocalCode.GiftsSent,
-      clause: `赠送礼物那一半送了 ${String(sent.length)} 件，这条任务本轮做完`,
+      clause: words.done(sent.length),
       failure: 'none'
     }
   }
 
   // Short, and the two reasons stay two facts: one is the stock the last receipt described, the other is
-  // this adapter's own ceiling. Both leave the row unsettled on purpose — nothing here declares a task
-  // finished, because the counter on the next read is what says how much of it is left.
-  const short =
-    sent.length >= GIFTS_MAX_PER_RUN ? `本次最多送 ${String(GIFTS_MAX_PER_RUN)} 件` : '背包里没有能送的东西了'
+  // this loop's own ceiling. Both leave the obligation unsettled on purpose — nothing here declares a
+  // state finished, because a later read of whatever decided `want` is what says how much is left.
+  const short = sent.length >= GIFTS_MAX_PER_RUN ? `本次最多送 ${String(GIFTS_MAX_PER_RUN)} 件` : words.exhausted
   return {
     verdict: 'short',
     sent: sent.length,
     act: giftActClause(sent, short),
     recordCode: LocalCode.GiftShort,
-    clause: GIFT_SHORT_CLAUSE,
+    clause: words.shortClause,
     failure: 'none'
   }
 }
@@ -2644,15 +2933,10 @@ async function reconcileIntimacyTasks(
     )
   }
 
-  const listed = await callGraded(
-    '读取亲密度任务',
-    () => readRoomDailyTasks(credential.token, credential.webCookies, String(roomId)),
-    credential.token,
-    credential.webCookies
-  )
-  if (!listed.ok) return roomOutcome(key, targetKey, 'failed', listed.detail, listed.code, 'retry')
+  const demand = await readRoomGiftDemand(credential, roomId)
+  if (!demand.ok) return roomOutcome(key, targetKey, 'failed', demand.detail, demand.code, 'retry')
 
-  const reply = listed.reply
+  const reply = demand.reply
   if (!reply.ok) {
     return roomOutcome(
       key,
@@ -2671,16 +2955,17 @@ async function reconcileIntimacyTasks(
   // or spends a gift. It runs only when there is something to send, which is an outstanding 赠送礼物 row
   // **and** a non-empty allowlist, so a run with nothing to do reads no backpack and sends nothing.
   //
-  // `find` takes the first outstanding 赠送礼物 row. A second one is judged `unknown` by `judgeDailyTask`
-  // rather than reported against a walk that never ran for it: two rows of this type has never been seen,
-  // and a sent-count claimed for one of them would be a claim about a shape nobody captured.
-  const giftRow = reply.data.find(task => task.taskType === ROOM_TASK_ANY_GIFT && task.taskNum < task.taskTotal) ?? null
+  // The row and the number both come from `readRoomGiftDemand`, which is also what 清仓 reserves against.
+  // A second 赠送礼物 row is judged `unknown` by `judgeDailyTask` rather than reported against a walk that
+  // never ran for it: two rows of this type has never been seen, and a sent-count claimed for one of them
+  // would be a claim about a shape nobody captured.
+  const giftRow = reply.data.row
   const gift =
     giftRow === null || allowlist.length === 0
       ? null
-      : await sendRowGifts(credential, roomId, giftRow, allowlist, context.log)
+      : await sendRowGifts(credential, roomId, reply.data.owed, allowlist, context.log)
 
-  const judged = reply.data.map(task => judgeDailyTask(task, allowlist, task === giftRow ? gift : null))
+  const judged = reply.data.tasks.map(task => judgeDailyTask(task, allowlist, task === giftRow ? gift : null))
   const [first, ...rest] = judged
   if (first === undefined) {
     // An empty daily list is a response this build has never seen — both captured rooms listed three —
@@ -2699,6 +2984,393 @@ async function reconcileIntimacyTasks(
 
   context.log(`亲密度任务：${judged.map(task => task.line).join('、')}`)
   return roomDailyTasksOutcome(key, targetKey, [first, ...rest])
+}
+
+/* ------------------------------------------------------------------ *
+ * 清仓 —— 送出即将过期的免费道具
+ * ------------------------------------------------------------------ */
+
+/**
+ * 到期前多久开始倒：**24 小时**。
+ *
+ * **一个常量而不是一个参数，这是设计里明写的一条**：一个可以填错的窗口不是一个好参数。填短了的代价是
+ * 道具在窗口打开之前就过期了——那正是这个动作存在的理由没了；填长了的代价是把还有几天寿命的道具提前倒
+ * 出去，而送礼是公开且收不回来的。24 小时是唯一一个「明天就没了」的读数，它落在两个坏值中间。
+ */
+const CLEAROUT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+/**
+ * 背包行的 `met` 是**秒**，不是毫秒。
+ *
+ * 实测：`met: 1791734399` 是 2026-10-11 23:59:59（+08），而 `Date.now()` 那一侧的同一时刻是
+ * `1791516489`（2026-10-09 03:28 UTC）——两个数同一个量级，差的是两天而不是十万倍。同一份抓包的
+ * `nowtime`（`1791454940`）与徽章页的 `data-fans-gbdgts`（`1762106984`）也都是秒，所以这不是一行特例，
+ * 是这一族自己的单位。
+ */
+const CLEAROUT_MET_UNIT_MS = 1000
+
+/**
+ * 清仓自己的四句话。见 `GiftWalkWords`。
+ *
+ * 它和 亲密度任务 说的是同一次 POST，但两个动作的 `detail` 是两行给同一个人看的字，所以措辞各自一份：
+ * 一行说「赠送礼物那一半」，一行说「清仓」。
+ */
+const CLEAROUT_WORDS: GiftWalkWords = {
+  read: '清仓没能开始：背包没读出来，一件道具都没有送',
+  refused: '清仓停了：服务端拒绝了送礼，剩下的下一轮再试',
+  unreached: '清仓停了：有一次送礼请求没有回音——那一件可能已经送出去了，剩下的下一轮再看',
+  exhausted: '能倒的都倒出去了',
+  shortClause: '清仓没倒完：能倒的都倒出去了，剩下的下一轮接着倒',
+  done: sent => `清仓把 ${String(sent)} 件即将过期的免费道具送进了那个直播间`
+}
+
+/** 清单里这时能倒的一件道具，连同它的到期时刻。 */
+interface DueProp {
+  /** 道具 id，字符串形式——它同时是清单里的那个值。 */
+  readonly id: string
+  /** 账号现在持有几件。 */
+  readonly count: number
+  /** 到期时刻，毫秒。 */
+  readonly expiresAt: number
+}
+
+/**
+ * 清仓看存货的那一眼：能倒哪些，以及两件**不能当成可倒**的事各有多少。
+ *
+ * `due` 是能倒的，另外两个计数是**读不出**和**已经过去**的道具**种数**——它们都不倒，但它们是两个不同的
+ * 事实，一条记录里要能分清：「这个字段我们读不出来」是这一版的合同变了，「这件东西已经过期了」是服务的
+ * 事实。
+ */
+interface DuePlan {
+  readonly due: readonly DueProp[]
+  /** 清单里持有、但 `met` 缺失或不是正数的道具种数。 */
+  readonly unknownExpiry: number
+  /** 清单里持有、但到期时刻已经过去的道具种数。 */
+  readonly alreadyPast: number
+  /** 清单里持有、还没到期的最早那一刻（毫秒），没有就是 `null`。 */
+  readonly soonestFuture: number | null
+  /** 清单里持有几件（只数持有量大于 0 的行）。为 0 就是「清单里的道具今天一件都没有」。 */
+  readonly held: number
+}
+
+/**
+ * 存货里哪些能在这一轮倒掉，按到期时刻从早到晚。
+ *
+ * **判据是 `met`：道具的绝对到期时刻。** 这是实测而不是推断——`met = 1791734399` 与官方前端自己的
+ * `getRestTime(expiry) - 1s` 秒级吻合（`expiry: 4` 的那条算出来正好落在同一秒），而 `met` 在同一天的
+ * 三次读里取值完全不变、停在 3 天之后，所以它不是「领取时刻」也不是一个倒数的计数器。
+ *
+ * **`expiry` 与 `exp` 不参与判断，而且这是有意的。** `expiry` 是同一个事实的另一种单位（天），`exp` 只
+ * 见过 1、含义未证；把两个来源都读进来判一次，就是把一个日期放在两个家里，而这一整轮在消的正是这件事。
+ * 判据只有 `met`，它读不出来时这一版**不倒**：倒早了的代价是公开且收不回来，倒晚了的代价是那几件免费货
+ * 没了——两侧不对称，所以取保守的一侧，并且说出来。
+ */
+function duePlanIn(stock: readonly PropItem[], allowlist: readonly string[], now: number): DuePlan {
+  const allowed = new Set(allowlist)
+  const due: DueProp[] = []
+  let unknownExpiry = 0
+  let alreadyPast = 0
+  let soonestFuture: number | null = null
+  let held = 0
+
+  for (const item of stock) {
+    const id = String(item.id)
+    if (!allowed.has(id)) continue
+    if (item.count <= 0) continue
+    held += item.count
+
+    const met = item.met
+    if (met === undefined || met <= 0) {
+      unknownExpiry += 1
+      continue
+    }
+
+    const expiresAt = met * CLEAROUT_MET_UNIT_MS
+    if (expiresAt <= now) {
+      alreadyPast += 1
+      continue
+    }
+    if (soonestFuture === null || expiresAt < soonestFuture) soonestFuture = expiresAt
+    if (expiresAt - now <= CLEAROUT_WINDOW_MS) due.push({ id, count: item.count, expiresAt })
+  }
+
+  // 到期时刻最近的先倒，这是设计里那句话（「最快的先送」）；同刻的两件按清单自己的顺序排，因为清单的顺序
+  // 是业主人勾选的顺序，这一侧没有理由替他改。
+  due.sort((left, right) => left.expiresAt - right.expiresAt)
+  return { due, unknownExpiry, alreadyPast, soonestFuture, held }
+}
+
+/**
+ * 这一轮倒多少、下一件倒什么 —— **保留量就落在这里**。
+ *
+ * 保留量的算法：每一件可倒的道具**各自**留下 `reserved` 件，只倒超出它的那部分。
+ *
+ * **为什么不是「一共留 `reserved` 件」。** 留够件数在账号里，不等于把这 `reserved` 件留给续牌：续牌的
+ * 清单是另一个动作的另一份（两个动作两份清单），它只从**它**的清单里取货，而这一侧看不见那份清单——
+ * `ReconcileContext.options` 只装这次运行那个动作的选项（`runOptions` 在 `scheduler/runner.ts` 里就是
+ * 这么建的）。一个算得出来的例子：清单是 {268: 60 件, 3410: 3 件}、保留量是 5，按「一共留 5 件」算这一轮
+ * 可以倒 58 件，而 268 会被倒到只剩 2 件——续牌那天它要 5 件，只有 2 件。按「每件各留 5 件」算，268 只
+ * 会倒到剩 5 件。两个算法的差别是 3 件白倒出去的道具；**留多的代价就这么多，留少的代价是续牌那天没货**，
+ * 所以取保守的一侧，而保守的那一侧就是每件各留。
+ *
+ * 保留量本身不落盘、每次从读数重算：它是服务端今天还差几件，明天就不一样了。
+ */
+function clearoutWalkIn(due: readonly DueProp[], reserved: number): GiftWalkPlan {
+  const slack = new Map(due.map(prop => [prop.id, Math.max(0, prop.count - reserved)]))
+  let want = 0
+  for (const left of slack.values()) want += left
+
+  return {
+    want,
+    // `due` 已经按到期时刻排好，这里只是跳过没有额度的那些。额度在这一步扣减而不是等发出去之后再扣，因为
+    // 这个走法一旦出手就只有两种结局：这一件发成功，或者整轮停在这里——没有「选了但没发」的第三态。
+    pick: stock => {
+      for (const prop of due) {
+        if ((slack.get(prop.id) ?? 0) <= 0) continue
+        const inStock = stock.find(item => String(item.id) === prop.id)
+        if (inStock === undefined || inStock.count <= 0) continue
+        slack.set(prop.id, (slack.get(prop.id) ?? 0) - 1)
+        return inStock
+      }
+      return null
+    }
+  }
+}
+
+/** 一个牌子房间在这次运行里的事实：它是谁（一个显示名），以及它为保留量出了几件。 */
+interface ClearoutRoom {
+  readonly label: string
+  readonly owed: number
+}
+
+/** 一次走法的一个「什么都没倒」结局，形状与走法自己的结局完全一样。 */
+function clearoutStop(recordCode: string, failure: FailureKind, act: string, clause: string): GiftWalkStart {
+  return { stop: { verdict: 'unheld', sent: 0, act, recordCode, clause, failure } }
+}
+
+/** 「清单里没有快到期的东西」那句话里的事实，能算出来的才写。 */
+function nothingDueAct(plan: DuePlan, now: number): string {
+  const facts: string[] = []
+  if (plan.soonestFuture !== null) {
+    const hours = Math.ceil((plan.soonestFuture - now) / 3_600_000)
+    facts.push(`最近的一件还有 ${String(hours)} 小时才到期`)
+  }
+  if (plan.alreadyPast > 0) facts.push(`另有 ${String(plan.alreadyPast)} 种已经过了到期时刻`)
+  const detail = facts.length === 0 ? '' : `；${facts.join('、')}`
+  return `未倒（清单里没有进入到期前 24 小时的道具${detail}）`
+}
+
+/**
+ * 这一次走法的开头：看着刚读到的那份存货，回答「倒什么」，或者「这一轮什么都不倒，这是那句话」。
+ *
+ * 判断的**顺序**是有意的，而且每一步都比后一步更保守：一件都没有（清单的问题）→ 到期时刻读不出来（这一版
+ * 的问题）→ 都还没到期（时间的问题）→ 被保留量吃光（另一个动作的问题）→ 才轮到倒。任何一步成立，这一轮
+ * 都不出手，而且这一轮花的唯一一次 HTTP 就是刚读完的背包。
+ */
+function clearoutStart(
+  stock: readonly PropItem[],
+  allowlist: readonly string[],
+  reserved: number,
+  now: number
+): GiftWalkStart {
+  const plan = duePlanIn(stock, allowlist, now)
+
+  if (plan.held === 0) {
+    return clearoutStop(LocalCode.NoGiftHeld, 'action_stop', '未倒（清单里的道具今天一件也没有）', NO_PROP_HELD_CLAUSE)
+  }
+  if (plan.due.length === 0) {
+    if (plan.unknownExpiry > 0) {
+      return clearoutStop(
+        LocalCode.ExpiryUnknown,
+        'action_stop',
+        `未倒（清单里有 ${String(plan.unknownExpiry)} 种道具的到期时刻读不出来，这一版不送它们）`,
+        UNKNOWN_EXPIRY_CLAUSE
+      )
+    }
+    return clearoutStop(LocalCode.NothingExpiring, 'none', nothingDueAct(plan, now), NOTHING_EXPIRING_CLAUSE)
+  }
+
+  const walk = clearoutWalkIn(plan.due, reserved)
+  if (walk.want === 0) {
+    return clearoutStop(
+      LocalCode.AllReserved,
+      'none',
+      `未倒（能倒的都被续牌的保留量占着：这一轮为牌子房间留了 ${String(reserved)} 件）`,
+      ALL_RESERVED_CLAUSE
+    )
+  }
+
+  return { walk }
+}
+
+/**
+ * 清仓 —— 送出即将过期的免费道具。账号级，而且是这里最不能出错的一条。
+ *
+ * **它是一次「留够再倒」，而留多少是算出来的，不是填的。** 一次运行四步：
+ *
+ *  1. 读**偏好设置**里的两个参数：`默认倾泻直播间`（一个房间号）与 `允许使用的道具`（一份 id 清单）。
+ *     两个都缺一不可，而且都只由人提供——这个动作自己不挑一件道具去倒。
+ *  2. 读徽章墙（`getFansBadgeList`）拿**牌子房间**，再对每个房间读一次 `userTaskList`，问出它今天还差几件
+ *     「赠送礼物」。那些差额加起来就是**保留量**：续牌（`intimacy_tasks` 送礼那一半）今天要用的份数。
+ *  3. 读背包（`japi/prop/backpack/web/v5`），挑出清单里、账号真有、`met` 落在 24 小时内的那些，按到期
+ *     时刻从早到晚。
+ *  4. 一件一个 POST 送去收件房间，走法与 亲密度任务 送礼那一半是**同一个**（`walkGifts`）：一件一个请求、
+ *     回包里带着新存货、拒了就停、回包读不出背包也停、每件都报有没有扣费。
+ *
+ * **为什么保留量是每件道具各留，而不是从总数里留。** 见 `clearoutWalkIn`：续牌的清单是另一个动作的另一份，
+ * 这一侧看不见它，所以「每件各留」是唯一一个不可能留少的算法。留多的代价是少倒几件（无害），留少的代价是
+ * 续牌那天没货（真损失）。
+ *
+ * **读不出保留量时它一件都不倒。** 只有两种情形：某个牌子房间的任务清单没读出来（`failed` + `retry`，下一
+ * 轮再试），或者徽章墙空了（`blocked` + `no_badges`）。第二种是保守一侧的选择，而且理由要说清：**一个没有
+ * 牌子的账号本来就不需要留什么**，所以真正要防的不是这个读法，而是「徽章墙明明有牌子、这一版却一行都没认出来」
+ * ——那种读法同样是空清单，而它会把整个背包倒进那个房间。实测过的一条只否掉了第三种可能：没有登录时这个页面
+ * **302 跳转、响应体是空的**（本仓自己的探针跑过），而 `readFanBadges` 对非 2xx 是抛错，所以「会话死了」表现
+ * 为 `failed`，不表现为空清单。（读不到就一条都不倒的另一半理由在 `readDouyuMedalRooms` 的注释里：同一份读数，
+ * 表单要的是「读到了什么」，花钱要的是「能不能现在动手」，两个问题不一样。）
+ *
+ * **它的目标键是空的**（`needsTarget: false`）：收件房间来自偏好，不来自任务的目标，所以这是账号级的记录
+ * ——`types.ts` 把空键留给「关于账号本身」的动作。
+ *
+ * 每次运行的请求数：1 次徽章墙 + N 次任务清单（N 是牌子数）+ 1 次背包 + 每件道具 1 次 POST。前三步都是读。
+ */
+async function reconcileClearout(
+  context: ReconcileContext,
+  credential: ParsedCredential | null
+): Promise<ActionOutcome> {
+  const key = ActionKey.Clearout
+  if (credential === null) return noCredentialOutcome(key)
+
+  if (credential.webCookies.trim() === '') {
+    // The same precondition 亲密度任务 reports, and for the same reason: the send this action makes is on
+    // the `japi/prop` family, whose captured identity is the web session alone. `action_stop` is what turns
+    // it into 动作受阻 without the person having to open a debug panel.
+    return accountOutcome(
+      key,
+      'blocked',
+      '未倒：账号没有网页会话（重新扫码绑定一次，这个动作会自己继续）',
+      LocalCode.NoWebSession,
+      'action_stop'
+    )
+  }
+
+  const options = context.options[key]
+  const dumpRoom = dumpRoomIn(options)
+  if (dumpRoom === null) {
+    // Two readings of one empty cell — nothing stored, and something stored that is not a room number — and
+    // both end the same way: this action has nowhere to send to, so it sends nothing.
+    return accountOutcome(
+      key,
+      'blocked',
+      '未倒：还没有选好「默认倾泻直播间」（在偏好设置里从自己关注的直播间里挑一个）',
+      LocalCode.NoDumpRoom,
+      'action_stop'
+    )
+  }
+
+  const allowlist = idListIn(options, 'propAllowlist')
+  if (allowlist.length === 0) {
+    return accountOutcome(
+      key,
+      'blocked',
+      '未倒：账号里还没有「允许使用的道具」清单，这一版不会自己挑一件倒（在偏好设置里勾）',
+      LocalCode.NoPropAllowlist,
+      'action_stop'
+    )
+  }
+
+  const badges = await callGraded(
+    '读取粉丝牌',
+    () => readFanBadges(credential.token, credential.webCookies),
+    credential.token,
+    credential.webCookies
+  )
+  if (!badges.ok) return transportFailure(key, badges)
+
+  const medals = badges.reply.badges
+  if (medals.length === 0) {
+    return accountOutcome(
+      key,
+      'blocked',
+      '未倒：粉丝牌清单是空的（要么账号一枚牌子都没有，要么这一版一行都没认出徽章墙上的行）——保留量算不出来，这一版不拿整个背包去赌一句空清单',
+      LocalCode.NoBadges,
+      'action_stop'
+    )
+  }
+
+  // **The reservation, room by room, through the one reader both actions call.** A room whose list cannot be
+  // read leaves the reservation unknown, and an unknown reservation sends nothing: over-reserving costs a
+  // few unsent items, under-reserving costs the medal day.
+  const rooms: ClearoutRoom[] = []
+  let reserved = 0
+  for (const medal of medals) {
+    const roomId = roomIdOf(medal.roomId)
+    if (roomId === null) {
+      return actionFailure(key, LocalCode.Protocol, '未倒：粉丝牌清单里有一条的房间号读不出来，保留量算不出来', 'retry')
+    }
+
+    const demand = await readRoomGiftDemand(credential, roomId)
+    const label = medal.anchorName === '' ? UNNAMED_ROOM : medal.anchorName
+    if (!demand.ok) {
+      return actionFailure(
+        key,
+        demand.code,
+        `未倒：「${label}」今天还差几件礼物读不出来，保留量算不出来，这一轮一件都不倒。${demand.detail}`,
+        'retry'
+      )
+    }
+    if (!demand.reply.ok) {
+      return actionFailure(
+        key,
+        codeText(demand.reply.code),
+        `未倒：「${label}」今天还差几件礼物读不出来，保留量算不出来，这一轮一件都不倒。读取亲密度任务失败：${demand.reply.message}`,
+        demand.reply.classification
+      )
+    }
+
+    reserved += demand.reply.data.owed
+    rooms.push({ label, owed: demand.reply.data.owed })
+  }
+
+  const run = await walkGifts(
+    credential,
+    dumpRoom,
+    CLEAROUT_WORDS,
+    stock => clearoutStart(stock, allowlist, reserved, context.now),
+    context.log
+  )
+
+  // 走法的四个判定落成记录：送满了是做完，没送满或什么都没得送是受阻，一次请求失败才是失败。
+  const outcome: ActionOutcomeValue = run.verdict === 'failed' ? 'failed' : run.verdict === 'sent' ? 'done' : 'blocked'
+
+  const counts = `牌子 ${String(rooms.length)} 个、保留 ${String(reserved)} 件、本次送出 ${String(run.sent)} 件`
+  context.log(`清仓：${counts}（房间 ${String(dumpRoom)}）`)
+
+  return {
+    actionKey: key,
+    targetKey: TARGET_KEY_ACCOUNT_SCOPED,
+    outcome,
+    code: run.recordCode,
+    detail: run.clause === '' ? counts : `${counts}；${run.clause}`,
+    failure: run.failure,
+    items: [
+      // 这一次的行为本身，先列出来：它的 `outcome` 就是记录的 `outcome`，所以「记录说 done、底下的条目说
+      // 另一件事」在这个动作里不可表达——`types.ts` 要的那条不变量由构造保证，而不是靠一个测试。
+      { kind: 'account', label: actionLabelOf(key), outcome, detail: run.act, code: run.recordCode },
+      // 然后是保留量的逐房间账：这一轮为每个牌子房间留了几件、因为什么。这是这个动作唯一一处「跨动作耦合」
+      // 落到人眼前的地方，缺了它，下一个人会以为倒出去的件数对不上是漏了。
+      ...rooms.map(room => ({
+        kind: 'room' as const,
+        label: room.label,
+        outcome: (room.owed > 0 ? 'blocked' : 'already') as ActionOutcomeValue,
+        detail:
+          room.owed > 0
+            ? `今天还差 ${String(room.owed)} 件礼物（这一轮为它留了 ${String(room.owed)} 件）`
+            : '今天不需要礼物',
+        code: String(room.owed)
+      }))
+    ]
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -3605,10 +4277,13 @@ async function reconcileFishing(
 /**
  * OPFOY 活动签到, now gated by a read.
  *
- * `31200` is **signed now, no gift this time** and `31015` is "已经签过啦"; both mean the
- * signature is in place, which is why `signActivity` accepts both as success and reports
- * which one it was. `31015` is therefore `already` and parks for the day, while `31200` is
- * today's `done`.
+ * `31200` is **today's signature landing** — the captured body answers 「签到成功!」 and the ledger
+ * entry written in that same second is 「签到礼包 +20」, so the older reading of this number as
+ * "signed, handed nothing" is not what the account got (`errors.ts` records the move).
+ * `31015` is "已经签过啦"; both mean the signature is in place, which is why `signActivity`
+ * accepts both as success and reports which one it was. `31015` is therefore `already` and parks
+ * for the day — on a number nobody has ever seen: this capture was scanned for it and answered
+ * zero hits — while `31200` is today's `done`.
  *
  * `getStatus` runs first, and `todaySigned: 1` ends the run without a write. §2.5 measured
  * both halves of that gate — the read wants the token and nothing else, and a token that is
@@ -3616,9 +4291,12 @@ async function reconcileFishing(
  * being a saving of one request: an unreadable session has to arrive as `account_stop`, not
  * as a quiet "nothing to do".
  *
- * No csrf token is sent and none is needed: §2.5 measured that an empty `csrfToken`
- * passes, because the CSRF cookie this endpoint would otherwise want belongs to the
- * web session this adapter never holds.
+ * No csrf token is sent, and the capture says what that costs and what it does not: the page
+ * mints one first (`POST /japi/carnival/nc/common/generateCsrf` → `Set-Cookie: cvl_csrf_token`,
+ * `Max-Age=300`) and then sends it as the cookie **and** as the body field, while this adapter
+ * sends the field empty and no cookie at all — the shape §2.5's `签到礼包` ledger entry belongs to.
+ * So the omission is not "this endpoint needs nothing"; it is a measured-working shape, and a
+ * parity change that minted the pair would have to be re-measured rather than assumed better.
  *
  * The details below leave both the `signAlias` and the activity's name out: the alias
  * travels in the item's `code`, which only the debug section renders, and the activity is
@@ -3626,9 +4304,10 @@ async function reconcileFishing(
  * the fact — 「已签」 — where the old wording spent a sentence saying the same thing twice
  * (`活动「20250521OPFOY_qd2」签到成功。` said nothing to anyone but us, §2.5).
  *
- * **Neither detail states a reward**, though §2.5 records one. The sign response
- * carries no award — a first-time `31200` answers `data: {}`, and the 20 积分 figure
- * comes from the activity's own config, where it varies by day (第 1–6 天 20、第 7 天
+ * **Neither detail states a reward**, though the capture shows one landing. The sign response
+ * carries no award — the captured `31200` answers `data: {}` — and the `+20` the ledger took in
+ * that same second is a fact from an endpoint this action never calls
+ * (`redeemPoints/pointRecord`); the activity's own rule varies by day (第 1–6 天 20、第 7 天
  * 20+30). A number this adapter has not read back is a number it must not report.
  */
 async function reconcileActivitySign(credential: ParsedCredential | null): Promise<ActionOutcome> {
@@ -4116,8 +4795,13 @@ function roomOutcome(
 /** An item's label for a group the service did not name. Never the group's id. */
 const UNNAMED_GROUP = '未命名版块'
 
-/** The same idea for a room, which the badge wall lists by anchor name. Never the room's id. */
-const UNNAMED_ROOM = '未命名直播间'
+/**
+ * The same idea for a room, which the badge wall lists by anchor name. Never the room's id.
+ *
+ * Exported because `platform/douyu/options.ts` labels the same rooms on the settings form: the two are
+ * the same words for the same fact, and a second copy of the string is how one of them drifts.
+ */
+export const UNNAMED_ROOM = '未命名直播间'
 
 /** The same idea for a task the service sent no name for: `taskType` is a number, and never a label. */
 const UNNAMED_TASK = '未命名任务'

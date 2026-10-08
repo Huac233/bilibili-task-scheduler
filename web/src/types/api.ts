@@ -273,6 +273,37 @@ export type ActionChoice =
   | { readonly kind: 'unavailable'; readonly reason: string }
 
 /**
+ * One thing read live about one Target, as the task page reads it.
+ *
+ * `name` is a stable key the page never renders, `label` says what the fact is about — 「形象」,
+ * 「在用鱼饵」 — and `value` is the fact itself as a sentence. **No identifier travels in `value`**: the
+ * Room's own id is on the page already, and what these carry is states and quantities.
+ *
+ * Its sibling `ActionChoice` is the one that is *stored* and re-used by every Task naming an action;
+ * this one is read for the Room in front of a person and stored nowhere, which is why the route behind
+ * it is handed a Target and the one behind a choice is not.
+ */
+export interface TargetFact {
+  readonly name: string
+  readonly label: string
+  readonly value: string
+}
+
+/**
+ * What one read of a Target's own facts answered, or why there is none.
+ *
+ * **Three members rather than two**, and the third is what lets the page stay silent honestly: `none`
+ * is "this build serves no such read for that action", which is a different answer from a read that
+ * failed — a page drawing the failure sentence for it would be blaming a read nobody wired. The first
+ * two are `ActionChoice`'s own pairing, for its own reason: an account we could not ask about and a
+ * Room with nothing set are opposite facts that look identical as a blank.
+ */
+export type TargetFactRead =
+  | { readonly kind: 'ok'; readonly items: readonly TargetFact[] }
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'none' }
+
+/**
  * One action's stored options as a plain map, whatever was stored.
  *
  * The field is `unknown` because the shape belongs to the action, so every reader has to narrow it

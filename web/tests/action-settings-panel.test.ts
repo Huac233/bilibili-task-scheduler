@@ -919,14 +919,20 @@ describe('an action’s parameters', () => {
     await mountPanel()
     await clickInRow('亲密度任务', '设置参数')
 
-    // What the field is: the ticked ids are the set the action **may** act on. What decides whether it
+    // What the field is: the ticked values are what the action **may** act on. What decides whether it
     // acts is the switch, which is the other control on this row — and the third clause is the promise
     // the whole off-by-default decision rests on: the list is not a way to spend while the switch is
-    // shut (`runner.ts` reads the switch before it dispatches either executor, and answers a shut switch
-    // with `switchOffReport`).
-    expect(text()).toContain('清单决定哪些可以送')
-    expect(text()).toContain('动作开关决定到底送不送')
-    expect(text()).toContain('开关关着的时候，这份清单不会让任何一件东西出去')
+    // shut (`runner.ts` reads the switch before it dispatches either executor, and answers a shut
+    // switch with `switchOffReport`).
+    //
+    // **The words used to be the gift allowlist's** — 「清单决定哪些可以送」「不会让任何一件东西出去」 — which
+    // was one action's private fact standing on a form that fills in every action's fields: the moment
+    // an action declared a list of *rooms* to pour into, 「送」 described the wrong thing. The note says
+    // what is true of every list, and the concrete meaning of these values lives in the field's own
+    // `help`, which the action that reads them writes.
+    expect(text()).toContain('这份清单决定这个动作可以动哪些')
+    expect(text()).toContain('动作开关决定它到底动不动')
+    expect(text()).toContain('开关关着的时候，这个动作什么都不会做')
   })
 
   /**
@@ -996,7 +1002,7 @@ describe('an action’s parameters', () => {
 
     await clickInRow('粉丝家园钓鱼', '收起参数')
     await clickInRow('亲密度任务', '设置参数')
-    expect(text()).toContain('清单决定哪些可以送')
+    expect(text()).toContain('这份清单决定这个动作可以动哪些')
   })
 
   it('reopens on the value just saved, because the write goes through the store', async () => {

@@ -20,6 +20,14 @@ const CSRF = 'jct-value'
 const TOKEN = 'aBcD1234compositeToken'
 /** The `dy_cookie` value of the recorded FANSHOME capture (`protocol.ts` quotes the same hex). */
 const DY_COOKIE = 'c15c797cbe859a50731ffe6a3c041aa6'
+/**
+ * A stand-in for the activity page's `cvl_csrf_token` value, which this repo's own quotations render only
+ * as `…` (`protocol.ts`'s note on `FANSHOME_CSRF_COOKIE`).
+ *
+ * Multi-character, like every value here, and that is a contract rather than a coincidence: a fixture is a
+ * potential entry in a value list, and no list may hold a one-character value. See `redactSecrets`.
+ */
+const CVL_CSRF = 'cvl-csrf-value'
 
 describe('redactSecrets', () => {
   it('replaces every occurrence of each value', () => {
@@ -70,6 +78,21 @@ describe('redactCredentialParameters', () => {
     // prefix is a word character, so no `\b`-anchored alternative can start inside them, and
     // the boundary that would reach them is the same one that redacts this parameter.
     expect(redactCredentialParameters(`&csrfToken=${TOKEN}`)).toBe(`&csrfToken=${TOKEN}`)
+  })
+
+  it('masks the cvl_csrf_token cookie while the csrfToken field beside it stays readable', () => {
+    // The sibling of the pin above, and the pair is the point: one string carries both names, one of them
+    // a credential at rest and the other a form field whose value is not one. The activity page sends its
+    // own value under **both** names — `Cookie: cvl_csrf_token=…` and the body's `csrfToken` — so a rule
+    // loosened enough to catch the cookie from a `\b` would redact the body field too, and pinning the two
+    // together is what stops the next reader from making the rule wider to "cover" this name.
+    //
+    // `cvl_csrf_token` is listed by its full name because the anchor provably cannot see it: the character
+    // before `csrf_token` is `_`, a word character, so no `\b`-anchored alternative can begin inside it —
+    // the same reason `acf_auth` and `acf_jwt_token` below are named in full rather than reached.
+    const echoed = `Cookie: cvl_csrf_token=${CVL_CSRF}; field: csrfToken=${TOKEN}`
+
+    expect(redactCredentialParameters(echoed)).toBe(`Cookie: cvl_csrf_token=${REDACTED}; field: csrfToken=${TOKEN}`)
   })
 
   it('removes the dy_cookie a refusal sentence can echo back', () => {

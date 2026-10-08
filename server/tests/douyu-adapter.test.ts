@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ACTIVITY_ALREADY_SIGNED,
-  ACTIVITY_SIGN_NO_GIFT,
+  ACTIVITY_SIGN_SUCCESS,
   CLIENT_SIGN_ALREADY_SIGNED,
   classifyError,
   DouyuProtocolError,
@@ -177,13 +177,20 @@ function webCredentials(): string {
 }
 
 /** A 粉丝牌 row as the badge wall describes it: the room, and the anchor it is held against. */
-function badge(roomId: string, anchorName: string): unknown {
-  return { roomId, anchorName }
+/**
+ * One badge-wall row, with 今日亲密度.
+ *
+ * The third field is carried because the row now has it (`FanBadge.todayIntimacy`, the page's fourth cell)
+ * and a mock that omitted it would be describing a page this build no longer reads. The default is `0`,
+ * which is what the captured row for room 12293234 reads.
+ */
+function badge(roomId: string, anchorName: string, todayIntimacy: number | null = 0): unknown {
+  return { roomId, anchorName, todayIntimacy }
 }
 
-/** The two rooms this account actually holds (the captured page's own rows). */
+/** The two rooms this account actually holds (the captured page's own rows, 今日亲密度 included). */
 function badgeList(csrf: string | null = MINTED_CCN): unknown {
-  return { badges: [badge('12293234', '145oni'), badge('12306', '电棍')], csrf }
+  return { badges: [badge('12293234', '145oni', 0), badge('12306', '电棍', 2)], csrf }
 }
 
 /**
@@ -266,7 +273,7 @@ interface ExpectedAction {
  * which read like a rule and only held while every per-Room action on this Platform happened to be a
  * Send one — 亲密度任务 is a Reconcile action that needs a Room, exactly as Bilibili's 点赞 and 观看
  * 直播 are, and 钓鱼 is the second one. The reverse rule (「reconcile 一定不需要目标」) is wrong in the
- * other direction: six of the nine rows are account-scoped. So the two fields mean "a Room identifies
+ * other direction: seven of the ten rows are account-scoped. So the two fields mean "a Room identifies
  * this action" and "it consumes Bullets", each row states its own answer, and the case below asserts
  * only that the set asking for a Room is not the set asking for a Library.
  */
@@ -369,6 +376,19 @@ const EXPECTED_ACTIONS: readonly ExpectedAction[] = [
     needsLibrary: false,
     maxMessageLength: 0,
     defaultIntervalSeconds: 300
+  },
+  {
+    key: ActionKey.Clearout,
+    action: TaskAction.Reconcile,
+    label: '送出即将过期的免费道具',
+    // It sends free 道具 to an anchor's room as public gifts, which cannot be un-sent — the same reason
+    // 亲密度任务 is costly, and the same reason the allowlist exists beside it.
+    costly: true,
+    /** Account-scoped: the room the items go to is 「默认倾泻直播间」 in this action's own options. */
+    needsTarget: false,
+    needsLibrary: false,
+    maxMessageLength: 0,
+    defaultIntervalSeconds: 300
   }
 ]
 
@@ -378,7 +398,7 @@ describe('the action catalogue', () => {
     expect(douyuPlatform.label).toBe('斗鱼')
   })
 
-  it('declares exactly the nine measured actions, in order', () => {
+  it('declares exactly the ten measured actions, in order', () => {
     expect(douyuPlatform.actions.map(action => action.key)).toEqual(EXPECTED_ACTIONS.map(action => action.key))
   })
 
@@ -388,14 +408,15 @@ describe('the action catalogue', () => {
     expect(descriptor?.description).not.toBe('')
   })
 
-  it('marks the three actions that spend as costly, and says what each one spends', () => {
-    // 打卡分鱼丸 spends 200 鱼丸 on entry, 钓鱼 spends bait that cannot be earned back, and 亲密度任务 gives
-    // gifts away in public where they cannot be un-sent: three different things to lose, and all three
-    // irreversible — which is what `costly` keeps dark until a person turns it on.
+  it('marks the four actions that spend as costly, and says what each one spends', () => {
+    // 打卡分鱼丸 spends 200 鱼丸 on entry, 钓鱼 spends bait that cannot be earned back, and 亲密度任务 and
+    // 清仓 give gifts away in public where they cannot be un-sent: four different things to lose, and all
+    // four irreversible — which is what `costly` keeps dark until a person turns it on.
     expect(douyuPlatform.actions.filter(action => action.costly).map(action => action.key)).toEqual([
       ActionKey.GrowthPool,
       ActionKey.IntimacyTasks,
-      ActionKey.Fishing
+      ActionKey.Fishing,
+      ActionKey.Clearout
     ])
 
     const pool = douyuPlatform.actions.find(action => action.key === ActionKey.GrowthPool)
@@ -411,6 +432,16 @@ describe('the action catalogue', () => {
     const intimacy = douyuPlatform.actions.find(action => action.key === ActionKey.IntimacyTasks)
     expect(intimacy?.description).toContain('允许使用的礼物')
     expect(intimacy?.description).toContain('扣费')
+
+    // 清仓's has to carry four things a person cannot get anywhere else: what it sends, where it sends it
+    // (a room from the *preferences*, not the Task), that it holds items back for 亲密度任务's renewal,
+    // and that 「允许使用的道具」 is this action's own list.
+    const clearout = douyuPlatform.actions.find(action => action.key === ActionKey.Clearout)
+    expect(clearout?.description).toContain('默认倾泻直播间')
+    expect(clearout?.description).toContain('允许使用的道具')
+    expect(clearout?.description).toContain('亲密度任务')
+    expect(clearout?.description).toContain('24 小时')
+    expect(clearout?.description).toContain('扣费')
   })
 
   it('describes the activity by the name a person meets it under, not by its alias', () => {
@@ -434,12 +465,12 @@ describe('the action catalogue', () => {
    * What used to stand here — `expect(descriptor.needsTarget).toBe(isSend)` for every row — was a rule
    * that happened to hold while every per-Room action on this Platform was also a Send action, and it
    * broke the moment 亲密度任务 arrived as a Reconcile action that needs a Room. The rephrasing matters
-   * more than the assertion does: 「reconcile 一定不需要目标」 is equally false (six of these nine rows
+   * more than the assertion does: 「reconcile 一定不需要目标」 is equally false (seven of these ten rows
    * are account-scoped — the other two that take a Room are 亲密度任务 and 钓鱼), so what the next
    * reader has to find here is "there is no rule", not a narrower one. The count lives in the case
    * below rather than in this sentence, so the two cannot disagree: it filters `needsTarget`.
    */
-  it('asks three of nine rows for a Room and one of nine for a Library, which are different sets', () => {
+  it('asks three of ten rows for a Room and one of ten for a Library, which are different sets', () => {
     const perRoom = douyuPlatform.actions.filter(action => action.needsTarget).map(action => action.key)
     const senders = douyuPlatform.actions.filter(action => action.needsLibrary).map(action => action.key)
 
@@ -497,7 +528,7 @@ describe('the credential blob', () => {
  * precisely the silent drift this pins down.
  */
 describe('the classification table', () => {
-  it.each([CLIENT_SIGN_ALREADY_SIGNED, ACTIVITY_ALREADY_SIGNED, ACTIVITY_SIGN_NO_GIFT])(
+  it.each([CLIENT_SIGN_ALREADY_SIGNED, ACTIVITY_ALREADY_SIGNED, ACTIVITY_SIGN_SUCCESS])(
     'grades %i as action_stop',
     code => {
       expect(classifyError(code)).toBe('action_stop')
@@ -1246,8 +1277,9 @@ describe('reconcile', () => {
     it('states no reward, because the response carries none', async () => {
       const outcome = outcomeOf((await reconcileWith([ActionKey.ActivitySign])).outcomes, ActionKey.ActivitySign)
 
-      // §2.5 records that the activity pays 积分, but a first-time `31200` answers
-      // `data: {}` and the figure comes from the activity's config, where it varies by
+      // The activity does pay 积分 — the capture shows a 「签到礼包 +20」 ledger entry written in the
+      // same second — but the award is neither in this response (`data: {}` is what the captured
+      // `31200` body holds) nor read back by this adapter, and the config's own figure varies by
       // day. Reporting a number this adapter has not read back would be an invention.
       expect(outcome.detail).not.toMatch(/\d/)
     })

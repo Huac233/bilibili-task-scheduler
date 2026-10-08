@@ -56,12 +56,46 @@ export const REDACTED = '<redacted>'
  * a service echoing the request back has nothing else standing between its own
  * sentence and a credential.
  *
- * `cvl_csrf_token` is deliberately absent, and that omission is a measurement rather
- * than an oversight: the name belongs to `generateCsrf`'s `carnivalApi/*` family,
- * which this build never calls — `signActivity` sends `csrfToken: ''` and no cookie
- * at all — so no sentence here can carry its value. `protocol.ts` records the same
- * fact where it says a reader who reaches for that cookie has the wrong one, not a
- * missing one.
+ * `cvl_csrf_token` is the third name of that class, and it is **in** the list. It was
+ * argued out of it here on a premise this repo's own code contradicts: that the name
+ * belongs to the `carnivalApi/*` family, "which this build never calls". This build
+ * does call `carnivalApi/*` — `signActivity` posts `/japi/carnivalApi/sign/doSign`
+ * and `readActivitySignStatus` reads `/japi/carnivalApi/nc/sign/getStatus` — so that
+ * sentence was a claim about the call graph written in the voice of a measurement,
+ * which is the failure this file is here to prevent.
+ *
+ * What survives of it is narrower, and it is about the **value** rather than about the
+ * name. The one endpoint this build does not call is the one that mints it, an empty-body
+ * `POST /japi/carnival/nc/common/generateCsrf` (one segment `carnival` where the family
+ * spells `carnivalApi`), and the shape `signActivity` is measured to send is the one that
+ * needs no such value: `csrfToken` **empty** and no cookie at all, both pinned in
+ * `tests/douyu-wire.test.ts`. So "this build mints no `cvl_csrf_token`" is true of today's
+ * call graph, and that is the whole of what the measurements carry. The old sentence drew
+ * one conclusion further — that *no sentence here can carry its value* — and that needed a
+ * premise nobody measured: that a sentence can only carry a value this build minted. It
+ * cannot be assumed here, because several callers forward a stored `webCookies` blob as a
+ * `Cookie:` header (`signFansHome`, `readFanBadges`) and nothing in this module reads which
+ * names that blob carries. That is the `dy_cookie` lesson above applied one step earlier:
+ * what has to catch a credential is the **name**, because the site doing the redacting may
+ * be the one that holds no values.
+ *
+ * The call graph is not what decides this list, anyway. The anchor decides it, and it does
+ * not move when a caller is added: the character before `csrf_token` in `cvl_csrf_token` is
+ * `_`, a word character, so no `\b`-anchored alternative can begin inside the name — exactly
+ * as for `acf_auth` and `acf_jwt_token` above. So this entry is **needed now** rather than
+ * "not needed yet": a name the anchor provably cannot see has to be listed in full whoever
+ * calls what, and it would still have to be listed if that mint were implemented tomorrow
+ * and called hourly. `protocol.ts` says the neighbouring thing from the other side: a reader
+ * who reaches for that cookie has the wrong one, not a missing one.
+ *
+ * The pair that keeps this rule narrow is pinned in `tests/text-redact.test.ts`:
+ * `csrfToken=${token}` stays readable while `cvl_csrf_token=<value>` is masked, in one
+ * string, because the two names arrive side by side in one exchange and a rule loose enough
+ * to catch the cookie from a `\b` would redact the form field with it.
+ *
+ * Coverage, stated because a redactor may not widen in silence: this adds exactly one
+ * name, `cvl_csrf_token`, to the parameter rule. The value rule (`redactSecrets`)
+ * covers exactly what it covered before.
  *
  * It matches the `name=value` shape only, which is what a query string, a urlencoded
  * body and a `Cookie:` header use. It deliberately does **not** match the JSON shape
@@ -72,7 +106,7 @@ export const REDACTED = '<redacted>'
  * that can.
  */
 const CREDENTIAL_PARAMETERS =
-  /\b(dy_token|dy_cookie|acf_auth|acf_jwt_token|jwt_token|token|csrf|csrf_token|refresh_token|qrcode_key|ticket|SESSDATA|bili_jct)=[^&\s"';]*/gi
+  /\b(dy_token|dy_cookie|acf_auth|acf_jwt_token|cvl_csrf_token|jwt_token|token|csrf|csrf_token|refresh_token|qrcode_key|ticket|SESSDATA|bili_jct)=[^&\s"';]*/gi
 
 /**
  * Removes each secret *value* from `text`.

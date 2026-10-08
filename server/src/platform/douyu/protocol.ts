@@ -3,7 +3,7 @@ import { type ZodType, z } from 'zod'
 import { redactCredentialParameters } from '../../text/redact.js'
 import {
   ACTIVITY_ALREADY_SIGNED,
-  ACTIVITY_SIGN_NO_GIFT,
+  ACTIVITY_SIGN_SUCCESS,
   CLIENT_SIGN_ALREADY_SIGNED,
   classifyError,
   DouyuProtocolError,
@@ -25,7 +25,11 @@ import { decodeStt } from './socket.js'
  *   鱼吧            `yuba.douyu.com` and `mapi-yuba.douyu.com` — the token arrives
  *                  as `dy-token` (PC) or a bare `token` (android gateway), never
  *                  in the URL, and the verdict field is `status_code`.
- *   `carnivalApi`  `www.douyu.com` — the activity sign-in: a bare `token` header.
+ *   `carnivalApi`  `www.douyu.com` — the activity sign-in. This module calls it with a bare
+ *                  `token` header; the page it drives does the same job with its own cookie
+ *                  session and sends no `token` at all (the 2026-10-09 capture's `doSign` carried
+ *                  `acf_auth`/`dy_auth` and 36 other cookies instead), which is why the two shapes
+ *                  are compared field by field at `signActivity` rather than assumed equal.
  *   `userSignActivity` `apiv2.douyucdn.cn` — 打卡分鱼丸's one read and two writes. Same
  *                  host and the same `error` verdict as `h5nc/*`, but the token must be
  *                  paired with a `dy_cookie` value twice over — header cookie and body
@@ -813,6 +817,11 @@ export const ACTIVITY_NOT_LOGGED_IN = 300
  * `status[].signed` — the other date-shaped field in this payload — is deliberately
  * **not** modelled. It has been observed as `0/1/2/3`, with future dates already
  * carrying `2`, so it is not a boolean about today and nothing here may read it as one.
+ * The 2026-10-09 capture makes that mapping a measurement rather than an inference, and
+ * still not a gate: it shows `1` on an already-signed day (10月08日) and `0` on today
+ * before the write, `2` on both future days, `3` on the three missed days, and — between
+ * one `remedy` call and the next read — `3 → 1` on the day that was made up. So `3` is
+ * "missed and still fillable", and it is `remedy[0].num` that says whether it can be.
  */
 export const activityStatusSchema = z.object({ todaySigned: counter })
 export type ActivitySignStatus = z.infer<typeof activityStatusSchema>
@@ -848,26 +857,52 @@ export async function readActivitySignStatus(
 }
 
 export interface ActivitySignOutcome {
-  /** True when the activity answered `31015`: the signature was already in place. */
+  /**
+   * True when the activity answered `31015`: the signature was already in place.
+   *
+   * A number this repo has never seen on the wire — see `errors.ts` for its provenance and for why
+   * the branch is kept anyway. `31200`'s branch, by contrast, is now backed by the captured body.
+   */
   readonly alreadySigned: boolean
 }
 
 /**
  * `POST /japi/carnivalApi/sign/doSign` — the OPFOY activity signature.
  *
- * `csrfToken` is sent empty on purpose: §2.5 measured that it passes, and the CSRF
- * cookie this endpoint would otherwise want belongs to the web session this module
- * never holds.
+ * **`31200` is this endpoint's success answer, and it is a capture at last**: the call of
+ * 2026-10-09 answered `{"error":31200,"msg":"签到成功!","data":{},"redirectUrl":""}`, kept verbatim
+ * in `tests/captured/douyu-activity-sign-31200.json`. The code therefore means today's signature
+ * landed — the activity page's enum entry calls the same number 「签到成功无礼包」 and the ledger
+ * entry written in that same second is 「签到礼包 +20」, which is why `errors.ts` names it
+ * `ACTIVITY_SIGN_SUCCESS` and why `data` is still read as opaque: this response carries no award,
+ * and the payout it cannot see lives in `redeemPoints/pointRecord`.
  *
- * The two OK codes are not the same fact, and the result keeps them apart: `31200` is
- * **signed now, no gift this time** and `31015` is **today was already signed**. Both
- * mean today's signature is in place, so both are accepted here. Neither response body
- * has ever been captured in this repo, nor has the `data: {}` a first-time signature is
- * said to answer (§2.5) — which is why `data` is read as opaque and never as a reward.
+ * `31015` is the other OK code — the answer to a *second* sign-in — and it is still the page's
+ * enum entry with nothing under it: this capture was scanned for it and found none, because the
+ * account signed once. It is accepted anyway (a cheap "no" beats a retry against a write), but
+ * nothing here may read that acceptance as though the number had been measured.
  *
- * The caller reads `readActivitySignStatus` first and skips this call when today is
- * already signed. That ordering cannot live here: the skip is a decision about the day,
- * and this function knows only what one POST answered.
+ * **The CSRF shape below is deliberately not the page's, and the capture is what turns that from a
+ * guess into a decision.** Immediately before signing, the page mints a token — an empty-body
+ * `POST /japi/carnival/nc/common/generateCsrf` answers `{"error":0,"msg":"操作成功","data":{}}`
+ * and `Set-Cookie: cvl_csrf_token=…; Max-Age=300` — and then sends that value **twice**, as its
+ * `Cookie:` header and as this form's `csrfToken` field, 63 ms later. This build sends
+ * `csrfToken` **empty** and no cookie at all, which is the shape that the 2026-10-08
+ * `签到礼包 +20` ledger entry belongs to (§2.5).
+ *
+ * The probe's earlier `9001 请求校验不通过` is explained by the pairing rather than by emptiness:
+ * that request carried a non-empty token *without* the cookie it was minted into, which is the
+ * same half-a-handshake `interactnc/web` answers `403 csrf auth failed` to. Nothing measured
+ * covers the converse — whether an empty value passes *because* it is empty — so this may not be
+ * read as "the family does not check CSRF". The one measured fact is that the shape below signs.
+ *
+ * `useJiYan` differs too — `true` in the capture, `false` here — and nothing in this repo measures
+ * whether the service reads it; the page asks for 极验 because it has a slide to solve, and this
+ * build has none.
+ *
+ * The caller reads `readActivitySignStatus` first and skips this call when today is already signed.
+ * That ordering cannot live here: the skip is a decision about the day, and this function knows only
+ * what one POST answered.
  */
 export async function signActivity(
   token: string,
@@ -889,11 +924,43 @@ export async function signActivity(
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  // No field of `data` is named: a name would be a claim about a body nobody has seen.
-  const result = await callApi(spec, z.unknown(), [ACTIVITY_SIGN_NO_GIFT, ACTIVITY_ALREADY_SIGNED])
+  // No field of `data` is named: the captured body's `data` is `{}`, and naming a field would be a
+  // claim about a payout that this response has never carried.
+  const result = await callApi(spec, z.unknown(), [ACTIVITY_SIGN_SUCCESS, ACTIVITY_ALREADY_SIGNED])
   if (!result.ok) return result
   return { ok: true, code: result.code, data: { alreadySigned: result.code === ACTIVITY_ALREADY_SIGNED } }
 }
+
+/**
+ * **`POST /japi/carnivalApi/sign/remedy` — the activity's make-up sign — is not implemented, and
+ * this block is the finding that says what implementing it would cost to get wrong.** It shares the
+ * host, the `application/x-www-form-urlencoded` body and the `csrfToken` + `signAlias` + `useJiYan`
+ * fields with `signActivity`, and differs by exactly one field: **`offset`**, the day's index
+ * counted from the same payload's `todayOffset` (`offset` 2 against `todayOffset: 4` is 10月07日,
+ * which `status[2].dateDes` names; `doSign` sends no `offset` at all, which is why the two are not
+ * interchangeable).
+ *
+ * Why it is recorded instead of written: **its outcome cannot be a boolean on its code.** The
+ * captured call answered `{"error":31202,"msg":"当前签到内容没有配置礼包奖励~","data":{}}` — a
+ * refusal, and by the bundle's own table `31202 = 无礼包奖励` — while the same second moved three
+ * independent state bits in the account's favour: `signDays` 2 → 3, `status[2].signed` 3 → 1,
+ * `remedy[0].num` 9 → 8 (one make-up chance spent), and the ledger took a `+20` entry at 03:20:44.
+ * The two `takeBag` calls that bracket it both answered `31000`, so that `+20` cannot be theirs.
+ * A caller reading `31202` as failure would report a refusal for a day it had just repaired, and
+ * would leave a *spent* chance to be spent again on the next run.
+ *
+ * What an implementation needs first, none of which this capture supplies: this endpoint's own
+ * success code (never observed — there is exactly one `remedy` sample in the file), a decision about
+ * what `31202` means when a day *is* filled, and a `remedy[0].num` read on both sides of the write
+ * to see the chance move. `31202` must not be added to `errors.ts`'s global table on the way in:
+ * like `FISH_BALL_ALREADY_CLAIMED`, it means this only where the endpoint answering it is known.
+ *
+ * The neighbouring claim paths are in the same state and for the same reason: this capture holds
+ * **no** `takeGift`, `deliver`, `receive` or `claim` call at all (0 hits across 135 unique
+ * method+path), and its four `gametask/viewStatus` reads answered `status: 1` for all five watch
+ * tasks — never the `status: 2` a claim would be triggered by. So the reference implementation's
+ * claim path stays a reference, and nothing here may be built on it.
+ */
 
 /* ------------------------------------------------------------------ *
  * 打卡分鱼丸 — the two-day pool activity
@@ -1049,8 +1116,12 @@ export async function clockGrowthPool(
  * and a captured PC-client call of the same family sends
  * `ctn=c15c797cbe859a50731ffe6a3c041aa6` in its body while its own `cookie:` header carries
  * `acf_ccn=c15c797cbe859a50731ffe6a3c041aa6`, character for character. The `cvl_csrf_token`
- * that `generateCsrf` hands out belongs to `carnivalApi/*` and lives 300 seconds; a reader
- * who reaches for either of those has the wrong cookie, not a missing one.
+ * that `generateCsrf` hands out belongs to `carnivalApi/*` and lives 300 seconds; **both halves of
+ * that sentence are now measurements rather than assertions**: the 2026-10-09 capture holds the mint
+ * (`Set-Cookie: cvl_csrf_token=…; Max-Age=300`, from an empty-body
+ * `POST /japi/carnival/nc/common/generateCsrf`) and the `doSign` 63 ms later, which carried that
+ * value in its `Cookie:` header *and* in its form field `csrfToken`. A reader who reaches for either
+ * of those has the wrong cookie, not a missing one.
  */
 export const FANSHOME_CSRF_COOKIE = 'acf_ccn'
 
@@ -1108,6 +1179,62 @@ export interface FanBadge {
   readonly roomId: string
   /** The anchor's display name, from the same row's `data-anchor_name`. `''` when absent. */
   readonly anchorName: string
+  /**
+   * 今日亲密度 — how much intimacy this room gained today — or **`null` when the cell could not be read**.
+   *
+   * Positional, and there is no alternative: the cell carries no `data-*`, no id and no semantic class
+   * — `<td><span class="">0</span></td>` is the whole of it — so the only thing that identifies it is
+   * that it is the **fourth** cell of the row, the one the table's own header calls 今日亲密度. The
+   * measurement behind that index is `tests/captured/douyu-fan-badges.html`: its `<thead>` reads
+   * 徽章 / 主播 / 亲密值 / 今日亲密度 / 排名 / 操作, and `douyu-fan-badges.test.ts` reads that header out
+   * of the fixture and asserts this index is the cell it names, so the two cannot drift silently.
+   *
+   * **`null` and `0` are different facts and this field is the only place the difference survives.**
+   * `0` is a reading — nothing has been gained in that room today; `null` is this side not knowing,
+   * which is a state a caller reporting 「今天还没送过」 on a `0` would be inventing.
+   *
+   * **What `0` is evidence of, and what it is not.** 今日亲密度 is the *result* — the day's intimacy
+   * gained in that room — and it was measured moving without any prop leaving the backpack
+   * (`D:\Documents\deepseek-harness\default-workspace\douyu-gift-expiry\REPORT.md` §2.2: room 12306 read
+   * `2` at 02:05 and `12` at 15:5x while the 荧光棒 count stayed at 60). So `0` means "nothing at all was
+   * gained here today", from which "no gift was sent here today" follows only because a gift is one of
+   * the things that gains intimacy — it is an inference from the reading, not the field's definition.
+   */
+  readonly todayIntimacy: number | null
+}
+
+/**
+ * 今日亲密度 is the row's fourth cell, and the index is a measurement rather than a preference.
+ *
+ * Zero-based, so `3` is the fourth `<td>`; see `FanBadge.todayIntimacy` for the capture the header in
+ * it was read from and for the test that re-reads it.
+ */
+const TODAY_INTIMACY_CELL = 3
+
+/**
+ * `<td` or `<td …>` — the cell delimiter, the same shape `BADGE_ROW_START` has for rows.
+ *
+ * Only the *starts* are needed: a cell runs to the next start, and the last one runs to the end of the
+ * row, which is exactly how `badgesIn` slices rows out of the page.
+ */
+const BADGE_CELL_START = /<td[\s>]/g
+
+/**
+ * 今日亲密度 out of one row, or `null` when the cell is not there or is not a number.
+ *
+ * Tags are stripped rather than parsed: the cell's own content is a `<span>` with an empty class and a
+ * decimal integer, and this module has no HTML parser and does not add one for that (see `attributeIn`).
+ * A cell whose text is not digits is `null` and not `0` — the shape this module has never seen must not
+ * arrive as the one value that means "nothing was gained today".
+ */
+function todayIntimacyIn(row: string): number | null {
+  const starts = [...row.matchAll(BADGE_CELL_START)].map(match => match.index ?? 0)
+  const start = starts[TODAY_INTIMACY_CELL]
+  if (start === undefined) return null
+
+  const cell = row.slice(start, starts[TODAY_INTIMACY_CELL + 1] ?? row.length)
+  const text = cell.replace(/<[^>]*>/g, '').trim()
+  return /^\d+$/.test(text) ? Number(text) : null
 }
 
 /**
@@ -1149,7 +1276,7 @@ function attributeIn(html: string, name: string): string {
  * The rooms the badge wall lists.
  *
  * The rows are the `<tr>`s carrying `data-fans-room`; the header row is skipped by that test
- * rather than by its position, so nothing depends on the table being first. Two fields are
+ * rather than by its position, so nothing depends on the table being first. Three fields are
  * read and no more. The same rows also carry `data-fans-level`, `data-fans-intimacy` and
  * `data-dfans`, and **`data-dfans` is deliberately not modelled** even though it looks like
  * the 钻石粉丝 flag: whether it gates anything has never been measured, and a field nothing
@@ -1163,7 +1290,11 @@ function badgesIn(html: string): FanBadge[] {
     const row = html.slice(start, starts[index + 1] ?? html.length)
     const roomId = attributeIn(row, 'data-fans-room')
     if (roomId === '') continue
-    badges.push({ roomId, anchorName: attributeIn(row, 'data-anchor_name') })
+    badges.push({
+      roomId,
+      anchorName: attributeIn(row, 'data-anchor_name'),
+      todayIntimacy: todayIntimacyIn(row)
+    })
   }
 
   return badges
@@ -1214,6 +1345,117 @@ export async function readFanBadges(
 
   const response = await request(spec)
   return { badges: badgesIn(response.body), csrf: readCookie(response.setCookie, FANSHOME_CSRF_COOKIE) }
+}
+
+/**
+ * `GET /wgapi/livenc/liveweb/follow/list?page=<N>` — the rooms this account follows.
+ *
+ * **What is measured and what is not, stated before the fields.** This endpoint is in this project's own
+ * probe catalogue (`douyu-probe/src/catalogue.ts`, `read-follow-list`), and what those runs recorded is
+ * the **refusal**: with no usable login cookie and no `token` header it answers HTTP 200 with
+ * `{"code":-1,"error":-1,"msg":"用户未登陆或token已过期"}`. **No body of `follow/list` itself has ever been
+ * captured**, so the item field names below are not read off a `list` response. They are read off the
+ * **sibling endpoint's** response on this very account — `follow/top3`, captured in
+ * `D:\mitmproxy\all-2026-10-08_18-22-04.mitm` and saved as `tests/captured/douyu-follow-top3.json` —
+ * whose items carry `room_id`, `nickname`, `room_name`, `show_status`, `online`, `videoLoop`,
+ * `avatar_small` and `show_time`, plus a `data.total`; and they agree field for field with what the two
+ * maintained third-party implementations read out of `list`'s items (`Sign_Room.js:30-34` uses
+ * `list[i].room_id` and `list[i].show_status`, `FollowList.js:42-46` uses `nickname`, `room_name`,
+ * `online`, `avatar_small`, `show_time`, `videoLoop`), and with the envelope `data.list` / `data.total`.
+ *
+ * **`show_status` is deliberately not modelled**, unlike in both of those. Whether a room is live is not a
+ * criterion anywhere in this build: the one action that sends a gift does not read it (see `walkGifts`),
+ * and the field this read feeds is 「默认倾泻直播间」, a destination rather than a live channel. A field
+ * nothing reads is a field the next reader decides to gate on.
+ *
+ * **`pageCount` is modelled, and it is the one third-party claim this reads.** `Sign_Room.js:20` reads it
+ * to know how many pages to walk, and no captured response has ever carried it — including `top3`'s, which
+ * answered `nowtime`/`room_list`/`nolive`/`total` and nothing else. So it is **optional**, and the caller
+ * treats its absence as "this page did not say" rather than as one page.
+ *
+ * The header set is the captured family's: `www.douyu.com` reads carry the whole cookie jar and no
+ * `token` — but the catalogue's own probe sent `{dyToken}` and got a refusal for an expired one, and
+ * `readFanBadges` beside this function sends both rather than guessing which half the service keys on. The
+ * two halves therefore travel together here for the same reason.
+ */
+export const FOLLOW_LIST_URL = `${WEB_ORIGIN}/wgapi/livenc/liveweb/follow/list`
+
+/** One followed room, as that list describes it. Names only: `show_status` is not read. See above. */
+export interface FollowedRoom {
+  /** The room's number, digits as a string — the value a choice stores and a gift POST is addressed by. */
+  readonly roomId: string
+  /** The anchor's display name. `''` when the service sent none. */
+  readonly nickname: string
+  /** The room's own title, which changes with the stream. `''` when the service sent none. */
+  readonly roomName: string
+}
+
+/**
+ * One page of the follow list.
+ *
+ * `total` and `pageCount` are `null` when the page did not declare them, which is a third reading and not
+ * a zero: "this page did not say how many there are" is what a paging loop has to be able to tell apart
+ * from "there are none".
+ */
+export interface FollowPage {
+  readonly rooms: readonly FollowedRoom[]
+  readonly total: number | null
+  readonly pageCount: number | null
+}
+
+const followedRoomSchema = z.object({
+  room_id: counter,
+  nickname: z.string().default(''),
+  room_name: z.string().default('')
+})
+
+const followPageSchema = z.object({
+  list: z.array(followedRoomSchema),
+  /** Both optional: neither has been seen on `list`, and a page that omits one must not fail this parse. */
+  total: counter.optional(),
+  pageCount: counter.optional()
+})
+
+export async function readFollowedRooms(
+  token: string,
+  webCookies: string,
+  page: number,
+  options: DouyuRequestOptions = {}
+): Promise<DouyuResult<FollowPage>> {
+  const spec: CallSpec = {
+    url: `${FOLLOW_LIST_URL}?${new URLSearchParams({ page: String(page) }).toString()}`,
+    method: 'GET',
+    headers: {
+      accept: 'application/json, text/plain, */*',
+      'accept-language': 'zh-CN,zh;q=0.9',
+      // The site's own home page, which is where the header's follow panel lives. The captured `top3`
+      // calls carried the page the person was on (`.../${rid}`) and a `?dyshid=` serial; neither is read
+      // here, and a referer that is the current page is what a browser would send from anywhere on the
+      // site — this build has no current page.
+      referer: `${WEB_ORIGIN}/`,
+      'user-agent': PC_USER_AGENT,
+      token,
+      ...(webCookies === '' ? {} : { cookie: webCookies })
+    },
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  }
+
+  const result = await callApi(spec, followPageSchema)
+  if (!result.ok) return result
+
+  return {
+    ok: true,
+    code: result.code,
+    data: {
+      rooms: result.data.list.map(row => ({
+        roomId: String(row.room_id),
+        nickname: row.nickname,
+        roomName: row.room_name
+      })),
+      total: result.data.total ?? null,
+      pageCount: result.data.pageCount ?? null
+    }
+  }
 }
 
 export interface FanHomeSignOutcome {
@@ -1893,11 +2135,27 @@ export async function readFishingChips(
  * filter 「免费」 by it, which is the mistake the allowlist exists to avoid. `price`, `isValuable`,
  * `expiry`, `intimate` and the image hosts are left out for the reason every unread field in this module
  * is: a field nothing parses is a field nobody can key a decision on by accident.
+ *
+ * **`met` is the one field added since, and it is added as optional on purpose.** It is the item's
+ * absolute expiry instant — measured, not inferred: `met = 1791734399` is 2026-10-11 23:59:59 (+08) and
+ * the official front end's own `getRestTime(expiry) - 1s` lands on that same second, which is also what
+ * makes `expiry: 4` "four days left including today" rather than an instant (the third-party script that
+ * renders it draws `expiry - 1`). 清仓 keys its whole judgement on this one number, so it is parsed;
+ * `expiry` and `exp` stay out, because they are the same fact in another unit (`exp = 1` has **never**
+ * been seen as anything but 1, and its meaning is 未证) and two homes for one date is how they drift.
+ *
+ * Optional rather than required, and the direction matters: a payload without `met` must not fail this
+ * parse, because the field is not this module's — it belongs to the one action that reads it. A required
+ * `met` would take the gift-sending half of 亲密度任务 down with a change only 清仓 cares about. An item
+ * with no `met` is therefore an item whose expiry the *caller* cannot read, and `sendRowGifts`/清仓 each
+ * decide what that means for them.
  */
 export const propItemSchema = z.object({
   id: counter,
   name: z.string().default(''),
-  count: counter
+  count: counter,
+  /** The absolute expiry instant in **seconds** since the epoch, or absent when the service sent none. */
+  met: counter.optional()
 })
 export type PropItem = z.infer<typeof propItemSchema>
 

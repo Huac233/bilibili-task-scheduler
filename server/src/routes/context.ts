@@ -8,6 +8,7 @@ import type { WbiKeyStore } from '../bilibili/live.js'
 import { resolveApiToken } from '../repo/api-tokens.js'
 import { getAccountCookiesById } from '../repo/bili-accounts.js'
 import { findUserById, type User } from '../repo/users.js'
+import type { TargetFactRegistry } from './action-settings.js'
 
 /**
  * Shared request context.
@@ -52,6 +53,15 @@ export interface AppContext {
    * reads it — an option's value reaches an action through `action_settings`, never through here.
    */
   readonly choiceSources: ChoiceSourceRegistry
+  /**
+   * What a Platform can read about one **Target**, for a page standing in front of one Task.
+   *
+   * The sibling of `choiceSources` and on the context for the same reason, but it answers a different
+   * shape for a different reader: a choice is *stored* and must mean the same thing for every Task
+   * naming its action, while a fact about a Room is read live for the Room in front of a person and is
+   * stored nowhere — which is why this one is handed the Target and that one is not.
+   */
+  readonly targetFacts: TargetFactRegistry
 }
 
 /** A pending QR binding flow. */

@@ -129,6 +129,39 @@ export const ACTION_OPTION_FIELDS: Readonly<Record<string, Readonly<Record<strin
         help: '今天钓几竿。一竿消耗 20 枚在用的鱼饵（抓包实测），跑完这一轮当天就不再钓，所以要按自己的鱼饵存量填；留空按 1 竿算，最多 10 竿。',
         kind: 'number'
       }
+    ],
+    /**
+     * 清仓's two knobs — both of them a choice, and **both of them a read of the account rather than a
+     * value the account does not have**.
+     *
+     * 「默认倾泻直播间」 是一份**他关注了哪些直播间**的列表（`douyu.followedRooms`）。它必须是一个读了
+     * 才知道的东西：这个动作把道具送进一个房间，房间号写错了就是把免费货送给一个陌生主播，而「我关注了
+     * 哪些」正好是这一侧能替他读出来的那一份候选清单。**它存在偏好设置里而不是任务上，是因为参数属于
+     * 动作**（`action_settings` 的键是 (人, 平台, 动作)），而这个动作是账号级的：`needsTarget: false`，
+     * 收件房间来自这一格，不来自任务的目标。
+     *
+     * 「允许使用的道具」 是**背包读**（`douyu.backpack`，与 亲密度任务 的 `giftAllowlist` 同一个来源、
+     * **不是同一份清单**）：花什么是每个动作自己的事，而这两个动作的清单是两个单元格。同一个来源在这里
+     * 是安全的，因为来源只回答「这个账号现在持有什么」，权限是字段自己的。
+     *
+     * **到期前多久倒不是一个字段**，而且这是有意的：它是算出来的常量（24 小时，见 `CLEAROUT_WINDOW_MS`），
+     * 因为一个可以填错的窗口不是一个好参数——填短了道具会先过期，填长了等于没有窗口。
+     */
+    clearout_props: [
+      {
+        name: 'dumpRoomId',
+        label: '默认倾泻直播间',
+        help: '即将过期的免费道具送进这个直播间。列表是你关注过的直播间；挑一个你自己会去看、也愿意把亲密度记在那里的。',
+        kind: 'choice',
+        source: 'douyu.followedRooms'
+      },
+      {
+        name: 'propAllowlist',
+        label: '允许使用的道具',
+        help: '只勾选账号里真正不花钱的那种（背包里的道具）。勾上的才会被倒出去；没有勾选时它一件都不送。这一份是清仓自己的，与「亲密度任务」的礼物清单互不影响。',
+        kind: 'choice',
+        source: 'douyu.backpack'
+      }
     ]
   }
 }

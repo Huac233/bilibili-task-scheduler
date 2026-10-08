@@ -37,6 +37,19 @@ export interface PlatformCatalogue {
   readonly actions: readonly ActionSwitch[]
 }
 
+/**
+ * What `optionsOf` answers for an action nothing is stored for — **one object, shared.**
+ *
+ * **Load-bearing rather than a micro-optimisation.** A parameter form folds this value in and watches
+ * it to re-seed its controls and re-read the live choices, so an `{}` written at the call site — one
+ * fresh object per render, dozens per render pass — would re-run that watcher on every update,
+ * clearing the choices it had just fetched and leaving the field on 「正在读取可选项…」 for ever. A
+ * shared reference makes the watcher fire when the stored value really changed and not once per paint.
+ * It lives here because there are two callers now (`ActionSettingsPanel.vue` and `TaskDetailView.vue`
+ * both offer the parameter form for an action) and a fact with two homes is a fact that drifts.
+ */
+const NO_OPTIONS: Record<string, never> = {}
+
 export const usePlatformStore = defineStore('platform', () => {
   const platforms = ref<Platform[]>([])
   const settings = ref<ActionSetting[]>([])
@@ -103,6 +116,17 @@ export const usePlatformStore = defineStore('platform', () => {
 
   function settingOf(platformKey: string, actionKey: string): ActionSetting | null {
     return settings.value.find(item => item.platform === platformKey && item.actionKey === actionKey) ?? null
+  }
+
+  /**
+   * What is stored for one action, as the parameter form is handed it.
+   *
+   * `unknown` because the shape belongs to the action and this store never interprets it: it is one
+   * column, the route replaces it whole, and the form builds the value out of the field list it was
+   * handed. The fallback is the shared constant above, and its note says why that matters.
+   */
+  function optionsOf(platformKey: string, actionKey: string): unknown {
+    return settingOf(platformKey, actionKey)?.options ?? NO_OPTIONS
   }
 
   /**
@@ -191,6 +215,7 @@ export const usePlatformStore = defineStore('platform', () => {
     actionLabel,
     isEnabled,
     settingOf,
+    optionsOf,
     switchOf,
     setEnabled,
     setOptions

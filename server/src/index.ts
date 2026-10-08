@@ -24,13 +24,13 @@ import { closeDatabase, openDatabase } from './db/index.js'
 // one of them at run time with no hint as to why.
 import './platform/index.js'
 import { registerAccountRoutes } from './routes/accounts.js'
-import { registerActionSettingRoutes } from './routes/action-settings.js'
+import { registerActionSettingRoutes, TargetFactRegistry } from './routes/action-settings.js'
 import { registerAuthRoutes } from './routes/auth.js'
 import { registerBiliRoutes } from './routes/bili.js'
 import { type AppContext, createAccountClientFactory, LoginSessionStore } from './routes/context.js'
 import { registerDouyuRoutes } from './routes/douyu.js'
 import type { BackpackFetch } from './routes/douyu-backpack.js'
-import { registerDouyuOptionSources } from './routes/douyu-options.js'
+import { registerDouyuOptionSources, registerDouyuTargetFacts } from './routes/douyu-options.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerLibraryRoutes } from './routes/libraries.js'
 import { registerPlatformRoutes } from './routes/platforms.js'
@@ -188,6 +188,12 @@ export function buildServer(options: BuildServerOptions = {}): BuiltServer {
   const choiceSources = new ChoiceSourceRegistry()
   registerDouyuOptionSources(choiceSources, db, options.optionFetch ?? globalThis.fetch)
 
+  // The target-fact reads, wired beside the choice sources and for the same reason: this build's
+  // Platform-specific reads are named where every other dependency is, so a suite can substitute what
+  // they answer without substituting the route that asks.
+  const targetFacts = new TargetFactRegistry()
+  registerDouyuTargetFacts(targetFacts, db)
+
   const ctx: AppContext = {
     db,
     sessionSecret: secret,
@@ -198,7 +204,8 @@ export function buildServer(options: BuildServerOptions = {}): BuiltServer {
     httpForAccount,
     forgetAccountClient,
     loginSessions: new LoginSessionStore(),
-    choiceSources
+    choiceSources,
+    targetFacts
   }
 
   /**
