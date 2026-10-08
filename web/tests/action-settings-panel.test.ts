@@ -141,7 +141,7 @@ const CARRIER_TASK = {
   libraryId: null,
   action: 'reconcile',
   actionKey: 'intimacy_tasks',
-  targetKey: '8801',
+  targetKey: '88013571',
   targetTitle: '电棍',
   startTime: 0,
   endTime: 86_400_000,
@@ -321,7 +321,7 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
             ? '这个动作是对着「目标」做的：任务里要指名这个动作，再选一个目标。'
             : '这个动作是围着「账号」做的：任务里指名这个动作就行，不用选目标。'
         },
-        carriers: carried ? [{ id: 7, targetKey: '8801', targetTitle: '电棍' }] : [],
+        carriers: carried ? [{ id: 7, targetKey: '88013571', targetTitle: '电棍' }] : [],
         // Per action, like `carriers`: 客户端签到's finished Task says nothing about 亲密度任务.
         finishedCarriers: actionKey === 'intimacy_tasks' ? scenario.finished : 0,
         create: carried
@@ -335,7 +335,10 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
     }
   }
   if (route.endsWith('/api/targets/resolve')) {
-    return { ok: true, target: { key: '8801', title: '电棍', anchorId: '310260', anchorName: '电棍', liveStatus: 1 } }
+    return {
+      ok: true,
+      target: { key: '88013571', title: '电棍', anchorId: '310260', anchorName: '电棍', liveStatus: 1 }
+    }
   }
   if (method === 'post' && route.endsWith('/api/tasks')) {
     return { ok: true, task: { ...CARRIER_TASK, status: scenario.createTaskStatus ?? 'running' } }
@@ -546,7 +549,7 @@ describe('which Task runs an action', () => {
     scenario = { carried: false, finished: 0, accountListFails: true, choice: { kind: 'ok', items: [GIFT_ITEM] } }
     await mountPanel()
 
-    await type(inputInRow('亲密度任务'), '8801')
+    await type(inputInRow('亲密度任务'), '88013571')
     await clickInRow('亲密度任务', '建一个任务指名它')
 
     expect(text()).toContain('账号列表这次没读到')
@@ -558,7 +561,7 @@ describe('which Task runs an action', () => {
   it('creates the Task for the Target a person names, and re-reads the attribution', async () => {
     await mountPanel()
 
-    await type(inputInRow('亲密度任务'), '8801')
+    await type(inputInRow('亲密度任务'), '88013571')
 
     await clickInRow('亲密度任务', '建一个任务指名它')
 
@@ -568,7 +571,7 @@ describe('which Task runs an action', () => {
       platform: 'douyu',
       accountId: 1,
       actionKey: 'intimacy_tasks',
-      targetKey: '8801',
+      targetKey: '88013571',
       targetTitle: '电棍',
       interval: 300
     })
@@ -591,7 +594,7 @@ describe('which Task runs an action', () => {
     scenario = { carried: false, finished: 0, createTaskStatus: 'paused', choice: { kind: 'ok', items: [GIFT_ITEM] } }
     await mountPanel()
 
-    await type(inputInRow('亲密度任务'), '8801')
+    await type(inputInRow('亲密度任务'), '88013571')
     await clickInRow('亲密度任务', '建一个任务指名它')
 
     // The status word is the server's own for the row it answered with, and the paused half is the fact
@@ -614,7 +617,7 @@ describe('which Task runs an action', () => {
     scenario = { carried: false, finished: 0, createTaskStatus: 'running', choice: { kind: 'ok', items: [GIFT_ITEM] } }
     await mountPanel()
 
-    await type(inputInRow('亲密度任务'), '8801')
+    await type(inputInRow('亲密度任务'), '88013571')
     await clickInRow('亲密度任务', '建一个任务指名它')
 
     expect(messages()).toContain('任务状态：运行中')
@@ -630,7 +633,7 @@ describe('which Task runs an action', () => {
     expect(carried).toContain('指名这个动作的任务')
     expect(carried).toContain('电棍')
     // The Target key is an identifier, and it stays out of the sentence.
-    expect(carried).not.toContain('8801')
+    expect(carried).not.toContain('88013571')
     expect(carried).not.toContain('现在没有任何任务运行它')
   })
 

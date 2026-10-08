@@ -87,8 +87,13 @@ const AT_YESTERDAY = Date.parse('2026-03-09T21:30:00+08:00')
 /**
  * One reconcile task, with everything this feature added on it.
  *
- * `code: '356'` on the 鱼吧 record is the spec's own example of an identifier, kept
- * literal so the assertion below is about the actual string rather than about a shape.
+ * `code: '3561207'` on the 鱼吧 record is kept literal so the assertion below is about the
+ * actual string rather than about a shape. It is deliberately seven digits rather than the
+ * spec's short `356`: a short numeric literal can be **formed by two adjacent rendered
+ * values** — this fixture already carries 「本次经验 +100」 beside a timestamp, and `1001`
+ * read as a substring of `+100` + `1:12:00` made the assertion fail in CI while passing
+ * locally. A long literal cannot be assembled by accident, which is the same reason the
+ * Bilibili fixtures spell `secret_key` out. Real Douyu codes are long anyway (`1003212`).
  *
  * The `detail` strings are the adapters' own, in their fact form: 「连签 7 天」 rather than
  * 「签到成功：连续签到 7 天…」. A record whose items are the action itself carries the same two
@@ -161,10 +166,10 @@ const TASK = {
       targetKey: '',
       outcome: 'done',
       detail: '新签 1、已签 2（共 3 个版块）',
-      code: '356',
+      code: '3561207',
       items: [
         { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +3', code: '200' },
-        { kind: 'group', label: '斗鱼官方手游区', outcome: 'already', detail: '已签', code: '1001' }
+        { kind: 'group', label: '斗鱼官方手游区', outcome: 'already', detail: '已签', code: '1003212' }
       ],
       at: AT_TODAY + 60_000
     },
@@ -515,11 +520,11 @@ describe('the task detail page', () => {
     const app = await mountView(TaskDetailView, '/tasks/1')
 
     // The rule holds with the panel shut…
-    expect(readableText()).not.toContain('356')
+    expect(readableText()).not.toContain('3561207')
     expect(readableText()).not.toContain('yuba_sign')
     // The rewritten rows carry the same shapes the sentences they replaced did: a group's code,
     // and the 鱼吧 record's own aggregate — which is the audit line the rows no longer print.
-    expect(readableText()).not.toContain('1001')
+    expect(readableText()).not.toContain('1003212')
     expect(readableText()).not.toContain('共 3 个版块')
 
     await openDebugPanel()
@@ -527,7 +532,7 @@ describe('the task detail page', () => {
     // …and the panel is where the raw feed lives: a code, an action key and a platform
     // key, which is exactly what a bug report needs and what a person reading 「今天做
     // 了什么」 must not have to parse.
-    expect(text()).toContain('356')
+    expect(text()).toContain('3561207')
     expect(text()).toContain('yuba_sign')
     // 「斗鱼」 is what the panel above shows; the key itself is here.
     expect(text()).toContain('douyu')
@@ -536,7 +541,7 @@ describe('the task detail page', () => {
     expect(text()).toContain('共 3 个版块')
 
     // None of it leaked into the sections that say what was done.
-    expect(readableText()).not.toContain('356')
+    expect(readableText()).not.toContain('3561207')
     expect(readableText()).not.toContain('yuba_sign')
     expect(readableText()).not.toContain('sign_in')
     expect(readableText()).toContain('主版块')
@@ -610,7 +615,7 @@ describe('the task list row', () => {
   it('leaves the raw fields off the row as well', async () => {
     const app = await mountView(TasksView, '/tasks')
 
-    expect(readableText()).not.toContain('356')
+    expect(readableText()).not.toContain('3561207')
     expect(readableText()).not.toContain('yuba_sign')
     // The row carries no history at all — the endpoint does not ship any — so nothing
     // from an earlier day may appear on it.
