@@ -1,0 +1,101 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+
+  "files": {
+    "includes": [
+      "server/src/**/*.ts",
+      "server/tests/**/*.ts",
+      "server/scripts/**/*.ts",
+      "web/src/**/*.ts",
+      "web/src/**/*.vue",
+      // The web package's own test setup. Without these three the first tests in
+      // `web/` would have been the same kind of uncovered corner the `.vue` files
+      // were: runnable, never formatted, never linted. (`*.json` covers
+      // `tsconfig.test.json`, which sits in a directory `includes` does not omit.)
+      "web/tests/**/*.ts",
+      "web/vitest.config.ts",
+      "web/tsconfig.test.json",
+      "web/vite.config.ts",
+      "web/env.d.ts",
+      "*.json"
+    ],
+    "ignoreUnknown": true
+  },
+
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "suspicious": {
+        "noExplicitAny": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error"
+      },
+      "complexity": {
+        "useLiteralKeys": "off"
+      }
+    }
+  },
+
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "none",
+      "arrowParentheses": "asNeeded"
+    }
+  },
+
+  // Vue SFCs are linted, with two rules switched off.
+  //
+  // `web/src/**/*.vue` was previously not in `files.includes` at all, so twelve
+  // components had no formatting and no lint coverage of any kind — the same class
+  // of blind spot as tests not being in the typecheck project. Adding them found a
+  // real finding immediately, so the coverage is worth having.
+  //
+  // But biome does not follow references from a Vue `<template>`, for either of the
+  // two rules that generalise over "is this binding used?":
+  //
+  //  - `noUnusedVariables` reports a variable declared in `<script setup>` and used
+  //    only in the template — the ordinary Vue pattern, e.g. `const themeVars =
+  //    useThemeVars()` feeding a `:style` binding. Verified on `AppFooter.vue`, where
+  //    it is used twice.
+  //  - `noUnusedImports` reports every component imported for template use. That is
+  //    all twelve components: `App.vue`'s `NConfigProvider`/`NMessageProvider`/
+  //    `NDialogProvider`/`zhCN`/`dateZhCN` are each used in its template, and so are
+  //    `TaskCreateView.vue`'s eleven `n-` components. The suggested fix would delete
+  //    them and break the build, which is why it is marked "unsafe".
+  //
+  // Rather than sprinkle `biome-ignore` over the codebase for two false positives —
+  // or, worse, let `--write` strip the imports — both rules are off for `.vue` only.
+  // Formatting, `noExplicitAny`, `noNonNullAssertion` and `organizeImports` all still
+  // apply, which is the coverage these files lacked.
+  //
+  // Delete this override if biome ever tracks template scope.
+  "overrides": [
+    {
+      "includes": ["**/*.vue"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noUnusedVariables": "off",
+            "noUnusedImports": "off"
+          }
+        }
+      }
+    }
+  ]
+}

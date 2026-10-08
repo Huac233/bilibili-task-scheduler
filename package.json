@@ -1,0 +1,24 @@
+{
+  "name": "bilibili-task-scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-platform live-stream task scheduler — monorepo root",
+  "scripts": {
+    "dev:server": "pnpm --filter @bts/server dev",
+    "dev:web": "pnpm --filter @bts/web dev",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check": "biome check . && pnpm -r --if-present typecheck && pnpm -r --if-present test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15"
+  }
+}

@@ -1,0 +1,26 @@
+# Everything the image builds itself, plus local state that must never ship.
+node_modules
+**/node_modules
+
+dist
+**/dist
+
+# Runtime state: the SQLite database belongs in a volume, not the image.
+data
+**/data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# VCS and editor noise
+.git
+.gitignore
+.vscode
+.idea
+*.log

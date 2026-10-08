@@ -1,0 +1,18 @@
+packages:
+  - server
+  - web
+
+# pnpm refuses to run dependency build scripts by default — a supply-chain guard,
+# and a good one. esbuild (pulled in by tsx and vitest) needs its postinstall to
+# place the platform binary, and vue-demi patches itself on install, so both are
+# approved here.
+#
+# pnpm 12 spells this `allowBuilds`, a map of name -> boolean. Two older forms
+# are silently ineffective and cost real debugging time: the `onlyBuiltDependencies`
+# array is still *read* by `pnpm config get` but approves nothing, and a `pnpm`
+# field in package.json is ignored outright with a warning. Without a working
+# entry here, `pnpm install` exits non-zero in any non-interactive context —
+# which is exactly what broke the first container build.
+allowBuilds:
+  esbuild: true
+  vue-demi: true

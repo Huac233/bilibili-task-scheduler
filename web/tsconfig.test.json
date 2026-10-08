@@ -1,0 +1,17 @@
+{
+  "//": "Typecheck-everything project for the web package. `tsconfig.json` is also the",
+  "//1": "build config, so its `include` is `src/**` — which meant neither the tests nor",
+  "//2": "`vitest.config.ts` were ever typechecked, and a type error in a test could not",
+  "//3": "fail anything. Same strict baseline, tests included, nothing emitted.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // TypeScript's own unused checks do not see Vue template scope, so in a test
+    // that deliberately builds partial fixtures a helper can look unused while the
+    // test that uses it lives in another file. The DOM test's own imports are all
+    // used; this is off so the project does not trade a real check for false alarms.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue", "tests/**/*.ts", "vitest.config.ts", "env.d.ts", "vite.config.ts"]
+}

@@ -1,3 +1,50 @@
-*.pyc
-.idea
-__pycache__
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# runtime data: cookies, tasks, logs
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# credentials and captured traffic from the probe side.
+# The probe lives outside this repo, but a future session may copy its state in;
+# these names must never be committable. See HANDOFF.md 「凭据存放」.
+douyu-tokens.json
+cookie-header.txt
+cookies.json
+*.mitm
+*.mitmproxy
+probe-state/
+
+# Agent-facing documents. These are written for models working in this checkout,
+# not for people browsing the repo, and a model reads them straight off disk —
+# so tracking them buys nothing. That includes docs/adr/: an architecture decision
+# record is written for whoever (or whatever) works here next, and README.md is
+# the single human-facing document. Move an ADR into README.md if it ever deserves
+# a wider audience.
+AGENTS.md
+GLOSSARY.md
+HANDOFF.md
+docs/
+
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

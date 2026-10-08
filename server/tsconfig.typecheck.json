@@ -1,0 +1,15 @@
+{
+  "//": "Typecheck-everything project. `tsconfig.json` doubles as the build config, so",
+  "//1": "its `rootDir: src` and `include: src/**/*.ts` keep `dist/` clean — which also",
+  "//2": "means test files were never typechecked and a type error in a test could not",
+  "//3": "fail CI. This project exists to close that hole: same strict baseline, tests",
+  "//4": "included, nothing emitted.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

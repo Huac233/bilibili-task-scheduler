@@ -1,0 +1,10 @@
+# Captured platform artifacts are evidence, and evidence keeps its bytes.
+#
+# These files are byte-exact copies of what a Platform actually sent: tests read
+# their shape, and the whole point of the directory is that the shape is the
+# Platform's rather than ours. Git's line-ending normalisation would rewrite
+# them on the way in (this machine runs `core.autocrlf=input`, which turned 105
+# CRLF pairs into LF and shrank one fixture by 105 bytes), leaving the repository
+# holding something no Platform ever sent. `-text` turns that off: store and
+# check out exactly these bytes, on every machine, whatever the local setting.
+server/tests/captured/** -text

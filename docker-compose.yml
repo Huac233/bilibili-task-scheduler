@@ -1,54 +1,49 @@
-version: '3.8'
+# Docker Compose for local testing and 1Panel deployment.
+#
+# 1Panel can consume this file directly through its 编排 (orchestration) feature;
+# the only value that must be supplied is SESSION_SECRET.
+#
+#   docker compose up -d --build
+#
+# Note the single volume: SQLite keeps its database plus WAL sidecars inside
+# /app/data, so mounting anything narrower would lose data on redeploy.
 
 services:
+  app:
+    build: .
+    image: bilibili-task-scheduler:latest
+    container_name: bilibili-task-scheduler
+    restart: unless-stopped
 
-  web:
-    build: ./
-    command: |
-      bash -c 'while !</dev/tcp/db/5432; do sleep 1; done; uvicorn backend.main:app --reload --workers 1 --host 0.0.0.0 --port 8000'
-    volumes:
-      - ./:/usr/app/
     ports:
-      - 8000:8000
-    environment:
-      - DATABASE_URL=postgresql://fastapi:fastapi@db/fastapi
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-    depends_on:
-      - db
+      - '8787:8787'
 
-  db:
-    image: postgres:13-alpine
+    environment:
+      # Signs session tokens. Changing it logs everyone out.
+      # Generate with: openssl rand -hex 32
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
+      PORT: '8787'
+      HOST: '0.0.0.0'
+      DB_PATH: /app/data/app.sqlite
+
     volumes:
-      - postgres_data:/var/lib/postgresql/data/
-    ports:
-      - 15432:15432
-#    expose:
-#      - 5432
-    environment:
-      - POSTGRES_USER=fastapi
-      - POSTGRES_PASSWORD=fastapi
-      - POSTGRES_DB=fastapi
+      - ./data:/app/data
 
-  worker:
-    build: ./
-    command: celery worker --app=backend.celery.worker.celery --loglevel=info
-    volumes:
-      - ./:/usr/app
-    environment:
-      - DATABASE_URL=postgresql://fastapi:fastapi@db/fastapi
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-    depends_on:
-      - web
-      - redis
-  
-  redis:
-    image: redis:6-alpine
-    ports:
-      - 6379:6379
-#    expose:
-#      - 6379
+    # The container healthcheck is defined in the Dockerfile; this is a
+    # compose-level backstop for orchestration that ignores image healthchecks.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-volumes:
-  postgres_data:
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
