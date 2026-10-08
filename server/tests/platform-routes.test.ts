@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect } from 'vitest'
+import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 import type { BuiltServer } from '../src/index.js'
 import { allPlatforms, registerPlatform } from '../src/platform/registry.js'
+import { TargetRefusal, TargetRefusalKind } from '../src/platform/target.js'
 import type { TargetInfo } from '../src/platform/types.js'
 import { upsertAccount } from '../src/repo/accounts.js'
 import { test as it, registerUser, type Session } from './fixtures.js'
@@ -19,6 +20,17 @@ import { test as it, registerUser, type Session } from './fixtures.js'
 /** A transport failure as an adapter reports one: an error carrying its HTTP status. */
 class StubTransportError extends Error {
   readonly status = 0
+}
+
+/**
+ * The same shape with a `status` that is not a number, which is not a transport signal.
+ *
+ * `httpStatusOf` reads a *number* as the transport's own word for the failure, and the boundary
+ * between that and "no status at all" is the one that decides 502 from 400. This fixture is the
+ * negative side of it: a field that happens to be called `status` is not a status.
+ */
+class StubStringStatusError extends Error {
+  readonly status = '404'
 }
 
 /** Registered here so `resolveTarget` can be driven without touching any network. */
@@ -491,5 +503,201 @@ describe('POST /api/targets/resolve', () => {
 
     expect(response.statusCode).toBe(400)
     expect(response.json<{ error: string }>().error).toContain('无法从该链接解析出直播间号')
+  })
+})
+
+/**
+ * Why a paste did not become a target, told apart by what is actually wrong with it.
+ *
+ * The page renders this route's `error` string **next to the box the person typed into**, so the three
+ * states have to read as three different things: a shape this Platform does not read a room out of, a
+ * room that is not there (both of them the person's to fix by typing differently), and the Platform not
+ * answering at all (not the person's to fix). Before this, the second one was reported as the third on
+ * Douyu (a gateway status, 502) and as an internal call name on Bilibili
+ * (`room_init failed for <id>: <msg>`).
+ *
+ * **These cases drive the real adapters**, with the transport stubbed and no `resolveTarget` mock in
+ * sight: the classification is the adapter's own — a missing room is a fact about one Platform's
+ * endpoint, which nothing above the seam can know — so a mock of that member would assert this file's
+ * fixture instead of the code. The two Platforms read their rooms through the global `fetch`, which is
+ * where the answers below are supplied.
+ */
+describe('POST /api/targets/resolve — why a paste did not become a target', () => {
+  /** Every URL the stubbed transport was asked for, so "asked nothing" is assertable. */
+  const asked: string[] = []
+
+  /** One answer per request. A fresh `Response` each time: a body can only be read once. */
+  function stubFetch(answer: (url: string) => Response): void {
+    vi.stubGlobal('fetch', async (input: unknown) => {
+      const url = String(input)
+      asked.push(url)
+      return answer(url)
+    })
+  }
+
+  /** A Bilibili envelope, which is JSON at HTTP 200 whatever its `code` says. */
+  function biliEnvelope(body: unknown): Response {
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  beforeEach(() => {
+    asked.length = 0
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('answers 400 with a sentence about the number when Bilibili has no such room', async ({ server, session }) => {
+    // `60004` is 直播间不存在: the code space `room_init` documents is `0` for success and that number
+    // for a room that is not there. This is the answer a person used to be shown as
+    // `room_init failed for 22637261: …`, where an internal call name sat in a sentence.
+    stubFetch(() => biliEnvelope({ code: 60004, message: '直播间不存在', ttl: 1 }))
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: 'bilibili', input: '22637261' }
+    })
+
+    expect(response.statusCode).toBe(400)
+    const error = response.json<{ error: string }>().error
+    expect(error).toContain('没有房间号 22637261')
+    expect(error).not.toContain('查询目标失败')
+    expect(error).not.toContain('room_init')
+  })
+
+  it('answers 502 when Bilibili refuses with a code this build cannot name', async ({ server, session }) => {
+    // The other side of the 60004 boundary, and the room payload **is** present here: what decides the
+    // answer is the code, not whether a payload came with it. An unnamed refusal is not a verdict about
+    // the number the person typed, so it keeps the transport answer and the sentence says so.
+    stubFetch(() =>
+      biliEnvelope({
+        code: -412,
+        message: '请求被拦截',
+        data: { room_id: 22637261, short_id: 0, uid: 12345, live_status: 0, live_time: 0 }
+      })
+    )
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: 'bilibili', input: '22637261' }
+    })
+
+    expect(response.statusCode).toBe(502)
+    const error = response.json<{ error: string }>().error
+    expect(error).toContain('查询目标失败')
+    expect(error).toContain('平台返回 code -412')
+    expect(error).not.toContain('room_init')
+  })
+
+  it('answers 400 when Douyu has no such room, and never the gateway status', async ({ server, session }) => {
+    // `betard/<unknown>` answers a 404 HTML page — the endpoint's own contract for a room it does not
+    // have — and that number is about the paste, not about the connection. It used to come back as
+    // 「查询目标失败：HTTP 404」, which is a transport sentence with a status nobody typed.
+    stubFetch(() => new Response('<html>not found</html>', { status: 404 }))
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: 'douyu', input: '99999999' }
+    })
+
+    expect(response.statusCode).toBe(400)
+    const error = response.json<{ error: string }>().error
+    expect(error).toContain('没有房间号 99999999')
+    expect(error).not.toContain('查询目标失败')
+    expect(error).not.toContain('HTTP 404')
+  })
+
+  it('answers 502 when Douyu could not be asked at all', async ({ server, session }) => {
+    // The other side of that boundary: an upstream fault is not a verdict about the room, and the same
+    // paste may well work in a minute.
+    stubFetch(() => new Response('upstream is down', { status: 500 }))
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: 'douyu', input: '99999999' }
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect(response.json<{ error: string }>().error).toContain('查询目标失败')
+  })
+
+  it('refuses a b23.tv short link without opening it', async ({ server, session }) => {
+    // The class is refused, and the sentence says which class it is rather than the generic
+    // 「无法从该链接解析出直播间号」: a person who pasted a shortcut deserves to be told that the
+    // shortcut is what this build does not read. Nothing is fetched — what a short link points at is
+    // only knowable by opening it, and this build does not.
+    stubFetch(() => biliEnvelope({ code: 0 }))
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: 'bilibili', input: 'https://b23.tv/av80433022' }
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json<{ error: string }>().error).toContain('b23.tv')
+    expect(asked).toEqual([])
+  })
+
+  it('answers 400 with the adapter’s own sentence for an input refusal', async ({ server, session }) => {
+    // Verbatim, and unprefixed: the seam's input refusal is already a sentence for a person, and the one
+    // thing the route must not add is the transport's 「查询目标失败：」.
+    stubReply.current = async () => {
+      throw new TargetRefusal(TargetRefusalKind.MissingRoom, '没有这个直播间')
+    }
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: STUB_PLATFORM, input: 'x' }
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json<{ error: string }>().error).toBe('没有这个直播间')
+  })
+
+  it('answers 502, prefixed, when the adapter says the Platform did not answer', async ({ server, session }) => {
+    stubReply.current = async () => {
+      throw new TargetRefusal(TargetRefusalKind.PlatformUnanswered, '平台没有回答')
+    }
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: STUB_PLATFORM, input: 'x' }
+    })
+
+    expect(response.statusCode).toBe(502)
+    expect(response.json<{ error: string }>().error).toBe('查询目标失败：平台没有回答')
+  })
+
+  it('does not read a status that is not a number as a transport fault', async ({ server, session }) => {
+    // The duck-typed fallback's own boundary: `httpStatusOf` asks for a *number*, so this error carries
+    // no transport signal and its message is shown as the input problem it says it is.
+    stubReply.current = async () => {
+      throw new StubStringStatusError('无法解析该目标')
+    }
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      headers: session.auth(),
+      payload: { platform: STUB_PLATFORM, input: 'x' }
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json<{ error: string }>().error).toBe('无法解析该目标')
   })
 })

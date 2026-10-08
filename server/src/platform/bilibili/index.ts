@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { fetchNav } from '../../bilibili/auth.js'
 import { BiliHttp, BiliHttpError, DEFAULT_TIMEOUT_MS } from '../../bilibili/http.js'
 import { type LikeGate, LikeRefusal, likeGate, likeWithFallback } from '../../bilibili/like.js'
-import { fetchRoomInfo, isLive, resolveRoom, sendDanmaku, WbiKeyStore } from '../../bilibili/live.js'
+import { fetchRoomInfo, isLive, RoomRefusedError, resolveRoom, sendDanmaku, WbiKeyStore } from '../../bilibili/live.js'
 import {
   fetchMedalPanel,
   fetchMedalTasks,
@@ -14,7 +14,7 @@ import {
   type MedalTask
 } from '../../bilibili/medal.js'
 import { refreshIfRequired } from '../../bilibili/refresh.js'
-import { LikeCode, type RoomInfo, type RoomInit, SendDanmakuCode } from '../../bilibili/types.js'
+import { LikeCode, type RoomInfo, type RoomInit, RoomInitCode, SendDanmakuCode } from '../../bilibili/types.js'
 import { enterLiveRoom, sendLiveHeartbeat, type WatchSession } from '../../bilibili/watch-live.js'
 import { ActionKey, TaskAction } from '../../repo/tasks.js'
 // One home for "is a credential in this string", imported rather than copied. Five copies used to
@@ -27,6 +27,7 @@ import { ActionKey, TaskAction } from '../../repo/tasks.js'
 // drift, and they did.
 import { redactSecrets } from '../../text/redact.js'
 import { roomIdOf } from '../room.js'
+import { TargetRefusal, TargetRefusalKind } from '../target.js'
 import {
   type ActionDescriptor,
   type ActionItem,
@@ -272,13 +273,22 @@ const wbiKeys: WbiKeyStore = new WbiKeyStore()
 /**
  * Turns pasted input into a target the rest of the system can act on.
  *
- * Throws when the input does not resolve. The seam gives this member no failure
- * variant, and there is nothing here to retry: a form submission either names a
- * room or it does not, and the route turns the throw into a 400 or a 502.
+ * Throws when the input does not resolve, and **which throw it is says which of the three things went
+ * wrong** (`platform/target.ts`): a shape this Platform does not read a room out of, a room that is not
+ * there, or Bilibili not answering — all three of which used to arrive as one of the other two. The seam
+ * gives this member no failure variant, and there is nothing here to retry: a form submission either names
+ * a room or it does not.
  */
 async function resolveTarget(input: string): Promise<TargetInfo> {
-  const slug = parseRoomSlug(input)
-  if (slug === null) throw new Error('无法从该链接解析出直播间号')
+  const paste = parseRoomPaste(input)
+  // Two refusals, two sentences, and neither is the other: a person who pasted a shortcut is told the
+  // shortcut is what this build does not read, and everyone else is told which shapes it does.
+  if (paste.kind === 'short_link') {
+    throw new TargetRefusal(TargetRefusalKind.UnreadableInput, SHORT_LINK_DETAIL)
+  }
+  if (paste.kind !== 'room') {
+    throw new TargetRefusal(TargetRefusalKind.UnreadableInput, UNREADABLE_INPUT_DETAIL)
+  }
 
   // A fresh, cookie-less client on purpose: `room_init` is anonymous, and this
   // runs while a task is being created, before an account is necessarily chosen. The
@@ -286,7 +296,25 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
   // is visible here, and it is the transport's own name for that ceiling.
   const http = new BiliHttp({ timeoutMs: DEFAULT_TIMEOUT_MS })
 
-  const room = await resolveRoom(http, slug)
+  let room: RoomInit
+  try {
+    room = await resolveRoom(http, paste.id)
+  } catch (error: unknown) {
+    // **The one refusal this adapter can name** — Bilibili's own 直播间不存在 — and the reason the code
+    // had to become a field on the error: a number that names no room is a fact about what the person
+    // typed, and the sentence it produces names that number so they can check it.
+    if (error instanceof RoomRefusedError) {
+      throw error.code === RoomInitCode.RoomNotFound
+        ? new TargetRefusal(TargetRefusalKind.MissingRoom, missingRoomDetail(paste.id))
+        : new TargetRefusal(
+            TargetRefusalKind.PlatformUnanswered,
+            `B 站没有确认这个直播间（房间号 ${String(paste.id)}，平台返回 code ${String(error.code)}），请稍后再试一次。`
+          )
+    }
+    // Everything else — the deadline, a 5xx, a payload that no longer parses — says nothing about the
+    // number, so it keeps the transport answer the route gives it.
+    throw error
+  }
 
   // The title is cosmetic — the room resolved, which is all the caller needs — so a
   // failure here must not block creating the task.
@@ -382,14 +410,14 @@ async function probe(account: PlatformAccount, targetKey: string): Promise<Probe
   try {
     room = await resolveRoom(http, roomId)
   } catch (error: unknown) {
-    // Deliberately ungraded, because a room failure carries no code to grade on.
-    // Two paths, neither of them structured: an error envelope comes back without
-    // the room fields `roomInitSchema` requires, so the strict parse rejects it and
-    // the failure arrives as a shape error; and when the code branch inside
-    // `resolveRoom` does fire, it has already flattened the number into a message
-    // that holds Bilibili's own text instead. Reading a code back out of that text is
-    // the habit this refactor is removing, so an ungraded retry — with the cause kept
-    // in `detail` for a person — is the honest answer.
+    // Deliberately ungraded, and **what changed here is the reason**. `resolveRoom` now tells a refusal
+    // from a transport fault — it throws `RoomRefusedError` carrying Bilibili's own code — so this side
+    // *could* single out `RoomInitCode.RoomNotFound` and park the action. It does not, and that is a
+    // decision rather than a leftover: a probe runs on a room `resolveTarget` already resolved, so a
+    // refusal here means the room stopped existing, and nothing in this repo establishes how permanent
+    // that is — a risk-control rejection or a cached 404 wears the same shape. So the number is still
+    // never read back out of the message (the habit this refactor removed), and an ungraded retry with the
+    // cause kept in `detail` for a person stays the honest answer.
     return probeFailure(transportCodeOf(error), `查询直播间失败：${errorText(error)}`, 'retry')
   }
 
@@ -2075,8 +2103,8 @@ function sendFailure(code: string, detail: string, failure: FailureKind): SendOu
  * The code for a failure Bilibili never numbered.
  *
  * A `BiliHttpError` carries a status and that is structured data in its own right:
- * 412 is risk control, 0 is a network fault or a timeout, 5xx is upstream. None of
- * them is worth giving up over, so they share one code path instead of pretending
+ * 412 is risk control, 0 is a network fault, a timeout, or an answer that could not be read as a room,
+ * 5xx is upstream. None of them is worth giving up over, so they share one code path instead of pretending
  * to be Bilibili codes.
  */
 function transportCodeOf(error: unknown): string {
@@ -2092,20 +2120,57 @@ function errorText(error: unknown): string {
 const LIVE_HOST = /(^|\.)live\.bilibili\.com$/i
 
 /**
- * Pulls the room number out of what a person pasted.
+ * The short-link host, whose paths name nothing this build reads.
  *
- * Three shapes are accepted — `https://live.bilibili.com/22637261?x=1`, the
- * scheme-less `live.bilibili.com/22637261`, and a bare `22637261` — because those
- * are what a browser bar produces. The host allowlist is what stops an arbitrary
- * link from being read as a room, and returning null beats guessing at which path
- * segment might be the id.
+ * Listed by name rather than allowed through only to fail later on the segment, because the two refusals
+ * are different sentences: 「this is a shortcut」 and 「no room number is in this」.
  */
-function parseRoomSlug(input: string): number | null {
+const SHORT_LINK_HOST = /(^|\.)b23\.tv$/i
+
+/**
+ * The one path prefix a live-room URL puts in front of a room number.
+ *
+ * `live.bilibili.com/blanc/<id>` is a **real, openable room URL** — checked against the live page, not
+ * inferred — and it is the only prefixed shape this parser reads. That is the bound, and it has three
+ * parts: the host must be the live one, the prefix must be this literal, and the path must end there —
+ * `blanc`, one all-digits segment, nothing after it.
+ *
+ * **Why not a scan.** Reading any numeric segment after any prefix would turn `/p/22637261` or an activity
+ * path's own number into a room nobody asked for, and a wrong link resolving to a *different* room than the
+ * person meant is worse than refusing it — the task would then run against somebody else's room. A second
+ * prefix belongs in this list the day its own link has been opened.
+ */
+const ROOM_PATH_PREFIX = 'blanc'
+
+/**
+ * What a pasted string is, as far as its shape can tell — the three answers `resolveTarget` needs before
+ * it asks Bilibili anything.
+ *
+ * A bare `number | null` cannot carry these: the two refusals are different sentences (a shortcut versus
+ * no room in the link at all), and the route above separates them because a person's next move differs.
+ */
+type RoomPaste =
+  | { readonly kind: 'room'; readonly id: number }
+  | { readonly kind: 'short_link' }
+  | { readonly kind: 'other' }
+
+/**
+ * Reads what a person pasted: a room URL, a bare room number, a short link, or neither.
+ *
+ * Four shapes are accepted, because they are what a browser bar and the address the live page shows
+ * produce: `https://live.bilibili.com/22637261?x=1`, `https://live.bilibili.com/blanc/22637261`, the
+ * scheme-less `live.bilibili.com/22637261`, and a bare `22637261`. The host allowlist is what stops an
+ * arbitrary link from being read as a room, and it is the reason `short_link` is its own answer rather
+ * than `other`: **the b23.tv class is refused, and deliberately not resolved.** What a short link points
+ * at is only knowable by opening it, and this build does not open links — and whether a live room even has
+ * one is unproven, so the sentence for it may not claim that it does.
+ */
+function parseRoomPaste(input: string): RoomPaste {
   const trimmed = input.trim()
-  if (trimmed === '') return null
+  if (trimmed === '') return { kind: 'other' }
 
   const bare = roomIdOf(trimmed)
-  if (bare !== null) return bare
+  if (bare !== null) return { kind: 'room', id: bare }
 
   // Prefixing a scheme lets the scheme-less and the full form share one parse path;
   // the guard is here so input that already carries one is not mangled into
@@ -2116,14 +2181,64 @@ function parseRoomSlug(input: string): number | null {
   try {
     parsed = new URL(candidate)
   } catch {
-    return null
+    return { kind: 'other' }
   }
 
-  if (!LIVE_HOST.test(parsed.hostname)) return null
+  if (SHORT_LINK_HOST.test(parsed.hostname)) return { kind: 'short_link' }
+  if (!LIVE_HOST.test(parsed.hostname)) return { kind: 'other' }
 
-  const segment = parsed.pathname.split('/').find(part => part !== '')
-  return segment === undefined ? null : roomIdOf(segment)
+  const segments = parsed.pathname.split('/').filter(part => part !== '')
+  const [head, second] = segments
+  if (head === undefined) return { kind: 'other' }
+
+  // The root shape, untouched: the first segment names the room, and the same digits rule a bare id goes
+  // through decides whether it does.
+  if (head !== ROOM_PATH_PREFIX) {
+    const id = roomIdOf(head)
+    return id === null ? { kind: 'other' } : { kind: 'room', id }
+  }
+
+  // The one prefixed shape, and **only in the form that was verified**: `blanc`, then a room number, and
+  // nothing after it. A third segment is not a room URL this build has seen, and reading the second one
+  // anyway would resolve a link that is about something else into somebody's room — the price of reading
+  // one segment too far, and the reason the widening stops here rather than scanning the path.
+  if (segments.length !== 2) return { kind: 'other' }
+  const id = roomIdOf(second ?? '')
+  return id === null ? { kind: 'other' } : { kind: 'room', id }
 }
+
+/**
+ * 「I understand that shape, and there is no such room」, with the number they typed left in it.
+ *
+ * The number is the one identifier this sentence may carry, because it is the one they typed: it is how
+ * they check what they pasted. `RoomInitCode.RoomNotFound` is what established it.
+ */
+function missingRoomDetail(shortId: number): string {
+  return `B 站没有房间号 ${String(shortId)} 对应的直播间，请核对一下房间号或链接里的数字。`
+}
+
+/**
+ * 「That shape is not one this Platform reads a room out of」 — the sentence it has always been.
+ *
+ * Kept verbatim, and it is a *different* sentence from `missingRoomDetail` on purpose: one of them says
+ * the paste is not a room reference at all, the other says the reference is fine and there is no such
+ * room, and a person who is shown one of them for the other goes looking in the wrong place. Neither
+ * names an internal call.
+ */
+const UNREADABLE_INPUT_DETAIL = '无法从该链接解析出直播间号'
+
+/**
+ * 「That is a short link」 — the other sentence, and the one that may not overclaim.
+ *
+ * It says what this build does not do (open the link) and what the person can do instead, and it does
+ * **not** say that the shortcut points at a live room. The reference short-link documentation
+ * (`bilibili-API-collect`'s `docs/misc/b23tv.md`) lists formats for 任意/av/BV links, and its 直播 row is
+ * commented out there as 失效 — so whether a live room has a short link at all is unproven, while *that the
+ * class is refused* is the fact this sentence is about. A person who pasted a video shortcut is told the
+ * same true thing, and pasting the URL it opens gets them the answer about that URL.
+ */
+const SHORT_LINK_DETAIL =
+  '这是 b23.tv 短链：它指向哪个直播间只有打开它才知道，本版不打开短链；请粘贴它跳转到的 live.bilibili.com 直播间链接，或直接填直播间号。'
 
 export const bilibiliPlatform: Platform = {
   /** The exact string the `accounts` and `tasks` rows carry; see `db/migrations.ts`. */

@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import { descriptorsWithDeclarations } from '../actions/action-options.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
+import { TargetRefusal, TargetRefusalKind } from '../platform/target.js'
 import type { TargetInfo } from '../platform/types.js'
 import { type AppContext, requireUser } from './context.js'
 
@@ -25,6 +26,13 @@ import { type AppContext, requireUser } from './context.js'
  * `/api` surface is session-scoped except `/api/health` and the auth endpoints,
  * and a catalogue that answers anonymously is a fingerprinting surface for no
  * benefit: the UI has a token before it draws anything.
+ *
+ * **How a failed resolve is reported.** The answer a person reads is this route's `error` string, drawn
+ * beside the box they typed into, so the shape of the failure is decided by the adapter's own
+ * `TargetRefusal` (see `platform/target.ts`) and this route only turns its three kinds into statuses:
+ * the two input kinds are 400 with the adapter's sentence, the Platform's silence is 502 with the
+ * transport prefix. A Platform's transport error, which carries its own HTTP status, is recognised the
+ * same way it always was.
  */
 
 const resolveTargetSchema = z.object({
@@ -78,26 +86,44 @@ export function registerPlatformRoutes(app: FastifyInstance, ctx: AppContext): v
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
 
-        // Two kinds of failure arrive here and the status code has to tell them
-        // apart: input the adapter could not make sense of (400, and its message
-        // already says what was wrong), and the transport failing while asking the
-        // Platform (502 — the same link may well work in a minute).
-        //
-        // The transport check is duck-typed on a numeric `status` rather than
-        // `instanceof BiliHttpError`: this module sits above the seam, and naming one
-        // Platform's error class here is precisely the coupling the seam exists to
-        // remove. Any adapter whose transport error carries its HTTP status is
-        // recognised; one that throws a plain Error is treated as bad input, which
-        // is the direction that cannot hide a real fault behind a 400.
+        // Three kinds of failure arrive here, and this reply is where a person reads them: the page
+        // renders `error` **next to the box they typed into**. `TargetRefusal` is the seam's own word
+        // for a refusal that is about their paste — `unreadable_input` (not a shape this Platform reads
+        // a target out of) and `missing_room` (the shape is right and the thing is not there) are both
+        // 400 with the adapter's own sentence, because both are fixed by typing differently, and they
+        // are two kinds rather than one because those two sentences have to stay tellable apart.
+        // `platform_unanswered` is the third and the only one that is the Platform's doing: 502, the
+        // same answer a transport fault gets, because the same paste may well work in a minute.
+        if (error instanceof TargetRefusal) {
+          return error.kind === TargetRefusalKind.PlatformUnanswered
+            ? reply.code(502).send({ ok: false, error: `${TARGET_LOOKUP_FAILED}${message}` })
+            : reply.code(400).send({ ok: false, error: message })
+        }
+
+        // An adapter that does not use that vocabulary still gets its transport faults recognised.
+        // The check is duck-typed on a numeric `status` rather than `instanceof BiliHttpError`: this
+        // module sits above the seam, and naming one Platform's error class here is precisely the
+        // coupling the seam exists to remove. Any adapter whose transport error carries its HTTP status
+        // is recognised; one that throws a plain Error is treated as bad input, which is the direction
+        // that cannot hide a real fault behind a 400.
         return httpStatusOf(error) === null
           ? reply.code(400).send({ ok: false, error: message })
-          : reply.code(502).send({ ok: false, error: `查询目标失败：${message}` })
+          : reply.code(502).send({ ok: false, error: `${TARGET_LOOKUP_FAILED}${message}` })
       }
 
       return { ok: true, target }
     }
   )
 }
+
+/**
+ * The one prefix a transport failure's sentence gets, written once.
+ *
+ * It belongs to *this* route rather than to either adapter, because it is the route that knows the
+ * failure is the transport's: an adapter reports what its own call did, and this marks that as something
+ * other than the person's typing. `TargetRefusal`'s input kinds never get it.
+ */
+const TARGET_LOOKUP_FAILED = '查询目标失败：'
 
 /** The HTTP status an error carries, or null when it carries none. */
 function httpStatusOf(error: unknown): number | null {

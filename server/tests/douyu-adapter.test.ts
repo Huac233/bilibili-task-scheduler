@@ -757,6 +757,44 @@ describe('resolveTarget', () => {
       expect(fetchMock).not.toHaveBeenCalled()
     }
   )
+
+  /** The sentence one refused `resolveTarget` produced; see the Bilibili adapter's copy for why. */
+  async function refusalMessageOf(input: string): Promise<string> {
+    try {
+      await douyuPlatform.resolveTarget(input)
+    } catch (error: unknown) {
+      return error instanceof Error ? error.message : String(error)
+    }
+    throw new Error(`resolveTarget accepted ${input}, and this case needs it refused`)
+  }
+
+  /**
+   * A room the service does not have is the person's typo, not a gateway fault.
+   *
+   * `betard/<unknown>` answering a 404 HTML page is the endpoint's own contract for a room that is not
+   * there (`fetchRoomMeta`), while a room it *has* and refuses arrives as something else — a 5xx below,
+   * or a body that is not a room. This is the distinction: the 404 is about the number that was
+   * pasted, and the sentence says which number, because that is the only part a person can act on.
+   */
+  it('reports a room the service does not have as the input problem it is', async () => {
+    fetchMock.mockImplementation(async () => new Response('<html>not found</html>', { status: 404 }))
+
+    const message = await refusalMessageOf('12306')
+
+    expect(message).toContain('没有房间号 12306')
+    // Neither the gateway status nor the route's transport sentence: nothing about the connection
+    // was wrong, and a person sent to 「稍后再试」 would keep retrying their own typo.
+    expect(message).not.toContain('HTTP 404')
+    expect(message).not.toContain('查询目标失败')
+  })
+
+  it('leaves a room read that failed for any other reason as a transport failure', async () => {
+    // The other side of that boundary. Grading this as the input's fault would tell a person their room
+    // number is wrong on an afternoon when the service is down, so the status travels as it always did.
+    fetchMock.mockImplementation(async () => new Response('upstream is down', { status: 503 }))
+
+    await expect(douyuPlatform.resolveTarget('12306')).rejects.toMatchObject({ status: 503 })
+  })
 })
 
 /* ------------------------------------------------------------------ *

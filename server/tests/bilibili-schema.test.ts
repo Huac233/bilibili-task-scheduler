@@ -48,9 +48,12 @@ describe('room_init response', () => {
     const result = roomInitSchema.safeParse(livePayload)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.data.room_id).toBe(22637261)
-      expect(result.data.data.uid).toBe(123456)
-      expect(result.data.data.live_status).toBe(1)
+      // Optional-chained because the envelope's `data` is optional now — a refusal must reach its code
+      // (see the cases at the foot of this describe) — and the assertions keep their strength either way:
+      // `undefined` fails `toBe(22637261)` exactly as a wrong number does.
+      expect(result.data.data?.room_id).toBe(22637261)
+      expect(result.data.data?.uid).toBe(123456)
+      expect(result.data.data?.live_status).toBe(1)
     }
   })
 
@@ -70,6 +73,28 @@ describe('room_init response', () => {
   it('rejects a payload whose consumed field has the wrong type', () => {
     const wrongType = { ...livePayload, data: { ...livePayload.data, live_status: '1' } }
     expect(roomInitSchema.safeParse(wrongType).success).toBe(false)
+  })
+
+  /**
+   * The refusal, which is a shape the *code* has to survive.
+   *
+   * **Not a capture, and it says so**: no body of a `60004` answer exists anywhere in this repo, so the
+   * code space comes from the reference field table (`room_init`: `0` 成功 / `60004` 直播间不存在) rather
+   * than from a saved response. What is pinned is the property `resolveRoom` stands on — a payload
+   * demanded before the code is read is what made a missing room unreadable, and a missing room is a
+   * fact about the number a person pasted. The `null` case is the same refusal written the other way a
+   * JSON API writes "nothing here"; both readings have to reach the code.
+   */
+  it.each([
+    ['absent', { code: 60004, message: '直播间不存在', ttl: 1 }],
+    ['null', { code: 60004, message: '直播间不存在', ttl: 1, data: null }]
+  ])('parses a refusal whose data is %s, keeping the code', (_shape, payload) => {
+    const result = roomInitSchema.safeParse(payload)
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.code).toBe(60004)
+      expect(result.data.data ?? undefined).toBeUndefined()
+    }
   })
 })
 

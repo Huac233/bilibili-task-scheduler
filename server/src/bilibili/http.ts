@@ -148,7 +148,13 @@ export class CookieJar {
   }
 }
 
-/** Thrown when the transport itself fails (network, timeout, non-2xx). */
+/**
+ * Thrown when the transport itself fails (network, timeout, non-2xx), or when an answer arrived and could
+ * not be read as what the caller asked for — a payload that is not JSON, a shape the endpoint's schema
+ * refuses, a room endpoint reporting success with no room in it. The second kind carries `status: 0`,
+ * because there is no HTTP status to report: `0` is this class's own word for "the failure is not a
+ * status", and `transportCodeOf` in the adapters reads it that way.
+ */
 export class BiliHttpError extends Error {
   readonly status: number
   /**

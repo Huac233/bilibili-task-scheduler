@@ -10,6 +10,7 @@ import { ActionKey, TaskAction } from '../../repo/tasks.js'
 // the top of `platform/bilibili/index.ts`.
 import { redactSecrets } from '../../text/redact.js'
 import { roomIdOf } from '../room.js'
+import { TargetRefusal, TargetRefusalKind } from '../target.js'
 import { DAY_TIME_ZONE, withinLocalWindow } from '../time.js'
 import {
   type ActionDescriptor,
@@ -1024,20 +1025,57 @@ async function resolveRoomId(input: string): Promise<number | null> {
  * ------------------------------------------------------------------ */
 
 /**
+ * The status a room the service does not have answers with, and the one room-read failure that is about
+ * the input rather than the transport.
+ *
+ * `fetchRoomMeta` records the endpoint's own contract: `betard/<unknown>` answers a 404 HTML page, while a
+ * room it *has* and refuses arrives as something else entirely. Everything else — the deadline, a 5xx, a
+ * body that is not a room — stays a transport failure, which is also what `probe` grades this same call as
+ * (`retry`): a room that disappears between a task's creation and its next sweep is not a typo, and parking
+ * the action for it would need evidence this build does not have.
+ */
+const ROOM_NOT_FOUND_STATUS = 404
+
+/**
+ * 「I understand that shape, and there is no such room」, with the room number left in it.
+ *
+ * The number is the one identifier this sentence may carry, because it is the one the person pasted: it is
+ * how they check what they typed. `ROOM_NOT_FOUND_STATUS` is what established it.
+ */
+function missingRoomDetail(roomId: number): string {
+  return `斗鱼没有房间号 ${String(roomId)} 对应的直播间，请核对一下房间号或链接。`
+}
+
+/**
  * Turns pasted input into a target the rest of the system can act on.
  *
- * Throws when the input does not resolve. The seam gives this member no failure
- * variant, and there is nothing here to retry: a form submission either names a
- * room or it does not, and the route turns the throw into a 400 or a 502. One call
- * answers everything the target needs, so unlike the Bilibili adapter there is no
- * second, cosmetic round trip for the title — and the anchor name comes with it,
- * where Bilibili's room endpoints do not carry one at all.
+ * Throws when the input does not resolve, and **which throw it is says which of the three things went
+ * wrong** (`platform/target.ts`): a shape this Platform does not read a room out of, a room that is not
+ * there, or Douyu not answering. The middle one used to arrive as the third — a room that does not exist
+ * was reported as a transport fault, with the gateway's 404 in the sentence. The seam gives this member no
+ * failure variant, and there is nothing here to retry: a form submission either names a room or it does
+ * not. One call answers everything the target needs, so unlike the Bilibili adapter there is no second,
+ * cosmetic round trip for the title — and the anchor name comes with it, where Bilibili's room endpoints do
+ * not carry one at all.
  */
 async function resolveTarget(input: string): Promise<TargetInfo> {
   const roomId = await resolveRoomId(input)
-  if (roomId === null) throw new Error('无法从该链接解析出斗鱼房间号')
+  if (roomId === null) {
+    throw new TargetRefusal(TargetRefusalKind.UnreadableInput, '无法从该链接解析出斗鱼房间号')
+  }
 
-  const meta = await fetchRoomMeta(roomId)
+  let meta: RoomMeta
+  try {
+    meta = await fetchRoomMeta(roomId)
+  } catch (error: unknown) {
+    // A room the service does not have is the person's typo, not a gateway fault: it used to reach the
+    // route as a status-carrying error and come back as 「查询目标失败：HTTP 404」 — a transport sentence
+    // with a number nobody typed. Everything else is rethrown untouched, so a real fault keeps its 502.
+    if (error instanceof RoomReadError && error.status === ROOM_NOT_FOUND_STATUS) {
+      throw new TargetRefusal(TargetRefusalKind.MissingRoom, missingRoomDetail(roomId))
+    }
+    throw error
+  }
 
   return {
     // The room's own id, as the service reports it, rather than the number that was

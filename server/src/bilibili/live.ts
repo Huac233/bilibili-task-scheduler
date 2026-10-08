@@ -1,5 +1,5 @@
 import { fetchNav } from './auth.js'
-import type { BiliHttp } from './http.js'
+import { type BiliHttp, BiliHttpError } from './http.js'
 import {
   type DanmuInfo,
   danmuInfoSchema,
@@ -89,6 +89,32 @@ export class WbiKeyStore {
 }
 
 /**
+ * A room endpoint's refusal: the request arrived, and Bilibili answered a code instead of a room.
+ *
+ * **The code is a field because the layer above grades on it.** `room_init` documents its code space as
+ * `0` for success and `60004` for 直播间不存在 (`RoomInitCode`), and 「the number you pasted names no
+ * room」 is a fact about the person's typing rather than about this build's connection — the adapter
+ * needs to tell the two apart, and it cannot read that out of a sentence.
+ *
+ * **Or out of a shape error either, which is the part that used to be wrong.** Parsing the room payload
+ * before reading the code means a refusal — which carries no room — fails the parse and arrives as
+ * 「unexpected response shape」, throwing away the one field that said what happened. Hence the schemas
+ * these two endpoints use tolerate an absent or null `data`, and the readers below read the code first.
+ *
+ * `message` names no endpoint: `room_init failed for 22637261: …` used to be what a person was shown, and
+ * an internal call name is not a sentence. It keeps Bilibili's own words, which is what a log line wants.
+ */
+export class RoomRefusedError extends Error {
+  readonly code: number
+
+  constructor(code: number, detail: string) {
+    super(`${detail}（code ${String(code)}）`)
+    this.name = 'RoomRefusedError'
+    this.code = code
+  }
+}
+
+/**
  * Resolves the number in a room URL to the real room id.
  *
  * Bilibili distinguishes short ids (`live.bilibili.com/22637261`, what users
@@ -97,24 +123,66 @@ export class WbiKeyStore {
  * it is the single call a monitor needs.
  */
 export async function resolveRoom(http: BiliHttp, shortId: number): Promise<RoomInit> {
-  const response = await http.getJson(`${ROOM_INIT_URL}?id=${shortId}`, roomInitSchema)
+  const url = `${ROOM_INIT_URL}?id=${String(shortId)}`
+  // **The code first, then the room**, and the order is the whole of what a refusal needs: `60004`
+  // (直播间不存在) arrives with no room beside it, so a reader that parsed the payload first would report a
+  // shape problem where Bilibili had said something exact. `fetchRoomInfo` below reads its own answer the
+  // same way, and the two share the idiom rather than a helper because the reader, the message and the URL
+  // all differ.
+  const response = await http.getJson(url, roomInitSchema)
   if (response.code !== 0) {
-    // This request carried the whole cookie jar, so a server that echoes the request
-    // back hands back the session; `redact` removes it before the sentence is thrown.
-    const detail = response.msg ?? response.message ?? `code ${response.code}`
-    throw new Error(`room_init failed for ${shortId}: ${http.redact(detail)}`)
+    // This request carried the whole cookie jar, so a server that echoes the request back hands back the
+    // session; `redact` removes it before the sentence is thrown.
+    throw new RoomRefusedError(
+      response.code,
+      http.redact(refusalWordsOf(response.code, response.msg, response.message))
+    )
   }
-  return response.data
+
+  const room = response.data
+  if (room === undefined || room === null) {
+    // Success with no room in it is not a missing room — nothing about the number is established — so it
+    // keeps the transport's own class and grade. `RoomRefusedError` is for a Platform that said no.
+    throw new BiliHttpError(http.redact(url), 0, UNEXPECTED_ROOM_ANSWER)
+  }
+
+  return room
 }
 
 /** Fetches richer room metadata, including title and viewer count. */
 export async function fetchRoomInfo(http: BiliHttp, roomId: number): Promise<RoomInfo> {
-  const response = await http.getJson(`${ROOM_INFO_URL}?room_id=${roomId}`, roomInfoSchema)
+  const url = `${ROOM_INFO_URL}?room_id=${String(roomId)}`
+  // Read as `resolveRoom` reads its own: `get_info` answers `1` (不存在) to a `room_id` that is not there,
+  // and that refusal carries no room either.
+  const response = await http.getJson(url, roomInfoSchema)
   if (response.code !== 0) {
-    const detail = response.msg ?? response.message ?? `code ${response.code}`
-    throw new Error(`get_info failed for ${roomId}: ${http.redact(detail)}`)
+    throw new RoomRefusedError(
+      response.code,
+      http.redact(refusalWordsOf(response.code, response.msg, response.message))
+    )
   }
-  return response.data
+
+  const room = response.data
+  if (room === undefined || room === null) {
+    throw new BiliHttpError(http.redact(url), 0, UNEXPECTED_ROOM_ANSWER)
+  }
+
+  return room
+}
+
+/**
+ * What a room read says when it reports success and hands over no room.
+ *
+ * A contract change rather than a verdict, so it is the transport's own class and the transport's own
+ * language — `http.ts` composes the other sentences of this kind. It names no endpoint and no field: it
+ * becomes part of what a person may read, and the caller's own prefix (`readGraded`'s 「读取直播间信息失败：」)
+ * already says which read it was.
+ */
+const UNEXPECTED_ROOM_ANSWER = 'the answer reported success without a room'
+
+/** A refusal's own words, or a bare code when the envelope said nothing usable. */
+function refusalWordsOf(code: number, ...said: readonly (string | undefined)[]): string {
+  return said.find(word => word !== undefined && word !== '') ?? `code ${String(code)}`
 }
 
 /**

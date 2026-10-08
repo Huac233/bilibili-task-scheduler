@@ -399,7 +399,26 @@ export interface Platform {
    */
   readonly actions: readonly ActionDescriptor[]
 
-  /** Turns pasted input (a room URL, a slug, an id) into a target. */
+  /**
+   * Turns pasted input into a target: a room URL, a bare id, and — where the Platform has them — a vanity
+   * room path.
+   *
+   * **The slug is a Platform's own feature, not something this member promises.** This line used to read
+   * 「(a room URL, a slug, an id)」, which reads as "every adapter takes all three", and Douyu does while
+   * Bilibili cannot: `douyu/index.ts`'s `resolveSlug` follows the room page's one redirect (`douyu.com/yyf`
+   * is a real room), and Bilibili's live host has no such alias at all — its parser reads a room number, at
+   * the root or after the one verified prefix (`bilibili/index.ts`'s `parseRoomPaste`), and refuses a
+   * segment it does not recognise rather than reading one as a room on a guess. Widening Bilibili's side
+   * would mean inventing a meaning for a path segment, which is how a wrong link becomes somebody else's
+   * room; narrowing this sentence is the honest half of the two. A slug in a *personal-space* URL
+   * (`space.bilibili.com/<id>`) is a third shape again — a user id, not a room — and is not one of these.
+   *
+   * **Failing is a `TargetRefusal`, and it says which failure it is** (`platform/target.ts`): the route
+   * renders its `message` beside the box a person typed into, so the shape they pasted, a room that is not
+   * there, and the Platform not answering have to be three tellable sentences rather than one. A transport
+   * fault is thrown as the adapter's own error class, which is what keeps one Platform's error type out of
+   * `routes/**`.
+   */
   resolveTarget(input: string): Promise<TargetInfo>
 
   /** One liveness probe, for actions that need a live room. */

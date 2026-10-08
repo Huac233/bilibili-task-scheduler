@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BiliHttpError } from '../src/bilibili/http.js'
+import { RoomRefusedError } from '../src/bilibili/live.js'
 import { navSchema } from '../src/bilibili/types.js'
 import { bilibiliPlatform } from '../src/platform/bilibili/index.js'
+import { TargetRefusalKind } from '../src/platform/target.js'
 import type { FailureKind, PlatformAccount, ReconcileContext } from '../src/platform/types.js'
 import { ActionKey, TaskAction } from '../src/repo/tasks.js'
 
@@ -101,6 +103,23 @@ function answerNav(payload: unknown): void {
 /** Every URL the real transport was asked for, so "made no request" is assertable. */
 function fetchedUrls(): string[] {
   return fetchMock.mock.calls.map(call => String(call[0]))
+}
+
+/**
+ * The sentence one refused `resolveTarget` produced.
+ *
+ * A helper rather than `rejects.toThrow(...)` everywhere, because half of what these cases assert is
+ * a **negative** — a sentence that must *not* carry an internal call name — and `toThrow` can only
+ * say what a message contains. A resolve that succeeds throws here, so a widening that quietly started
+ * accepting a refusal's input cannot pass by claiming the sentence was absent.
+ */
+async function refusalMessageOf(input: string): Promise<string> {
+  try {
+    await bilibiliPlatform.resolveTarget(input)
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  throw new Error(`resolveTarget accepted ${input}, and this case needs it refused`)
 }
 
 beforeEach(() => {
@@ -509,6 +528,92 @@ describe('resolveTarget', () => {
       anchorName: '',
       liveStatus: 1
     })
+  })
+
+  /**
+   * The one path prefix a live host puts in front of a room number.
+   *
+   * `live.bilibili.com/blanc/<id>` is a real, openable room URL, and before this it was refused
+   * outright — the parser read the first non-empty segment (`blanc`), demanded digits of it, and gave
+   * up. `blanc` is the **only** prefix that is read, and only in the position right after the host:
+   * see the refusals below for what that deliberately leaves out.
+   */
+  it.each([
+    ['https://live.bilibili.com/blanc/22637261', 22637261],
+    ['live.bilibili.com/blanc/605?broadcast_type=0', 605]
+  ])('reads the room number out of the /blanc/ shape %j', async (input, expected) => {
+    await bilibiliPlatform.resolveTarget(input)
+
+    expect(resolveRoomMock).toHaveBeenCalledWith(expect.anything(), expected)
+  })
+
+  /**
+   * The other side of the widening: a room number is still a room number, wherever it sits.
+   *
+   * A scan that read *any* numeric segment would turn `/p/22637261` or an activity path's number into a
+   * room nobody asked for, which is the one thing widening this parser must not do. So an unknown
+   * prefix refuses exactly as it did before, and `blanc` does not exempt the segment after it from the
+   * digits rule.
+   */
+  it.each([
+    ['https://live.bilibili.com/p/22637261'],
+    ['https://live.bilibili.com/blanc/22637261abc'],
+    ['https://live.bilibili.com/blanc/'],
+    ['https://live.bilibili.com/blanc/605/22637261']
+  ])('still refuses %j', async input => {
+    await expect(bilibiliPlatform.resolveTarget(input)).rejects.toThrow('无法从该链接解析出直播间号')
+    expect(resolveRoomMock).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A b23.tv short link is a class this build refuses, with a sentence that says so.
+   *
+   * **What is established is that the class is refused, and nothing about what it points at.** The
+   * reference short-link documentation lists formats for 任意/av/BV links and its 直播 row is commented
+   * out as 失效, so whether a live room even has a short link is not something this build may assume —
+   * and the sentence therefore does not claim one exists. What it does say is why: where a short link
+   * goes is only knowable by opening it, and this build does not open links. No request is made, which
+   * is what makes that a fact rather than a promise.
+   */
+  it('refuses a b23.tv short link as a class, naming the class and asking for the URL it opens', async () => {
+    const message = await refusalMessageOf('https://b23.tv/av80433022')
+
+    expect(message).toContain('b23.tv')
+    expect(message).not.toContain('无法从该链接解析出直播间号')
+    expect(fetchedUrls()).toEqual([])
+    expect(resolveRoomMock).not.toHaveBeenCalled()
+  })
+
+  /**
+   * The refusal's grade, at the seam where the route reads it.
+   *
+   * `60004` is the documented 直播间不存在: the person's number names no room, which is an input
+   * problem, and the sentence names the number they typed rather than the call that discovered it.
+   * Any other code is a refusal this build cannot name, which is not a verdict about their typing.
+   */
+  it('grades the documented "no such room" code as a missing room, in a sentence about the number', async () => {
+    resolveRoomMock.mockRejectedValue(new RoomRefusedError(60004, '直播间不存在'))
+
+    const message = await refusalMessageOf('22637261')
+
+    expect(message).toContain('没有房间号 22637261')
+    expect(message).not.toContain('room_init')
+  })
+
+  it('grades a room_init code it cannot name as the Platform not answering', async () => {
+    resolveRoomMock.mockRejectedValue(new RoomRefusedError(-412, '请求被拦截'))
+
+    await expect(bilibiliPlatform.resolveTarget('22637261')).rejects.toMatchObject({
+      kind: TargetRefusalKind.PlatformUnanswered
+    })
+  })
+
+  it('lets a transport failure out unchanged, so the route can still answer 502', async () => {
+    // The half that must not be turned into a verdict about the input: a 503 from the gateway is the
+    // reason 「the same link may well work in a minute」 exists.
+    resolveRoomMock.mockRejectedValue(new BiliHttpError('https://api.live.bilibili.com', 503, 'HTTP 503: bad gateway'))
+
+    await expect(bilibiliPlatform.resolveTarget('22637261')).rejects.toBeInstanceOf(BiliHttpError)
   })
 
   it('does not let a cosmetic title failure block a task', async () => {

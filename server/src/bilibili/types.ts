@@ -120,7 +120,33 @@ export const roomInitDataSchema = z.object({
   live_time: z.number()
 })
 export type RoomInit = z.infer<typeof roomInitDataSchema>
-export const roomInitSchema = enveloped(roomInitDataSchema)
+
+/**
+ * `room_init`'s code space, out of the reference field table (`room_init`: `0` 成功 / `60004`
+ * 直播间不存在).
+ *
+ * One named constant rather than two, because only one of the two is a fact about the number a person
+ * pasted: everything that is not this is a refusal this build has no name for, and
+ * `platform/bilibili/index.ts` grades the two differently.
+ */
+export const RoomInitCode = {
+  /** 直播间不存在 — the number names no room. */
+  RoomNotFound: 60004
+} as const
+
+/**
+ * `room_init`'s envelope, and the one place these two endpoints differ from their neighbours.
+ *
+ * `envelopedOptionalData` is the right family — a refusal arrives without the room fields — but it
+ * tolerates only an *absent* `data`, and this endpoint's refusal body is not captured anywhere in this
+ * repo: absent is what `/nav` does when it refuses, while `null` is the other way a JSON API writes
+ * "nothing to put here". Either way **the code has to survive the parse**, because it is the only thing
+ * that can tell 「that room is not there」 from 「the Platform is not answering」 — and demanding a room
+ * payload first is exactly what made a missing room unreadable. A `data` that *is* present still has to
+ * be a room, which is what keeps a changed success shape loud. `resolveRoom` is where the readings are
+ * separated.
+ */
+export const roomInitSchema = envelopedOptionalData(roomInitDataSchema.nullable())
 
 /** `/room/v1/Room/get_info` — richer metadata: the fallback read for a title, and the one room read the reconcile actions need. */
 export const roomInfoDataSchema = z.object({
@@ -154,7 +180,16 @@ export const roomInfoDataSchema = z.object({
   area_id: z.number().optional()
 })
 export type RoomInfo = z.infer<typeof roomInfoDataSchema>
-export const roomInfoSchema = enveloped(roomInfoDataSchema)
+
+/**
+ * The same envelope as `roomInitSchema`, tolerating the same refusal — for the same reason.
+ *
+ * `get_info` answers `1` (不存在) to a `room_id` that is not there, and that refusal carries no room
+ * either; a parse that demanded one first would turn it into 「unexpected response shape」, which is a
+ * statement about this build's parsing rather than about the room. `fetchRoomInfo` reads the code first,
+ * exactly as `resolveRoom` does.
+ */
+export const roomInfoSchema = envelopedOptionalData(roomInfoDataSchema.nullable())
 
 /** Values of `live_status` across the room endpoints. */
 export const LiveStatus = {
