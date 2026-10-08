@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import type { ChoiceItem, ChoiceRead } from '../actions/action-options.js'
-import { redactCredentialParameters, redactSecrets } from '../text/redact.js'
+import { credentialValuesOf, redactCredentialParameters, redactSecrets } from '../text/redact.js'
 
 /**
  * Douyu's backpack, read and narrowed to the one fact a gift allowlist needs.
@@ -212,21 +212,6 @@ export interface BackpackRequest {
 export type BackpackFetch = (url: string, init: RequestInit) => Promise<Response>
 
 /**
- * Every value in a `Cookie:`-shaped string.
- *
- * `webCookies` is the jar as a header (`name=value; name=value`), and a value is the credential —
- * but a sentence quoting a leak quotes the *value*, not the header, so passing the header to
- * `redactSecrets` would miss exactly the case worth catching. The rule about which parameter names
- * carry credentials stays in `text/redact.ts`; what this supplies is the values, which only the
- * caller that sent them has. A part with no `=` is taken whole, which is harmless: it is a token in
- * the same sentence, and redacting it is the safe direction.
- */
-function cookieValuesOf(jar: string): string[] {
-  if (jar === '') return []
-  return jar.split(';').map(part => part.slice(part.indexOf('=') + 1).trim())
-}
-
-/**
  * Reads the backpack, answering in `ChoiceRead` rather than throwing.
  *
  * **Every failure is a sentence, because every failure has a person behind it.** A refusal, a
@@ -275,9 +260,9 @@ export async function readDouyuBackpack(
     // assumed, with the same two rules `BiliHttp.redact` uses (`text/redact.ts`): the values this
     // call sent, and the parameter names that identify one the values alone would not catch.
     const detail = cause instanceof Error ? cause.message : String(cause)
-    // One-character values are skipped, per `redactSecrets`'s own contract: `replaceAll` on a
-    // one-character string shreds the sentence it is meant to protect.
-    const sent = [request.token, ...cookieValuesOf(request.webCookies)].filter(value => value.length > 1)
+    // The two halves this call sent, with the one-character values already dropped by
+    // `credentialValuesOf` — see it for why that contract lives there rather than here.
+    const sent = credentialValuesOf(request.token, request.webCookies)
     return {
       kind: 'unavailable',
       reason: `读取斗鱼背包失败：${redactCredentialParameters(redactSecrets(detail, sent))}（网络或超时）`

@@ -23,6 +23,7 @@ import {
   type ActionChoiceItem,
   type ActionDescriptor,
   type ActionOptionField,
+  type ActionShownRead,
   type ActionWorkflow,
   TASK_STATUS_LABEL,
   type TaskWithProgress
@@ -67,8 +68,11 @@ import { namingNote } from './naming-note.js'
  * which this page cannot reach at all: the route that resolves a choice source is handed an account
  * id and no target, so a per-Room read has no field to arrive through. That is the design's split —
  * 账号级的归这页，目标级的归任务页 — and the discriminator is the same field the scheduler selects a
- * Task's actions by, so it is not a second concept. **One read serves both purposes**: the same
- * source is displayed on the row and fills the parameter form's list.
+ * Task's actions by, so it is not a second concept. **Those reads arrive through two channels, and
+ * only one of them is ever a parameter**: a `choice` field's source is displayed on the row *and*
+ * fills that field's list in the form below, while a read the action declares in `shownReads` is
+ * displayed and is nothing a person sets — which is why `shownReadsOf` is a union, and why the
+ * sentence above the list may not claim that every read under it is a parameter's source.
  *
  * **The parameter form is the third thing, and it lives here rather than in the view** because this
  * is the file the switches are rendered in and a form is per-action: `ActionSettingsView.vue` draws
@@ -217,6 +221,17 @@ function choiceFieldsOf(entry: PlatformEntry): readonly ActionOptionField[] {
 }
 
 /**
+ * One field's read in the shape this page draws.
+ *
+ * The field's `kind` is dropped on the way in, and that is the point: `ActionShownRead` is what the
+ * display needs — a name to ask by, two sentences to read, and the source — while `kind` is what a
+ * *form* builds a control from. A read that reaches this list is displayed, never set.
+ */
+function asShownRead(field: ActionOptionField, source: string): ActionShownRead {
+  return { name: field.name, label: field.label, help: field.help, source }
+}
+
+/**
  * The reads this page displays: those of an action that is about the account itself.
  *
  * **`needsTarget` is the discriminator**, and it is the field the scheduler already selects a Task's
@@ -225,30 +240,44 @@ function choiceFieldsOf(entry: PlatformEntry): readonly ActionOptionField[] {
  * choice source is handed an account id and no target. Those are shown on the task page, which knows
  * which Room it is about. A target-level action's *parameters* stay here with every other action's —
  * the design keeps one home for a value and gives the task page the same store.
+ *
+ * **Two channels feed the list, and the union is the whole of the rule.** A `choice` field's source
+ * is one of them, because a field's read is displayed *and* tickable; `descriptor.shownReads` is the
+ * other, which exists for the read no field could carry. The two are mutually exclusive by
+ * declaration — a read a field already names as its `source` is not repeated in `shownReads` — so
+ * nothing has to be merged away here. A field that names no source is left out rather than drawn: the
+ * route answers that name with a 400, so a heading for it would be a claim no read can settle, and
+ * the row would sit on 「正在读取可选项…」 for ever.
  */
-function shownReadsOf(entry: PlatformEntry): readonly ActionOptionField[] {
-  return entry.descriptor.needsTarget ? [] : choiceFieldsOf(entry)
+function shownReadsOf(entry: PlatformEntry): readonly ActionShownRead[] {
+  if (entry.descriptor.needsTarget) return []
+  const fromFields = choiceFieldsOf(entry).flatMap(field =>
+    field.source === undefined ? [] : [asShownRead(field, field.source)]
+  )
+  return [...fromFields, ...(entry.descriptor.shownReads ?? [])]
 }
 
-/** What one field's read answered, or null while that read has not landed. */
-function readOf(platformKey: string, entry: PlatformEntry, field: ActionOptionField): ActionChoice | null {
-  return accountReads.value[rowOf(platformKey, entry)]?.[field.name] ?? null
+/** What one read answered, or null while that read has not landed. */
+function readOf(platformKey: string, entry: PlatformEntry, read: ActionShownRead): ActionChoice | null {
+  return accountReads.value[rowOf(platformKey, entry)]?.[read.name] ?? null
 }
 
-/** The items one field's read returned. A read that answered nothing has none, and says so itself. */
-function readItemsOf(platformKey: string, entry: PlatformEntry, field: ActionOptionField): readonly ActionChoiceItem[] {
-  const read = readOf(platformKey, entry, field)
-  return read?.kind === 'ok' ? read.items : []
+/** The items one read returned. A read that answered nothing has none, and says so itself. */
+function readItemsOf(platformKey: string, entry: PlatformEntry, read: ActionShownRead): readonly ActionChoiceItem[] {
+  const answer = readOf(platformKey, entry, read)
+  return answer?.kind === 'ok' ? answer.items : []
 }
 
 /**
- * Reads every account-level fact this page shows, once per field.
+ * Reads every account-level fact this page shows, once per name.
  *
- * **One request per field, because the route answers per field** — one source refusing must not take
- * another source's list with it, and the two reads the owner asked for are two different sources.
- * The parameter form reads the same source for itself when it is opened, which is the design's "one
- * read, two purposes" rather than a second mechanism for display: what is displayed and what is
- * tickable come from the same `ChoiceSource`, the same route and the same sentences.
+ * **One request per read, because the route answers per name** — one source refusing must not take
+ * another source's list with it, and the reads the owner asked for are different sources. Where a
+ * read is *also* a field's source, the parameter form asks the same source for itself when it is
+ * opened, and that is the design's "one read, two purposes" rather than a second mechanism for
+ * display: the same `ChoiceSource`, the same route and the same sentences. A `shownReads` entry has
+ * no field behind it and is asked for here alone — so both channels reach the screen through one
+ * fetch path, which is why this loop needs no idea which of the two a read came from.
  *
  * Nothing here is re-read after a save. What is displayed is what the *account* holds, and a save
  * writes what a person chose — two different facts, so re-reading after a write would only re-ask a
@@ -257,29 +286,24 @@ function readItemsOf(platformKey: string, entry: PlatformEntry, field: ActionOpt
 async function loadAccountReads(): Promise<void> {
   for (const platform of catalog.catalogue) {
     for (const entry of platform.actions) {
-      const fields = shownReadsOf(entry).filter(field => field.source !== undefined)
-      if (fields.length === 0) continue
+      const reads = shownReadsOf(entry)
+      if (reads.length === 0) continue
 
       const row = rowOf(platform.key, entry)
       const accountId = accountFor(platform.key)?.id ?? null
       const answers: Record<string, ActionChoice> = { ...accountReads.value[row] }
 
-      for (const field of fields) {
+      for (const read of reads) {
         if (accountId === null) {
           // Why there is no list is the sentence `noAccountReason` owns: "no account bound" and "the
           // list did not arrive" are two facts, and a read that landed is what supports the first.
-          answers[field.name] = { kind: 'unavailable', reason: noAccountReason(accountsLoaded.value) }
+          answers[read.name] = { kind: 'unavailable', reason: noAccountReason(accountsLoaded.value) }
           continue
         }
         try {
-          answers[field.name] = await actionSettingApi.options(
-            platform.key,
-            entry.descriptor.key,
-            accountId,
-            field.name
-          )
+          answers[read.name] = await actionSettingApi.options(platform.key, entry.descriptor.key, accountId, read.name)
         } catch (cause: unknown) {
-          answers[field.name] = { kind: 'unavailable', reason: describeError(cause) }
+          answers[read.name] = { kind: 'unavailable', reason: describeError(cause) }
         }
       }
 
@@ -592,9 +616,12 @@ onMounted(async () => {
 
                   The heading claims the shape and the page, both of which are facts the code read:
                   the block exists only for `needsTarget === false` actions, and each item below it is
-                  the answer to a read this page made for the bound account. **One read, two
-                  purposes** — the same field's source fills the parameter form's list, which is why
-                  the sentence says so where a person can check it against both.
+                  the answer to a read this page made for the bound account. **The two halves of the
+                  facts-line are the two channels, and neither may claim the other's fact**: a `choice`
+                  field's source fills the form's list under it, and a `shownReads` entry is displayed
+                  and never set. What stood here said every read on the list was a parameter's source,
+                  which was true exactly while every displayed read was one — the second channel is
+                  what made it false, and the two halves are what hold for both kinds.
 
                   The list and the failure are drawn apart, never collapsed: `missingReason` carries
                   the three readings (in flight, refused, arrived-and-empty) and only the failure is
@@ -603,27 +630,27 @@ onMounted(async () => {
                 -->
                 <div v-if="shownReadsOf(entry).length > 0" class="account-facts">
                   <div class="facts-line">
-                    这个动作不需要目标，所以这几条都是按账号读出来的：它们既是给你看的实情，也是动作参数里那份清单的同一个来源。
+                    这个动作不需要目标，所以这几条都是按账号读出来的实情：动作参数用得上的那几条，参数表单里的清单就是它们的同一个来源；不参与参数的那几条，只看不改。
                   </div>
 
-                  <div v-for="field in shownReadsOf(entry)" :key="`fact-${field.name}`" class="fact">
-                    <span class="fact-label">{{ field.label }}</span>
-                    <span class="fact-help">{{ field.help }}</span>
+                  <div v-for="fact in shownReadsOf(entry)" :key="`fact-${fact.name}`" class="fact">
+                    <span class="fact-label">{{ fact.label }}</span>
+                    <span class="fact-help">{{ fact.help }}</span>
 
                     <div class="fact-items">
                       <div
-                        v-for="item in readItemsOf(platform.key, entry, field)"
-                        :key="`fact-${field.name}-${item.value}`"
+                        v-for="item in readItemsOf(platform.key, entry, fact)"
+                        :key="`fact-${fact.name}-${item.value}`"
                         class="fact-item"
                       >
                         {{ itemLabel(item) }}
                       </div>
 
                       <div
-                        v-if="readItemsOf(platform.key, entry, field).length === 0"
-                        :class="readOf(platform.key, entry, field)?.kind === 'ok' ? 'note-empty' : 'missing'"
+                        v-if="readItemsOf(platform.key, entry, fact).length === 0"
+                        :class="readOf(platform.key, entry, fact)?.kind === 'ok' ? 'note-empty' : 'missing'"
                       >
-                        {{ missingReason(readOf(platform.key, entry, field)) }}
+                        {{ missingReason(readOf(platform.key, entry, fact)) }}
                       </div>
                     </div>
                   </div>

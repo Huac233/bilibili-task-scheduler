@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { descriptorsWithOptionFields, fieldsOf } from '../src/actions/action-options.js'
+import { descriptorsWithDeclarations, fieldsOf } from '../src/actions/action-options.js'
 import { douyuPlatform } from '../src/platform/douyu/index.js'
 import { FISHING_BAIT_EXHAUSTED, FISHING_FISH_ON_THE_LINE } from '../src/platform/douyu/protocol.js'
 import type { ActionOutcome, PlatformAccount } from '../src/platform/types.js'
@@ -1159,7 +1159,7 @@ describe('the 钓鱼 catalogue entry', () => {
     expect(fields[0]?.source).toBeUndefined()
 
     // …and the merge is what publishes it on the adapter's own descriptor rather than beside it.
-    const merged = descriptorsWithOptionFields('douyu', douyuPlatform.actions)
+    const merged = descriptorsWithDeclarations('douyu', douyuPlatform.actions)
     const fishing = merged.find(action => action.key === ActionKey.Fishing)
     expect(fishing?.optionFields).toEqual(fields)
   })

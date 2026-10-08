@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
-import { fieldOf } from '../actions/action-options.js'
+import { fieldOf, shownReadOf } from '../actions/action-options.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
 import { getAccount } from '../repo/accounts.js'
 import {
@@ -372,18 +372,27 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
   )
 
   /**
-   * The choices for one choice-backed option field, read live.
+   * The choices for one choice-backed option field — or for one read the action only shows.
    *
-   * **Read-only, and the only route here that talks to a Platform.** It asks the action's declared
-   * source — `FieldChoiceSource` in `actions/action-options.ts` is the registry it goes through —
-   * and it answers in the source's terms: a list, or a sentence about why there is no list. It never
-   * invents an empty list, because on the one source this build serves an empty list means "this
-   * account holds nothing", which is a claim only the account's own answer can make.
+   * **Read-only, and the only route here that talks to a Platform.** It asks the source the
+   * descriptor declares — `ChoiceSourceRegistry` in `actions/action-options.ts` is the registry it
+   * goes through — and it answers in the source's terms: a list, or a sentence about why there is
+   * no list. It never invents an empty list, because on the one source this build serves an empty
+   * list means "this account holds nothing", which is a claim only the account's own answer can
+   * make.
    *
-   * Three refusals and no fourth: an unknown field, a field that is not choice-backed, and an
-   * account that is not the caller's. Each is a request this build has no answer for, and answering
-   * anyway — with `[]`, or with the caller's own stored options — would be the form showing a person
-   * something no read produced.
+   * **One route for both channels, and that is the mechanism rather than a shortcut.** A read a
+   * `choice` field names as its `source` is displayed and used as the field's own list; a read no
+   * field names is displayed alone, and `ActionDescriptor.shownReads` is where it is declared. Both
+   * are asked for here, by name, and answered identically — so a page has one fetch path, one
+   * success shape and one set of failure sentences for the reads it shows.
+   *
+   * Three refusals and no fourth: an unknown name (neither a field nor a shown read), a field that
+   * is not choice-backed, and an account that is not the caller's. Each is a request this build has
+   * no answer for, and answering anyway — with `[]`, or with the caller's own stored options —
+   * would be the form showing a person something no read produced. **The second channel adds names
+   * to the first lookup and does not loosen it**: a name this action does not declare is still a
+   * 400.
    */
   app.get<{ Querystring: z.infer<typeof optionsQuerySchema> }>(
     '/api/action-settings/options',
@@ -397,14 +406,23 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
       if (platform === null) return reply.code(400).send({ ok: false, error: `未知平台：${query.platform}` })
 
       const field = fieldOf(platform.key, query.actionKey, query.field)
-      if (field === null) {
+      if (field !== null && (field.kind !== 'choice' || field.source === undefined)) {
+        return reply.code(400).send({ ok: false, error: `选项「${field.label}」是自己填写的，没有可选项列表` })
+      }
+
+      // The second declaration channel: a read the action *shows*, which no `choice` field names as
+      // its `source`. It is asked for by its own `name` and answered in exactly the terms a field's
+      // list is — one route, one registry, one vocabulary — because the page that displays it is the
+      // same page that displays a field's read, and a second fetch path would be a second set of
+      // failure sentences. Looked up only when no field matched, since the two channels are disjoint
+      // by declaration (see `ActionDescriptor.shownReads`).
+      const shown = field === null ? shownReadOf(platform.key, query.actionKey, query.field) : null
+      const source = field?.source ?? shown?.source
+      if (source === undefined) {
         return reply.code(400).send({
           ok: false,
           error: `平台「${platform.label}」的动作「${query.actionKey}」没有可选项「${query.field}」`
         })
-      }
-      if (field.kind !== 'choice' || field.source === undefined) {
-        return reply.code(400).send({ ok: false, error: `选项「${field.label}」是自己填写的，没有可选项列表` })
       }
 
       // Scoped through the caller: a guessed account id 404s instead of reading someone else's
@@ -415,7 +433,7 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
         return reply.code(400).send({ ok: false, error: `账号不属于平台「${platform.label}」` })
       }
 
-      const read = await ctx.choiceSources.read(field.source, account.id)
+      const read = await ctx.choiceSources.read(source, account.id)
       const choice: ChoiceView =
         read.kind === 'ok'
           ? {
@@ -429,7 +447,9 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
             }
           : { kind: 'unavailable', reason: read.reason }
 
-      return { ok: true, field: field.name, source: field.source, choice }
+      // `field` restates what was asked for: both lookups match on exactly this string, so naming
+      // the declaration here would say the same thing twice.
+      return { ok: true, field: query.field, source, choice }
     }
   )
 

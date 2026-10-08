@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
-import { descriptorsWithOptionFields } from '../actions/action-options.js'
+import { descriptorsWithDeclarations } from '../actions/action-options.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
 import type { TargetInfo } from '../platform/types.js'
 import { type AppContext, requireUser } from './context.js'
@@ -43,16 +43,18 @@ export function registerPlatformRoutes(app: FastifyInstance, ctx: AppContext): v
     // adapter happens to expose this month". The descriptors themselves are data
     // and pass through unchanged, which is what `ActionDescriptor` is for.
     //
-    // One field is merged in rather than passed through, and it is the exception the rule
-    // above would otherwise forbid: an action's `optionFields` is the list of knobs its
-    // adapter reads out of `action_settings.options`, and without it every option an action
-    // understands can only be set by hand through the API. The merge is additive — a Platform
-    // that declares none passes through untouched a field at a time — and `actions/**` is
-    // where the declarations live while their home in `platform/**` is being settled.
+    // Two fields are merged in rather than passed through, and they are the exception the rule
+    // above would otherwise forbid: an action's `optionFields` is the list of knobs its adapter
+    // reads out of `action_settings.options`, and its `shownReads` is the list of account-level
+    // reads the settings page shows beside them. Without the first, every option an action
+    // understands can only be set by hand through the API; without the second, a read no option
+    // field names has no way to reach the page at all. The merge is additive — a Platform that
+    // declares neither passes through untouched a field at a time — and `actions/**` is where the
+    // declarations live while their home in `platform/**` is being settled.
     const platforms = allPlatforms().map(platform => ({
       key: platform.key,
       label: platform.label,
-      actions: descriptorsWithOptionFields(platform.key, platform.actions)
+      actions: descriptorsWithDeclarations(platform.key, platform.actions)
     }))
 
     return { ok: true, platforms }

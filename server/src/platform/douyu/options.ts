@@ -1,6 +1,6 @@
 import type { ChoiceItem, ChoiceRead, ChoiceSource } from '../../actions/action-options.js'
 import { getAccountCredentials } from '../../repo/accounts.js'
-import { redactCredentialParameters, redactSecrets } from '../../text/redact.js'
+import { credentialValuesOf, redactCredentialParameters, redactSecrets } from '../../text/redact.js'
 import type { DouyuResult } from './errors.js'
 import { parseCredential, UNNAMED_ROOM } from './index.js'
 import {
@@ -30,8 +30,10 @@ import {
  *    the one read that can answer "which rooms could I dump things into" is the account's own follow list.
  *  - `douyu.medalRooms` — the rooms where the account holds a fan medal, each with whether it has gained
  *    anything today. 清仓's other option does **not** use it (that is the backpack, `douyu.backpack`, the
- *    same source 亲密度任务's `giftAllowlist` uses and a *different* stored list); this one answers the
- *    preferences page's 「哪些牌子需要续」 question.
+ *    same source 亲密度任务's `giftAllowlist` uses and a *different* stored list); this one is the read the
+ *    preferences page shows beside 清仓 without offering it as a knob (`ACTION_SHOWN_READS`). The number
+ *    that page's help sentence calls 保留量 is **not** in this read: `reconcileClearout` sums each room's own
+ *    daily 赠送礼物 remainder on top of these rows.
  *
  * Both are account-level, and that is not a coincidence: `ChoiceSource.read` is handed an account id and
  * nothing else, so a read of one *room* could not back a field today. Neither of these needs to know which
@@ -221,7 +223,7 @@ const FOLLOW_NOT_LOGGED_IN = -1
  *
  * **An empty wall is answered as an empty list here, and that is a measurement rather than an oversight.**
  * `ChoiceRead` says an empty `items` is always a fact about the account, and for this family it is: a badge
- * wall read without a login **redirects** (`GET /member/cp/getBadgeList` answered `302` with an empty body
+ * wall read without a login **redirects** (`GET /member/cp/getFansBadgeList` answered `302` with an empty body
  * in this project's own probe run), and `readFanBadges` throws on a non-2xx — so a read that *returns* zero
  * rows is an account with no medals, and a dead session never reaches this line. 清仓 does not read it
  * that way (it stops rather than spending on a possibly-blind read), and the two are different questions:
@@ -288,31 +290,16 @@ function medalStateIn(todayIntimacy: number | null): string {
 }
 
 /**
- * Every value in a `Cookie:`-shaped string, for scrubbing a sentence that may quote one back.
- *
- * A copy of the rule `routes/douyu-backpack.ts` keeps privately, and **the duplication is named rather than
- * hidden**: that module is a route that cannot be imported from here without inverting the layering, and it
- * is not this task's to edit. The fix, when somebody owns both files, is to export one of the two from
- * `text/redact.ts`, which is already the one home for "which values count as credentials".
- *
- * A part with no `=` is taken whole, which is harmless — it is a token in the same sentence, and redacting
- * it is the safe direction.
- */
-function cookieValuesOf(jar: string): readonly string[] {
-  if (jar === '') return []
-  return jar.split(';').map(part => part.slice(part.indexOf('=') + 1).trim())
-}
-
-/**
  * One sentence, with the values this call sent taken back out of it.
  *
  * Two rules, for the reason `text/redact.ts` gives: the values (which only the caller has) and the
- * parameter names (which catch what the values alone would not). One-character values are skipped, per
- * `redactSecrets`'s own contract — `replaceAll` on a one-character string shreds the sentence it protects.
+ * parameter names (which catch what the values alone would not). The value list is
+ * `credentialValuesOf`'s now — the token plus every value the jar carries, with the one-character
+ * ones already dropped, per `redactSecrets`'s own contract. That function is the one home for the
+ * split and for the contract; this module used to keep a private copy of both.
  */
 function scrub(text: string, credential: DouyuFormCredential): string {
-  const sent = [credential.token, ...cookieValuesOf(credential.webCookies)].filter(value => value.length > 1)
-  return redactCredentialParameters(redactSecrets(text, sent))
+  return redactCredentialParameters(redactSecrets(text, credentialValuesOf(credential.token, credential.webCookies)))
 }
 
 /** The storage handle these sources resolve their account from. */

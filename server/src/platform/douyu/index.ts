@@ -3432,6 +3432,22 @@ function fishingClockText(seconds: number): string {
 }
 
 /**
+ * The window one panel reported, as the two clock readings a person compares — 「18:00–19:00」 — or
+ * `null` when it reported no usable pair.
+ *
+ * **`null` rather than `''`, and the difference is a sentence either way**: both readers of this
+ * value have to tell "no window" from a window (the page prints 「服务端这次没有报窗口」, a run's record
+ * prints 「服务端本次没有报钓鱼窗口」), and an empty string is one `if` away from being printed as a
+ * window of nothing. The rendering itself is `fishingClock`'s, which is why an `et` landing on
+ * midnight reads `00:00` — see that constant.
+ */
+function windowTextOf(match: FishingMatchInfo): string | null {
+  const from = fishingClockText(match.st)
+  const to = fishingClockText(match.et)
+  return from === '' || to === '' ? null : `${from}–${to}`
+}
+
+/**
  * The window a panel reported, as **the record** states it — and the one job that window still has.
  *
  * It used to be a gate: `st`/`et` were compared against the local clock before every cast, and a
@@ -3455,10 +3471,51 @@ function fishingClockText(seconds: number): string {
  * field nothing reads is the field the next reader decides to gate on.
  */
 function fishingWindowClause(match: FishingMatchInfo): string {
-  const from = fishingClockText(match.st)
-  const to = fishingClockText(match.et)
-  if (from === '' || to === '') return '服务端本次没有报钓鱼窗口'
-  return `服务端报的钓鱼窗口 ${from}–${to}（matchInfo.stat ${String(match.stat)}）`
+  const windowText = windowTextOf(match)
+  if (windowText === null) return '服务端本次没有报钓鱼窗口'
+  return `服务端报的钓鱼窗口 ${windowText}（matchInfo.stat ${String(match.stat)}）`
+}
+
+/**
+ * The three things a 钓鱼 panel says about one Room, in the one shape both of its readers need.
+ *
+ * **Why this is one exported function rather than three private helpers.** A task page shows the
+ * two preconditions a cast needs and the window the service reports for that Room, and it once
+ * mirrored `fishingHasCharacter`, `inUseBait` and this module's clock privately — one reading with
+ * two homes, which is the state every round here spends its time deleting. The route
+ * (`routes/douyu-options.ts`) calls this now, and the readings have one author.
+ *
+ * **What is shared is the reading; the sentences stay separate, and that is deliberate.** This
+ * module's sentences are a *run's report* — 「未抛竿：…」 for a refusal, `fishingWindowClause` for a
+ * record's line — and the route's are *page wording*: 「还没有设置（在粉丝家园里设一次，这个动作不会替你做）」
+ * tells a person standing in front of a Room what is the case and where to change it, while the log's
+ * sentence tells whoever reads it why the action stopped. Merging them would make a refusal read like
+ * a page and a page read like a log line, so each survives where its reader is. What may not be
+ * written twice is the *reading* — a present `myCh`, the row marked `inUse: 1`, and the two instants —
+ * and that is exactly what this returns.
+ */
+export interface FishingPanelFacts {
+  /** Whether the panel reports an 形象. See `fishingHasCharacter` for the measurement behind it. */
+  readonly hasCharacter: boolean
+  /** The bait a cast goes out with, or null when the panel marks none in use. */
+  readonly bait: FishingBait | null
+  /**
+   * The window the panel reports for this Room's match, or null when it reported none.
+   *
+   * Printed and never compared: the cast the service accepted and paid for went out 614 s before the
+   * window it was read beside (`fishingWindowClause` has the measurement), so this is a fact to show
+   * a person rather than a gate.
+   */
+  readonly windowText: string | null
+}
+
+/** The one read of one Room's 钓鱼 panel, for every reader of it. */
+export function fishingPanelFacts(panel: FishingPanel): FishingPanelFacts {
+  return {
+    hasCharacter: fishingHasCharacter(panel),
+    bait: inUseBait(panel),
+    windowText: windowTextOf(panel.matchInfo)
+  }
 }
 
 /**
@@ -4291,12 +4348,15 @@ async function reconcileFishing(
  * being a saving of one request: an unreadable session has to arrive as `account_stop`, not
  * as a quiet "nothing to do".
  *
- * No csrf token is sent, and the capture says what that costs and what it does not: the page
- * mints one first (`POST /japi/carnival/nc/common/generateCsrf` → `Set-Cookie: cvl_csrf_token`,
- * `Max-Age=300`) and then sends it as the cookie **and** as the body field, while this adapter
- * sends the field empty and no cookie at all — the shape §2.5's `签到礼包` ledger entry belongs to.
- * So the omission is not "this endpoint needs nothing"; it is a measured-working shape, and a
- * parity change that minted the pair would have to be re-measured rather than assumed better.
+ * No csrf token is sent, and the capture says what that costs and what it does not: **the page**
+ * mints one first, at `POST /japi/carnival/nc/common/generateCsrf` → `Set-Cookie: cvl_csrf_token`,
+ * `Max-Age=300` — a path whose segment is `carnival`, one segment short of the way this build's
+ * own activity calls spell it (`carnivalApi`, `protocol.ts`'s family list), and an endpoint **this
+ * build does not call**; `signActivity` records the shape it sends instead — and then sends the
+ * value as the cookie **and** as the body field, while this adapter sends the field empty and no
+ * cookie at all — the shape §2.5's `签到礼包` ledger entry belongs to. So the omission is not "this
+ * endpoint needs nothing"; it is a measured-working shape, and a parity change that minted the pair
+ * would have to be re-measured rather than assumed better.
  *
  * The details below leave both the `signAlias` and the activity's name out: the alias
  * travels in the item's `code`, which only the debug section renders, and the activity is

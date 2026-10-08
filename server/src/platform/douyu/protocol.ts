@@ -1116,12 +1116,15 @@ export async function clockGrowthPool(
  * and a captured PC-client call of the same family sends
  * `ctn=c15c797cbe859a50731ffe6a3c041aa6` in its body while its own `cookie:` header carries
  * `acf_ccn=c15c797cbe859a50731ffe6a3c041aa6`, character for character. The `cvl_csrf_token`
- * that `generateCsrf` hands out belongs to `carnivalApi/*` and lives 300 seconds; **both halves of
- * that sentence are now measurements rather than assertions**: the 2026-10-09 capture holds the mint
- * (`Set-Cookie: cvl_csrf_token=…; Max-Age=300`, from an empty-body
- * `POST /japi/carnival/nc/common/generateCsrf`) and the `doSign` 63 ms later, which carried that
- * value in its `Cookie:` header *and* in its form field `csrfToken`. A reader who reaches for either
- * of those has the wrong cookie, not a missing one.
+ * is **the activity page's** cookie, and both halves of that sentence are measurements rather
+ * than assertions: it is minted by the page itself, an empty-body
+ * `POST /japi/carnival/nc/common/generateCsrf` — a path whose segment is `carnival`, one
+ * segment short of the way this build's own activity calls spell it (`carnivalApi`) — and it
+ * lives 300 seconds. The 2026-10-09 capture holds that mint
+ * (`Set-Cookie: cvl_csrf_token=…; Max-Age=300`, from that same path **which this build does
+ * not call**; `signActivity` records the shape it sends instead) and the `doSign` 63 ms later,
+ * which carried the value in its `Cookie:` header *and* in its form field `csrfToken`. A reader
+ * who reaches for either of those has the wrong cookie, not a missing one.
  */
 export const FANSHOME_CSRF_COOKIE = 'acf_ccn'
 

@@ -64,6 +64,29 @@ export interface ActionOptionField {
 }
 
 /**
+ * One read an action **shows** about the account, which is deliberately not a knob a person sets.
+ *
+ * Mirrors `ActionShownRead` in `server/src/platform/types.ts` field for field. It is the sibling of
+ * `ActionOptionField` and separate from it on purpose: a field is a decision stored in
+ * `action_settings`, and a shown read is a fact read from the Platform, so a name in both would be a
+ * name whose control has no meaning.
+ *
+ * **No `kind`, and that is the whole of "not a parameter".** `ActionOptionKind` is what a form builds
+ * a control from, and a read has no control — so the panel displays these under `label` and `help`
+ * and offers nothing to tick, which is what 「算出来的，不是填的」 means at this end of the wire.
+ * Nothing here is ever rendered as an identifier: `name` is the key the options route is asked by,
+ * `label` and `help` are the two sentences a person reads, and `source` names the `ChoiceSource` the
+ * route resolves — required, because a read with no source is a read of nothing.
+ */
+export interface ActionShownRead {
+  readonly name: string
+  readonly label: string
+  /** One sentence saying what the read is and that it is not something to fill in. */
+  readonly help: string
+  readonly source: string
+}
+
+/**
  * What a Platform says it can do.
  *
  * Mirrors `ActionDescriptor` in `server/src/platform/types.ts` field for field:
@@ -110,6 +133,22 @@ export interface ActionDescriptor {
    * less, never more. `ActionSettingsPanel` says that where a person can read it.
    */
   readonly optionFields?: readonly ActionOptionField[]
+  /**
+   * The account-level reads this action *shows*, which are **not** parameters a person sets.
+   *
+   * The sibling of `optionFields`, and read by the same page: `ActionSettingsPanel` displays the
+   * sources of its `choice` fields **and** these, in one block, because both are the same kind of
+   * fact — an answer from a live source, asked for by name through `GET
+   * /api/action-settings/options` and answered with the same success shape and the same failure
+   * sentences. What differs is the second use a field's read has: a field's source also fills that
+   * field's list in the form, while a shown read belongs to no control at all.
+   *
+   * Absent rather than empty, for `optionFields`' own reason: "this action shows no read other than
+   * its fields'" and "this action shows nothing" are two readings the page draws differently. A read
+   * a `choice` field already names as its `source` must **not** be repeated here — it is displayed
+   * because the field needs it, and declaring it twice would ask one read as two facts.
+   */
+  readonly shownReads?: readonly ActionShownRead[]
 }
 
 /** A Platform as the catalogue describes it: a key, a display name, its actions. */

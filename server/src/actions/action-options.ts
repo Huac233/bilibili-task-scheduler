@@ -1,7 +1,14 @@
-import type { ActionDescriptor, ActionOptionField } from '../platform/types.js'
+import type { ActionDescriptor, ActionOptionField, ActionShownRead } from '../platform/types.js'
 
 /**
- * The option fields this build knows how to render, and the live reads that fill their choices.
+ * The option fields this build knows how to render, the reads it shows beside them, and the live
+ * reads that fill both.
+ *
+ * Two declaration tables, one per channel — `ACTION_OPTION_FIELDS` for the knobs a person sets and
+ * `ACTION_SHOWN_READS` for the facts an action only shows — and both are merged onto the adapters'
+ * descriptors by `descriptorsWithDeclarations`. The two are separate tables rather than one with a
+ * discriminator because they answer two different questions, and a read that a `choice` field
+ * already names as its `source` belongs in the first table only.
  *
  * **Why this is not in `platform/**`, and what would move it there.** `ActionDescriptor` is
  * the Platform's declaration of its own surface, so an option's field list belongs on it, and
@@ -10,8 +17,8 @@ import type { ActionDescriptor, ActionOptionField } from '../platform/types.js'
  * written down once and read forever — while a choice's source is a *runtime* read that needs the
  * storage handle and a transport, and a table that pulled a transport in would drag the HTTP layer
  * into every consumer of `platform/types.ts`. When a second writer of descriptor fields appears,
- * `ACTION_OPTION_FIELDS` belongs in the adapter next to the action it describes and the route keeps
- * only `fieldOf` below.
+ * these tables belong in the adapter next to the action they describe and the route keeps only
+ * `fieldOf` and `shownReadOf` below.
  *
  * **The mechanism is Platform-neutral; only the wiring names a Platform.** Everything in this
  * module is keyed by strings it never interprets, so `routes/**` can carry it without learning a
@@ -172,6 +179,56 @@ export function fieldsOf(platform: string, actionKey: string): readonly ActionOp
 }
 
 /**
+ * The declared reads an action only shows, keyed exactly as `ACTION_OPTION_FIELDS` is.
+ *
+ * A table of its own rather than a fourth `ActionOptionKind`, because the two channels answer two
+ * different questions — what a person may set, and what this build read about the account — and a
+ * reader of either table should see which question it is keyed by. The entries live here, beside the
+ * fields, because both are the *form's* vocabulary and both are merged onto the adapters'
+ * descriptors by the one function below.
+ */
+export const ACTION_SHOWN_READS: Readonly<Record<string, Readonly<Record<string, readonly ActionShownRead[]>>>> = {
+  douyu: {
+    /**
+     * 清仓's second read — the one no option field could carry.
+     *
+     * **It returns every badge on the wall, and the label says that rather than a state.** The reader is
+     * `readDouyuMedalRooms`, which is `badges.map(toMedalChoice)`: one row per room the account holds a
+     * fan medal in, with today's reading carried in that row's own label by `medalStateIn`. The heading
+     * here used to read 「今天还没送过的牌子」, which names a set no line produces — a medal whose intimacy
+     * already rose today is in this list, and its own row says 「今日亲密度 2，今天已经涨过了」 beneath that
+     * heading. **The heading names the set; the row states the fact.** A filter is not the repair:
+     * `reconcileClearout` sums each room's outstanding 赠送礼物 remainder (`reserved +=
+     * demand.reply.data.owed`, `giftDemandIn`) over exactly this list, so a filtered read would make the
+     * set a person reads disagree with the set the action acts on.
+     *
+     * **And it is not a parameter, which is a fact about the arithmetic rather than a preference.** The
+     * design says the reservation is 「算出来的，不是填的」: the sum is recomputed from today's reads on every
+     * run and no cell stores it, so there is nothing here for a person to tick. Without this channel the
+     * read was registered and unreachable — `douyu.medalRooms` names it, no field names it as a source,
+     * so the page could not display it and no route could be asked for it.
+     *
+     * Only this one is declared. 「我关注了哪些直播间」 (`douyu.followedRooms`) is already displayed,
+     * because it is 「默认倾泻直播间」's own `source`: one read, two uses, which is the mechanism this
+     * channel had to reach rather than a second fetch path.
+     */
+    clearout_props: [
+      {
+        name: 'medalRooms',
+        label: '有牌的直播间',
+        help: '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是按账号读出来的实情，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。',
+        source: 'douyu.medalRooms'
+      }
+    ]
+  }
+}
+
+/** The reads one action shows without offering them as knobs, or none when it declares none. */
+export function shownReadsOf(platform: string, actionKey: string): readonly ActionShownRead[] {
+  return ACTION_SHOWN_READS[platform]?.[actionKey] ?? []
+}
+
+/**
  * One declared field, or null when this action reads nothing by that name.
  *
  * The route's gate as well as its lookup: a request naming a field the descriptor does not declare
@@ -183,23 +240,50 @@ export function fieldOf(platform: string, actionKey: string, name: string): Acti
 }
 
 /**
+ * One shown read, or null when this action declares none by that name.
+ *
+ * The route's other half of the same gate: the options route answers the reads an action declares,
+ * so a name that is neither a field nor a shown read is a name this build has no control for. The
+ * two lookups are asked in that order — a field first — because the two channels are disjoint by
+ * declaration (`ActionDescriptor.shownReads` says why repeating one is a mistake), and a page
+ * reaching for a knob's list should never be handed the display-only answer for the same name.
+ */
+export function shownReadOf(platform: string, actionKey: string, name: string): ActionShownRead | null {
+  return shownReadsOf(platform, actionKey).find(read => read.name === name) ?? null
+}
+
+/**
  * The declarations merged onto the adapters' descriptors.
+ *
+ * **Both channels, and one function rather than two.** `optionFields` and `shownReads` answer two
+ * questions but they arrive the same way and are read off the descriptor together, so a second
+ * merge beside this one would be the same map written twice — and the day one of them forgot an
+ * action, the page would silently lose that action's list.
  *
  * Merged rather than authored beside them, because the adapters stay the source of truth about
  * what exists: this only adds a field list to an action a Platform already declares, and an action
  * it does not declare is not given one. A Platform with no entry passes through untouched, which is
  * every Platform but one today.
  */
-export function descriptorsWithOptionFields(
+export function descriptorsWithDeclarations(
   platformKey: string,
   actions: readonly ActionDescriptor[]
 ): ActionDescriptor[] {
-  const declared = ACTION_OPTION_FIELDS[platformKey]
-  if (declared === undefined) return [...actions]
+  const fields = ACTION_OPTION_FIELDS[platformKey]
+  const reads = ACTION_SHOWN_READS[platformKey]
+  if (fields === undefined && reads === undefined) return [...actions]
 
   return actions.map(action => {
-    const fields = declared[action.key]
-    return fields === undefined ? action : { ...action, optionFields: fields }
+    const declared = fields?.[action.key]
+    const shown = reads?.[action.key]
+    // Neither table names this action: it passes through as itself, which is what the platforms with
+    // no entry at all get one level up.
+    if (declared === undefined && shown === undefined) return action
+    return {
+      ...action,
+      ...(declared === undefined ? {} : { optionFields: declared }),
+      ...(shown === undefined ? {} : { shownReads: shown })
+    }
   })
 }
 

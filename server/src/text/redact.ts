@@ -20,6 +20,11 @@
  *     or a form body, where the only thing identifying a credential is the name of
  *     the parameter carrying it: the QR-login key and a one-time cross-domain
  *     ticket exist for a single exchange and are never in any jar.
+ *
+ * Beside them sits `credentialValuesOf`, and it is **not a third rule**: it decides no value by
+ * itself and is meaningless without `redactSecrets`. It lives here because it is that rule's *input*,
+ * and because the one-character contract below is a property of the list it produces — which is the
+ * whole reason three modules had one private copy of the split and one copy each of that contract.
  */
 
 /** What a removed credential is replaced with. Fixed, so a reader of an error can grep it. */
@@ -127,6 +132,32 @@ export function redactSecrets(text: string, secrets: string | readonly string[])
     safe = safe.replaceAll(secret, REDACTED)
   }
   return safe
+}
+
+/**
+ * The credential values one call sent, ready to hand to `redactSecrets`.
+ *
+ * Every reader that scrubs a sentence about a call holds the same pair — the composite token it sent
+ * and the jar it sent as a `Cookie:` header — and three modules had written both halves out for
+ * themselves (`routes/douyu-backpack.ts`, `routes/douyu-options.ts`, `platform/douyu/options.ts`),
+ * each followed by the same filter. **The filter is the contract above rather than a preference**, so
+ * it is applied where the list is built instead of once per caller: a one-character value must never
+ * reach the rule, and a fourth reader that forgot to filter would shred the sentence it was protecting
+ * without anything going red.
+ *
+ * **A part with no `=` is taken whole**, which is harmless and the safe direction: it is a token in
+ * the same sentence, and redacting it cannot hide anything a reader needs.
+ *
+ * It is deliberately *not* the name-shaped rule's job: `redactCredentialParameters` exists for
+ * sentences whose caller holds no values at all, and this function is the opposite case — the caller
+ * sent exactly these.
+ *
+ * **Coverage is what the three copies had, to the value**: the token, then each jar value, minus the
+ * ones too short to redact. Nothing new is covered here and nothing that was covered is dropped.
+ */
+export function credentialValuesOf(token: string, webCookies: string): readonly string[] {
+  const fromJar = webCookies === '' ? [] : webCookies.split(';').map(part => part.slice(part.indexOf('=') + 1).trim())
+  return [token, ...fromJar].filter(value => value.length > 1)
 }
 
 /** Removes the value of every credential-bearing parameter, whatever that value is. */

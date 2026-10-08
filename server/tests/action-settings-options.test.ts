@@ -1,8 +1,10 @@
-import { describe, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { describe, expect, vi } from 'vitest'
 
 import { fieldOf, fieldsOf } from '../src/actions/action-options.js'
 import type { Db } from '../src/db/index.js'
 import type { BuiltServer } from '../src/index.js'
+import { MEDAL_ROOMS_SOURCE } from '../src/platform/douyu/options.js'
 import { allPlatforms, platformFor } from '../src/platform/registry.js'
 import { upsertAccount } from '../src/repo/accounts.js'
 import {
@@ -177,21 +179,22 @@ describe('ActionDescriptor.optionFields, as the catalogue publishes it', () => {
   })
 })
 
-describe('GET /api/action-settings/options', () => {
-  async function ask(
-    server: BuiltServer,
-    headers: Record<string, string>,
-    query: Record<string, string | number>
-  ): Promise<{ status: number; body: string }> {
-    const search = new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)])).toString()
-    const response = await server.app.inject({
-      method: 'GET',
-      url: `/api/action-settings/options?${search}`,
-      headers
-    })
-    return { status: response.statusCode, body: response.body }
-  }
+/** One `GET /api/action-settings/options` request, as the page makes it: a field or read name, nothing else. */
+async function ask(
+  server: BuiltServer,
+  headers: Record<string, string>,
+  query: Record<string, string | number>
+): Promise<{ status: number; body: string }> {
+  const search = new URLSearchParams(Object.entries(query).map(([key, value]) => [key, String(value)])).toString()
+  const response = await server.app.inject({
+    method: 'GET',
+    url: `/api/action-settings/options?${search}`,
+    headers
+  })
+  return { status: response.statusCode, body: response.body }
+}
 
+describe('GET /api/action-settings/options', () => {
   it('requires a session', async ({ server }) => {
     const response = await server.app.inject({
       method: 'GET',
@@ -369,6 +372,278 @@ describe('GET /api/action-settings/options', () => {
     const listed = await server.app.inject({ method: 'GET', url: '/api/action-settings', headers: session.auth() })
     const settings = listed.json<{ settings: { enabled: boolean }[] }>().settings
     expect(settings.every(setting => !setting.enabled)).toBe(true)
+  })
+})
+
+/**
+ * The read an action **only shows**, which is not one of its parameters.
+ *
+ * The design's preferences page shows two account-level reads for 清仓, and the mechanism can only
+ * show a read some `choice` field names as its `source` — so `douyu.medalRooms` was registered and
+ * unreachable: no field names it, the page therefore could not display it, and the route could not
+ * be asked for it. `ActionDescriptor.shownReads` is the channel the owner ruled for, and the three
+ * properties below are what make it the *same* mechanism rather than a second one:
+ *
+ *  - **It is not a parameter.** A shown read has no `kind` — there is no control to build — and it
+ *    must not appear among the fields a person ticks, because the reservation it answers is
+ *    「算出来的，不是填的」.
+ *  - **It is answered by the same route and the same registry.** The page asks
+ *    `GET /api/action-settings/options` with the read's own name, exactly as it does for a field,
+ *    so there is one fetch path and one failure vocabulary.
+ *  - **The failure distinction survives**: a refused read and a read that answered nothing are two
+ *    sentences, which the empty-wall case below pins for this channel as the other cases pin it for
+ *    the field channel.
+ *
+ * The transport here is the global `fetch`, because `douyu.medalRooms` reads through
+ * `platform/douyu/options.ts`'s own family rather than through `douyu.backpack`'s injected one —
+ * `douyu-choice-sources.test.ts` drives the same family the same way, and the badge wall it answers
+ * is the captured page rather than a hand-written shape.
+ */
+const BADGE_WALL = readFileSync(new URL('./captured/douyu-fan-badges.html', import.meta.url), 'utf8')
+
+/** A badge wall with no row at all, which is a measured answer rather than a dead session — see `readDouyuMedalRooms`. */
+const EMPTY_BADGE_WALL = '<table class="fans-badge-list"><tbody></tbody></table>'
+
+describe('the display-only read channel', () => {
+  it.afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  async function clearoutDescriptor(
+    server: BuiltServer,
+    headers: Record<string, string>
+  ): Promise<{
+    optionFields?: { name: string; kind: string; source?: string }[]
+    shownReads?: { name: string; label: string; help: string; source: string }[]
+  }> {
+    const response = await server.app.inject({ method: 'GET', url: '/api/platforms', headers })
+    const platforms = response.json<{
+      platforms: {
+        key: string
+        actions: {
+          key: string
+          optionFields?: { name: string; kind: string; source?: string }[]
+          shownReads?: { name: string; label: string; help: string; source: string }[]
+        }[]
+      }[]
+    }>().platforms
+
+    const action = platforms
+      .find(platform => platform.key === 'douyu')
+      ?.actions.find(candidate => candidate.key === 'clearout_props')
+    if (action === undefined) throw new Error('the catalogue no longer declares clearout_props')
+    return action
+  }
+
+  it('is published on the descriptor, and is not among the fields a person fills in', async ({ server, session }) => {
+    const action = await clearoutDescriptor(server, session.auth())
+
+    // The read the page could not reach, now declared as a read rather than as a knob: it names a
+    // source and carries the two sentences a person reads, and **no `kind`** — there is no control
+    // for it, which is what keeps a 牌子清单 out of the form a person can change. What those two
+    // sentences have to say is pinned where they can be read against the code — see
+    // `names the read for the set it returns` and `makes both claims of the help true of the code`
+    // below — and this case is about the channel's shape.
+    expect(action.shownReads).toEqual([
+      { name: 'medalRooms', label: expect.any(String), help: expect.any(String), source: MEDAL_ROOMS_SOURCE }
+    ])
+
+    // And the same name is *not* a field: a tickable 牌子清单 is the one shape the design ruled out.
+    expect((action.optionFields ?? []).map(field => field.name)).not.toContain('medalRooms')
+    expect((action.optionFields ?? []).every(field => field.source !== MEDAL_ROOMS_SOURCE)).toBe(true)
+  })
+
+  it('gives the page both of the reads the owner asked for, out of two channels', async ({ server, session }) => {
+    const action = await clearoutDescriptor(server, session.auth())
+
+    // The page's own rule, which is why this is asserted here rather than left to the web half to
+    // discover: it displays the sources of the action's `choice` fields (a field's read is shown
+    // *and* used), then the declared shown reads. 清仓's 「默认倾泻直播间」 is the first kind and
+    // 「有牌的直播间」 is the second, so both of the owner's reads reach the page — one read
+    // with two uses, and one with a single use, through one mechanism.
+    const sources = [
+      ...(action.optionFields ?? []).filter(field => field.kind === 'choice').map(field => field.source),
+      ...(action.shownReads ?? []).map(read => read.source)
+    ]
+
+    expect(sources).toContain('douyu.followedRooms')
+    expect(sources).toContain(MEDAL_ROOMS_SOURCE)
+    // The same source twice would be one read displayed as two facts.
+    expect(new Set(sources).size).toBe(sources.length)
+  })
+
+  it('answers through the same route and the same registry as a field does', async ({ server, session }) => {
+    const accountId = bind(server, session, 'douyu', '456918967')
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (url: string) => {
+      calls.push(String(url))
+      return new Response(BADGE_WALL, { status: 200, headers: { 'content-type': 'text/html;charset=utf-8' } })
+    })
+
+    const answer = await ask(server, session.auth(), {
+      platform: 'douyu',
+      actionKey: 'clearout_props',
+      accountId,
+      field: 'medalRooms'
+    })
+
+    expect(answer.status).toBe(200)
+    const body = JSON.parse(answer.body) as {
+      field: string
+      source: string
+      choice: { kind: string; items: { value: string; label: string }[] }
+    }
+
+    // The same three keys the field channel answers with, so the page needs no second reading of a
+    // response — and the source is the one the descriptor declared.
+    expect(body.field).toBe('medalRooms')
+    expect(body.source).toBe(MEDAL_ROOMS_SOURCE)
+    expect(body.choice.kind).toBe('ok')
+    // 「今天还没送过」 travels in the label, which is the one slot a form shows verbatim.
+    expect(body.choice.items.map(item => item.label)).toEqual([
+      '145oni（今日亲密度 0，今天还没送过）',
+      '电棍（今日亲密度 2，今天已经涨过了）'
+    ])
+    expect(calls.some(url => url.includes('/member/cp/getFansBadgeList'))).toBe(true)
+
+    // The same two properties the field channel holds: no credential in the body, and no identifier
+    // of the read's own items either — `value` is what a field would store, and a shown read stores
+    // nothing, so the page never renders it.
+    expect(answer.body).not.toContain(PASTE_TOKEN)
+    expect(answer.body).not.toContain(SECRET_COOKIE)
+  })
+
+  /**
+   * **The heading names the set; the row states the fact** — and the label used to do the row's job.
+   *
+   * It read 「今天还没送过的牌子」, while the read it sits above is `readDouyuMedalRooms`:
+   * `badges.map(toMedalChoice)`, **every** badge on the wall. So the heading named a set no line
+   * produces, and the counterexample was on the page under it — the captured wall carries a medal that
+   * already gained intimacy today, and `medalStateIn` says so on the row itself: 「今日亲密度 2，今天已经涨过了」
+   * directly beneath a heading claiming the list was the rooms that had not been fed.
+   *
+   * **The boundary pair is the point of this case and is asserted as a pair.** One zero and one
+   * non-zero `todayIntimacy` must both be present, because a read that returned the zeroes alone would
+   * satisfy a heading of that kind by accident — and a filter is not the fix either: the reservation
+   * needs the whole set to sum over. `douyu-clearout.test.ts`'s 「keeps back what every medal room still
+   * needs」 is the other half of that fact (the room that already rose today is one of the two rooms
+   * holding stock back).
+   */
+  it('names the read for the set it returns, because each row states today’s fact itself', async ({
+    server,
+    session
+  }) => {
+    const accountId = bind(server, session, 'douyu', '456918967')
+    vi.stubGlobal(
+      'fetch',
+      async () => new Response(BADGE_WALL, { status: 200, headers: { 'content-type': 'text/html;charset=utf-8' } })
+    )
+
+    const action = await clearoutDescriptor(server, session.auth())
+    const answer = await ask(server, session.auth(), {
+      platform: 'douyu',
+      actionKey: 'clearout_props',
+      accountId,
+      field: 'medalRooms'
+    })
+    const body = JSON.parse(answer.body) as { choice: { kind: string; items: { label: string }[] } }
+    const [read] = action.shownReads ?? []
+    if (read === undefined) throw new Error('the catalogue no longer declares a shown read for clearout_props')
+
+    // Both readings, from the captured wall: the set is not the medals that gained nothing today.
+    expect(body.choice.kind).toBe('ok')
+    const rows = body.choice.items.map(item => item.label)
+    expect(rows.some(label => label.includes('今天还没送过'))).toBe(true)
+    expect(rows.some(label => label.includes('今天已经涨过了'))).toBe(true)
+
+    // So the heading may not claim a state one of its own rows contradicts. The marker is the claim
+    // itself rather than a number, so it cannot be assembled out of neighbouring text by accident.
+    expect(read.label).not.toContain('今天还没送过')
+    // And what it says instead is the set `badges.map(toMedalChoice)` answers with: one row per room the
+    // account holds a fan medal in, told apart by whether the room gained intimacy today.
+    expect(read.label).toBe('有牌的直播间')
+  })
+
+  /**
+   * **Both halves of the help sentence, checked against the code rather than against the intent.**
+   *
+   * The sentence it replaced made two claims, and neither was true of a line: 「这些牌子今天还没涨过亲密度」
+   * described the set as the medals that gained nothing today (the label's mistake, one layer down),
+   * and 「保留量由它算出来」 left the arithmetic to be guessed at.
+   *
+   * What the arithmetic really is, and where: `reconcileClearout` walks **every** medal on the badge
+   * wall (`for (const medal of medals)`) and accumulates `reserved += demand.reply.data.owed`, where
+   * `owed` is that room's own 赠送礼物 remainder — `giftDemandIn`'s `row.taskTotal - row.taskNum`, and
+   * `0` when the room has no outstanding row today. So the reservation is a sum over the same rooms
+   * this read returns, recomputed from today's reads on every run (nothing stores it — `clearoutWalkIn`
+   * is handed it), which is what makes 「算出来的，不是填的」 true rather than decorative.
+   */
+  it('makes both claims of the help true of the code, rather than of the intent', async ({ server, session }) => {
+    const action = await clearoutDescriptor(server, session.auth())
+    const [read] = action.shownReads ?? []
+    if (read === undefined) throw new Error('the catalogue no longer declares a shown read for clearout_props')
+
+    // Half one: the set is every badge on the wall, so the sentence may not describe it as the medals
+    // that gained nothing today.
+    expect(read.help).not.toContain('今天还没涨过亲密度')
+
+    // Half two: it names the quantity the sum is made of, and says the number is not filled in here.
+    expect(read.help).toContain('今天还差')
+    expect(read.help).toContain('保留量')
+
+    // And the whole sentence, pinned: a claim about a set is a sentence, and only the sentence is what a
+    // person reads.
+    expect(read.help).toBe(
+      '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是按账号读出来的实情，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。'
+    )
+  })
+
+  it('keeps a refused read and an empty one apart, as the field channel does', async ({ server, session }) => {
+    const accountId = bind(server, session, 'douyu', '456918967')
+
+    // A transport that never arrived: the read failed, and the page has to say so rather than draw
+    // a blank that reads as "you hold no medals".
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('fetch failed')
+    })
+    const refused = await ask(server, session.auth(), {
+      platform: 'douyu',
+      actionKey: 'clearout_props',
+      accountId,
+      field: 'medalRooms'
+    })
+    const refusedBody = JSON.parse(refused.body) as { choice: { kind: string; reason: string } }
+    expect(refusedBody.choice.kind).toBe('unavailable')
+    expect(refusedBody.choice.reason).toContain('读取粉丝牌失败')
+    expect(refusedBody.choice.reason).not.toContain(PASTE_TOKEN)
+
+    // And a wall with no row: an answer, about the account, and a different sentence.
+    vi.stubGlobal('fetch', async () => new Response(EMPTY_BADGE_WALL, { status: 200 }))
+    const empty = await ask(server, session.auth(), {
+      platform: 'douyu',
+      actionKey: 'clearout_props',
+      accountId,
+      field: 'medalRooms'
+    })
+    const emptyBody = JSON.parse(empty.body) as { choice: { kind: string; items: unknown[] } }
+    expect(emptyBody.choice.kind).toBe('ok')
+    expect(emptyBody.choice.items).toEqual([])
+  })
+
+  it('refuses a name that is neither a field nor a shown read', async ({ server, session }) => {
+    const accountId = bind(server, session, 'douyu', '456918967')
+
+    const answer = await ask(server, session.auth(), {
+      platform: 'douyu',
+      actionKey: 'clearout_props',
+      accountId,
+      field: 'notARead'
+    })
+
+    // The gate is a lookup on what the action declares, and it stays that: the new channel adds
+    // names, it does not accept any.
+    expect(answer.status).toBe(400)
+    expect(JSON.parse(answer.body).error).toContain('notARead')
   })
 })
 

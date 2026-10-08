@@ -1,6 +1,8 @@
 import { describe, expect, vi } from 'vitest'
 
 import type { BuiltServer } from '../src/index.js'
+import { fishingPanelFacts } from '../src/platform/douyu/index.js'
+import { type FishingPanel, fishingPanelSchema } from '../src/platform/douyu/protocol.js'
 import { test as it } from './fixtures.js'
 
 /**
@@ -55,7 +57,7 @@ function json(body: unknown): Response {
 }
 
 /** A panel with both preconditions in place: an 形象, and a bait marked in use with stock beside it. */
-function readyPanel(): unknown {
+function readyPanel(): { readonly error: number; readonly data: unknown } {
   return {
     error: 0,
     data: {
@@ -69,7 +71,7 @@ function readyPanel(): unknown {
 }
 
 /** A panel with neither precondition: no 形象 on this Room, and no bait marked as the one in use. */
-function barePanel(): unknown {
+function barePanel(): { readonly error: number; readonly data: unknown } {
   return {
     error: 0,
     data: {
@@ -230,5 +232,89 @@ describe('the facts of one target, for the action aimed at it', () => {
 
     expect(status).toBe(400)
     expect(calls).toEqual([])
+  })
+})
+
+/**
+ * The one reading both wordings are built from.
+ *
+ * The route above and the adapter's own report used to read the same panel twice — a private mirror of
+ * `fishingHasCharacter`, `inUseBait` and the clock here, and the originals there — which is one fact
+ * with two homes, and the copies had already drifted in a way neither could notice: the route rendered
+ * an absent window as a *sentence* (「服务端这次没有报窗口」) while the adapter rendered it as `''`, so the
+ * two could not be compared even in principle. `fishingPanelFacts` is the one home; what stays in each
+ * place is the sentence its own reader needs, and `FishingPanelFacts` records why those survive apart.
+ *
+ * These cases pin the *reading* at the seam the route now consumes, and each one is a boundary the
+ * mirror could have got wrong: a bait that ran out is not no bait at all, no window is not a window,
+ * and the clock is the Platform's own 0–23 one rather than a duration.
+ */
+describe('the 钓鱼 panel reading, shared by the page and the run', () => {
+  /**
+   * The panel out of one scripted answer, parsed by the module's own schema.
+   *
+   * Parsed rather than written as a literal of the panel's type: the shape `fishingPanelFacts` takes is
+   * `protocol.ts`'s, and a hand-typed fixture would let this suite keep agreeing about a panel the
+   * reader no longer produces.
+   */
+  function panelOf(envelope: { readonly data: unknown }): FishingPanel {
+    return fishingPanelSchema.parse(envelope.data)
+  }
+
+  it('answers the two preconditions and the window, or the plain absent value for each', () => {
+    const ready = fishingPanelFacts(panelOf(readyPanel()))
+    expect(ready.hasCharacter).toBe(true)
+    expect(ready.bait?.cnt).toBe(1150)
+    expect(ready.windowText).toMatch(/^\d{2}:\d{2}–\d{2}:\d{2}$/)
+
+    const bare = fishingPanelFacts(panelOf(barePanel()))
+    expect(bare.hasCharacter).toBe(false)
+    expect(bare.bait).toBeNull()
+    // `null` and not `''`: a caller that printed an empty string would print a window of nothing, and
+    // both sentences built from this are chosen by exactly this value.
+    expect(bare.windowText).toBeNull()
+  })
+
+  it('tells a bait that ran out from no bait at all', () => {
+    // The distinction the page's 「还剩 0 枚」 sentence exists for: `inUse: 0` means nothing is marked
+    // in use (a Room the owner has not prepared), while `inUse: 1, cnt: 0` is a bait the service would
+    // spend and cannot. The action refuses to cast on either, and only one of them is a count.
+    const spent = fishingPanelFacts(
+      panelOf({
+        data: {
+          baits: [{ id: 1, cnt: 0, inUse: 1 }],
+          fishing: { stat: 0, fishEtMs: 0 },
+          matchInfo: { stat: 0, st: 0, et: 0 },
+          myCh: { uid: '456918967' }
+        }
+      })
+    )
+
+    expect(spent.bait).not.toBeNull()
+    expect(spent.bait?.cnt).toBe(0)
+  })
+
+  it('renders the window on the Platform’s own clock, where midnight is 00:00 rather than a duration', async ({
+    server,
+    session
+  }) => {
+    // The older capture's own pair: 12:00–24:00 on 2026-10-07 (`st` 1791432000 / `et` 1791475200), whose
+    // end prints as `00:00` — the same reading `douyu-fishing.test.ts` pins for the run's own record. The
+    // page and the record now come from one clock, so the two can no longer disagree about one panel.
+    const midnightWindow = {
+      error: 0,
+      data: {
+        baits: [{ id: 1, cnt: 1150, inUse: 1 }],
+        fishing: { stat: 0, fishEtMs: 0 },
+        matchInfo: { stat: 1, st: 1_791_432_000, et: 1_791_475_200 },
+        myCh: { uid: '456918967' }
+      }
+    }
+    stubTransport(() => json(midnightWindow))
+    const accountId = await bindAccount(server, session.auth())
+
+    const { body } = await readFacts(server, session.auth(), { accountId })
+
+    expect(factOf(body, 'window')).toBe('12:00–00:00')
   })
 })

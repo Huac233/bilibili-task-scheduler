@@ -1,11 +1,11 @@
 import { describe, expect, vi } from 'vitest'
 
-import { fieldsOf } from '../src/actions/action-options.js'
+import { fieldsOf, shownReadsOf } from '../src/actions/action-options.js'
 import { allPlatforms } from '../src/platform/registry.js'
 import { test as it } from './fixtures.js'
 
 /**
- * Every choice source a descriptor declares is registered in this build.
+ * Every choice source a descriptor declares is registered in this build — **on both channels**.
  *
  * **Why this is a test rather than a comment.** The preferences page displays a read *and* feeds the
  * same read to the parameter's list, so a source that is declared and never registered is not a
@@ -14,6 +14,13 @@ import { test as it } from './fixtures.js'
  * account's answer belongs. It is the one failure mode of this seam that no fixture can catch, because
  * a fixture *supplies* the registry: the thing under test is whether production's own wiring supplies
  * it.
+ *
+ * **The second walk is the newer half, and it is the same property.** `shownReads` is the channel for
+ * a read no `choice` field names as its source — the shape whose absence made `douyu.medalRooms`
+ * registered and invisible — so a shown read whose source this build never wired is a read that
+ * reaches the page as 「这一版没有接上…」 *and* has no field channel to have been noticed through. Both
+ * declaration tables are walked here because production's wiring is what is under test, and neither
+ * table may be the one nobody checks.
  *
  * The assertion is deliberately about registration and not about the answer, so it survives the reads
  * themselves changing: a stub that answers nothing this family understands still proves the source was
@@ -53,17 +60,26 @@ describe('the choice sources a catalogue declares', () => {
     const checked: string[] = []
     for (const platform of allPlatforms()) {
       for (const action of platform.actions) {
-        // The declaration table rather than the descriptor: `fieldsOf` is what the options route
-        // itself gates on (`fieldOf`), so walking it walks exactly the fields a form can be shown.
-        for (const field of fieldsOf(platform.key, action.key)) {
-          if (field.kind !== 'choice' || field.source === undefined) continue
-          checked.push(`${platform.key}/${action.key}/${field.name}`)
+        // The declaration tables rather than the descriptors: `fieldsOf` and `shownReadsOf` are what
+        // the options route itself gates on (`fieldOf`, `shownReadOf`), so walking them walks exactly
+        // the names a form can be shown — on both channels, since the route answers both.
+        const declared = [
+          ...fieldsOf(platform.key, action.key).map(field => ({
+            what: field.name,
+            source: field.kind === 'choice' ? field.source : undefined
+          })),
+          ...shownReadsOf(platform.key, action.key).map(read => ({ what: read.name, source: read.source }))
+        ]
+
+        for (const entry of declared) {
+          if (entry.source === undefined) continue
+          checked.push(`${platform.key}/${action.key}/${entry.what}`)
 
           const params = new URLSearchParams({
             platform: platform.key,
             actionKey: action.key,
             accountId: String(accountId),
-            field: field.name
+            field: entry.what
           })
           const response = await server.app.inject({
             method: 'GET',
@@ -72,7 +88,7 @@ describe('the choice sources a catalogue declares', () => {
           })
           const body = response.json<unknown>()
 
-          expect(JSON.stringify(body), `${platform.key}/${action.key}/${field.name}`).not.toContain('没有接上')
+          expect(JSON.stringify(body), `${platform.key}/${action.key}/${entry.what}`).not.toContain('没有接上')
         }
       }
     }

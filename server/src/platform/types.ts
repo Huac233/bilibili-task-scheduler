@@ -77,6 +77,44 @@ export interface ActionOptionField {
   readonly source?: string
 }
 
+/**
+ * One read an action **shows** about the account — and deliberately not a knob a person sets.
+ *
+ * **Why there is a second channel beside `optionFields` at all.** Some account-level facts are
+ * 「算出来的，不是填的」: which rooms the account follows, and which rooms it holds a fan medal in, each
+ * with today's reading beside it. The
+ * page shows both, and until this existed it could only show a read that some `choice` field named
+ * as its `source` — so a read no field needed was registered, unreachable, and invisible: a second
+ * `choice` field would have been the wrong fix, because it would have made a computed reservation
+ * look like something a person may tick.
+ *
+ * **It is the same mechanism, not a second one.** `source` names a `ChoiceSourceRegistry` key
+ * exactly as a `choice` field's does, so one read serves both purposes — displayed to a person and,
+ * where a field also names it, the field's own list of choices. The route that answers it is
+ * `GET /api/action-settings/options`, asked with this `name` in its `field` parameter, so there is
+ * one fetch path and one failure vocabulary.
+ *
+ * **No `kind`, and that is the whole of "not a parameter".** `ActionOptionKind` is what a form
+ * builds a control from; a read has no control, and adding a member to that union would put a
+ * non-control among the three kinds. For the same reason nothing is stored: there is no cell in
+ * `action_settings` for a read, because a read is a fact about the account rather than a decision
+ * about an action.
+ *
+ * Nothing here is ever rendered as an identifier: `name` is the route's key, `label` and `help` are
+ * the two sentences a person reads, and the values a read answers with are the ones the source
+ * produced.
+ */
+export interface ActionShownRead {
+  /** The key this read is asked for by — the `field` parameter of the options route. Never rendered. */
+  readonly name: string
+  /** The name a person reads above the list. */
+  readonly label: string
+  /** One sentence saying what the read is and that it is not something to fill in. */
+  readonly help: string
+  /** The `ChoiceSourceRegistry` key. Required: a read with no source is a read of nothing. */
+  readonly source: string
+}
+
 /** What a Platform tells the UI it can do. */
 export interface ActionDescriptor {
   /** Stable identifier stored on a task and in `action_settings`, e.g. `send_danmaku`. */
@@ -142,6 +180,19 @@ export interface ActionDescriptor {
    * where a person can read it.
    */
   readonly optionFields?: readonly ActionOptionField[]
+  /**
+   * The account-level reads this action shows, which are **not** parameters a person sets.
+   *
+   * The sibling of `optionFields` and separate from it on purpose: a field is a decision stored in
+   * `action_settings` and a shown read is a fact read from the Platform, so a name in both would be
+   * a name whose control has no meaning. See `ActionShownRead` for why the channel exists, and note
+   * that a read a `choice` field already names as its `source` must **not** be repeated here: it is
+   * displayed because the field needs it, and declaring it twice would fetch one read as two facts.
+   *
+   * Absent rather than empty, for `optionFields`' own reason: "this action shows no read other than
+   * its fields'" and "this action shows nothing" are two readings a page draws differently.
+   */
+  readonly shownReads?: readonly ActionShownRead[]
   /** A sensible cadence, in seconds, for a newly created task. */
   readonly defaultIntervalSeconds: number
   /**

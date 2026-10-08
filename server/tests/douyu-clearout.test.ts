@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { douyuPlatform } from '../src/platform/douyu/index.js'
+import { readFanBadges } from '../src/platform/douyu/protocol.js'
 import type { ActionItem, ActionOutcome, PlatformAccount } from '../src/platform/types.js'
 import { ActionKey } from '../src/repo/tasks.js'
 
@@ -354,6 +355,15 @@ describe('清仓 — the reservation', () => {
     // One `userTaskList` call per medal room, and no second one: the reservation is a read of every room the
     // account holds a medal in, and the badge wall is what says which those are.
     expect(requestsTo(TASKS_PATH).map(call => call.rid)).toEqual([ROOM_A, ROOM_B])
+
+    // And the wall's own reading is why that set is not a filtered one: 电棍 is the room `medalStateIn`
+    // reports as 「今天已经涨过了」, and its five are still inside the ten held back. The reservation walks
+    // every badge (`reconcileClearout`'s `for (const medal of medals)`), which is the arithmetic the
+    // preferences page's help sentence has to be true of — the medal read beside it shows both kinds, so a
+    // sentence calling the displayed set "the medals not fed today" would name a set this action never sums.
+    const wall = await readFanBadges(TOKEN, WEB_COOKIES)
+    const roseToday = wall.badges.filter(badge => badge.todayIntimacy !== null && badge.todayIntimacy > 0)
+    expect(roseToday.map(badge => badge.anchorName)).toEqual(['电棍'])
   })
 
   it('reads the reservation off the captured bodies themselves', async () => {

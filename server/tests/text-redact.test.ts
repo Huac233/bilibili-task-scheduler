@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { REDACTED, redactCredentialParameters, redactSecrets } from '../src/text/redact.js'
+import { credentialValuesOf, REDACTED, redactCredentialParameters, redactSecrets } from '../src/text/redact.js'
 
 /**
  * The redaction rules, at their own seam.
@@ -14,6 +14,12 @@ import { REDACTED, redactCredentialParameters, redactSecrets } from '../src/text
  * The assertions below pin the *narrower* halves as hard as the broader ones: a merge
  * that loses `csrfToken=` staying readable, or the empty-value guard, is worse than the
  * duplication was.
+ *
+ * `credentialValuesOf` is the third export here and deliberately **not** a third rule: it decides no
+ * value by itself — it is the *input* of the value rule, and the reason it lives in this file is the
+ * one-character contract that rule carries. It used to be a private function in three modules
+ * (`routes/douyu-backpack.ts`, `routes/douyu-options.ts`, `platform/douyu/options.ts`), each of which
+ * then applied that contract for itself, so the contract had four homes and the split had three.
  */
 
 const CSRF = 'jct-value'
@@ -48,6 +54,39 @@ describe('redactSecrets', () => {
 
   it('leaves a sentence that holds none of the values alone', () => {
     expect(redactSecrets('请求过于频繁', [CSRF, TOKEN])).toBe('请求过于频繁')
+  })
+})
+
+describe('credentialValuesOf', () => {
+  it('takes the token, and every value the jar carries', () => {
+    // The three call sites this replaces each held the same pair: the composite token the call sent,
+    // and the jar it sent as a `Cookie:` header. A sentence about a failed call may quote either.
+    expect(credentialValuesOf(TOKEN, `acf_auth=${DY_COOKIE}; LTP0=placeholder`)).toEqual([
+      TOKEN,
+      DY_COOKIE,
+      'placeholder'
+    ])
+  })
+
+  it('never hands the value rule a one-character value', () => {
+    // `redactSecrets`'s recorded contract: `replaceAll` on a one-character value shreds the sentence it
+    // was meant to protect, and the composite token's `ct` is exactly one character. The contract is
+    // about the *list*, so it is applied where the list is built — which is what makes one home
+    // possible for the other three modules.
+    const values = credentialValuesOf('x', 'a=1; b=value')
+
+    expect(values).toEqual(['value'])
+    // And the anti-shredding property stated as the sentence it protects, not as the array: the
+    // single-character value survives in the text because the rule was never handed it.
+    expect(redactSecrets('abc 受到了 x 的影响', values)).toBe('abc 受到了 x 的影响')
+  })
+
+  it('takes a part with no `=` whole, and answers nothing for an empty jar', () => {
+    // Harmless and deliberate: a part with no `=` is a token in the same sentence, and redacting it is
+    // the safe direction.
+    expect(credentialValuesOf('', 'bare-token; LTP0=placeholder')).toEqual(['bare-token', 'placeholder'])
+    // Only the token, and no value invented for a jar that carries none.
+    expect(credentialValuesOf(TOKEN, '')).toEqual([TOKEN])
   })
 })
 

@@ -1,10 +1,9 @@
 import type { ChoiceRead, ChoiceSource, ChoiceSourceRegistry } from '../actions/action-options.js'
-import { parseCredential } from '../platform/douyu/index.js'
+import { fishingPanelFacts, parseCredential } from '../platform/douyu/index.js'
 import { douyuFormSources } from '../platform/douyu/options.js'
-import { type FishingMatchInfo, type FishingPanel, readFishingPanel } from '../platform/douyu/protocol.js'
-import { DAY_TIME_ZONE } from '../platform/time.js'
+import { type FishingPanel, readFishingPanel } from '../platform/douyu/protocol.js'
 import { getAccountCredentials } from '../repo/accounts.js'
-import { redactCredentialParameters, redactSecrets } from '../text/redact.js'
+import { credentialValuesOf, redactCredentialParameters, redactSecrets } from '../text/redact.js'
 import type { TargetFactRead, TargetFactRegistry, TargetFactView } from './action-settings.js'
 import { type BackpackFetch, readDouyuBackpack } from './douyu-backpack.js'
 
@@ -105,12 +104,6 @@ function backpackSource(db: Parameters<typeof getAccountCredentials>[0], fetchIm
   }
 }
 
-/** Every value in a `Cookie:`-shaped string, so a transport's own words can be scrubbed of them. */
-function cookieValuesOf(jar: string): string[] {
-  if (jar === '') return []
-  return jar.split(';').map(part => part.slice(part.indexOf('=') + 1).trim())
-}
-
 /**
  * One Room's 钓鱼 panel, read and narrowed to the three facts a person checks before a run.
  *
@@ -123,14 +116,14 @@ function cookieValuesOf(jar: string): string[] {
  * account that is gone, a credential this build cannot read, a refusal from the service and a broken
  * transport are four different facts, and the one answer none of them may give is 「这个直播间什么都没有设置」.
  *
- * **The three facts mirror three private helpers in the adapter** — `fishingHasCharacter`,
- * `inUseBait` and `fishingClockText` in `platform/douyu/index.ts` — and the duplication is a known
- * cost rather than a preference: `platform/**` is another writer's file this round, so neither the
- * helpers nor the sentences they build can be exported for this module to import. The two readings
- * that matter are one line each (a present `myCh` means an 形象; `inUse: 1` names the bait), and the
- * clock is `DAY_TIME_ZONE`, imported rather than restated. **The fix, when somebody owns that file, is
- * to export one `fishingPanelFacts(panel)` from the adapter and delete this module's copy** — the
- * sentences here are the page's own wording and would go with it.
+ * **The three facts come from `fishingPanelFacts` in the adapter** — the one home of the reading
+ * (a present `myCh` means an 形象; `inUse: 1` names the bait the cast sends; the two instants are
+ * rendered on `platform/time.ts`'s clock). They used to be mirrored here privately, and the mirror is
+ * deleted rather than kept: a reading written twice is a reading that can disagree with itself, and
+ * the two copies differed in exactly the way that hides it — this one rendered an absent window as a
+ * *sentence* while the adapter's rendered it as `''`, so neither could be compared with the other.
+ * What remains here is the page's own wording, which is not the adapter's; `FishingPanelFacts`
+ * records which survives where and why.
  */
 async function fishingFacts(
   db: Parameters<typeof getAccountCredentials>[0],
@@ -160,11 +153,10 @@ async function fishingFacts(
     // This family throws where the backpack family answers, and a throw from it means the transport
     // or the contract is broken (`protocol.ts` says so where it declares its own error). Its message
     // carries neither the URL nor the body — that is that module's stated property — but the words
-    // come from below, so the two values this call sent are scrubbed before they reach a reader. A
-    // one-character value is skipped, per `redactSecrets`'s own contract: `replaceAll` on one shreds
-    // the sentence it protects.
+    // come from below, so the two values this call sent are scrubbed before they reach a reader.
+    // `credentialValuesOf` is the one home of both halves and of the one-character contract.
     const detail = cause instanceof Error ? cause.message : String(cause)
-    const sent = [credential.token, ...cookieValuesOf(credential.webCookies)].filter(value => value.length > 1)
+    const sent = credentialValuesOf(credential.token, credential.webCookies)
     return {
       kind: 'unavailable',
       reason: `读取这个直播间的钓鱼面板失败：${redactCredentialParameters(redactSecrets(detail, sent))}（网络或超时）`
@@ -181,52 +173,37 @@ async function fishingFacts(
  * accepted and paid for went out 614 s **before** the window it was read beside — so the value is
  * printed and never compared.
  *
- * A fact says what is the case, not what to do about it; the one remedy worth carrying is that the two
- * preconditions are set in the Platform's own interface, because a person reading 「还没有设置」 on a
- * page that offers them no way to set it needs to know where it lives.
+ * **The readings come from `fishingPanelFacts` in the adapter and only the wording is this file's.**
+ * The three of them used to be mirrored here privately — a present `myCh`, the row marked `inUse: 1`,
+ * and a second copy of the clock — so the one reading had two homes and could have disagreed with
+ * itself in silence. What stays here is what belongs to a page: the labels, and the sentences a
+ * person reads, including the remedy the two preconditions share (they are set in the Platform's own
+ * interface, and a person reading 「还没有设置」 on a page that offers no way to set it has to be told
+ * where it lives). The adapter's own sentences for the same states are a *run's report* and stay
+ * there — `FishingPanelFacts` records why the two wordings are separate.
+ *
+ * A fact says what is the case, not what to do about it; the one instruction worth carrying is where
+ * the two preconditions are changed.
  */
 function fishingFactsOf(panel: FishingPanel): readonly TargetFactView[] {
-  const character = panel.myCh
-  const hasCharacter = typeof character === 'object' && character !== null && !Array.isArray(character)
-  // `inUse: 1` names the bait a cast must send; the panel is the authority, and nothing is remembered
-  // between reads.
-  const bait = panel.baits.find(row => row.inUse === 1) ?? null
+  const facts = fishingPanelFacts(panel)
 
   return [
     {
       name: 'character',
       label: '形象',
-      value: hasCharacter ? '已经设置' : '还没有设置（在粉丝家园里设一次，这个动作不会替你做）'
+      value: facts.hasCharacter ? '已经设置' : '还没有设置（在粉丝家园里设一次，这个动作不会替你做）'
     },
     {
       name: 'bait',
       label: '在用鱼饵',
       // Not 「还剩 0 枚」 for the absent case: no bait marked in use and a bait that ran out are
       // different facts, and the action refuses to cast on either — but only one of them is a count.
-      value: bait === null ? '面板里没有标记「在用」的鱼饵（在粉丝家园里选中一枚）' : `还剩 ${String(bait.cnt)} 枚`
+      value:
+        facts.bait === null
+          ? '面板里没有标记「在用」的鱼饵（在粉丝家园里选中一枚）'
+          : `还剩 ${String(facts.bait.cnt)} 枚`
     },
-    { name: 'window', label: '服务端报的钓鱼窗口', value: windowTextOf(panel.matchInfo) }
+    { name: 'window', label: '服务端报的钓鱼窗口', value: facts.windowText ?? '服务端这次没有报窗口' }
   ]
-}
-
-/**
- * The two instants a panel sent, on the Platform's own clock — 「18:00–19:00」, or the sentence that
- * says it sent none.
- *
- * The zone is `platform/time.ts`'s `DAY_TIME_ZONE`, imported rather than restated, and the rendering
- * is `en-GB`'s 24-hour pair: **an `et` that lands on midnight prints `00:00`**, which is the
- * Platform's own 0–23 clock and not a duration, exactly as the adapter's own reading of the same field
- * records.
- */
-const fishingClock = new Intl.DateTimeFormat('en-GB', {
-  timeZone: DAY_TIME_ZONE,
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false
-})
-
-function windowTextOf(match: FishingMatchInfo): string {
-  const from = match.st > 0 ? fishingClock.format(new Date(match.st * 1000)) : ''
-  const to = match.et > 0 ? fishingClock.format(new Date(match.et * 1000)) : ''
-  return from === '' || to === '' ? '服务端这次没有报窗口' : `${from}–${to}`
 }
