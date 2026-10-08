@@ -185,6 +185,15 @@ interface Scenario {
    */
   followedRoomsFails?: boolean
   medalRoomsFails?: boolean
+  /**
+   * Whether `GET /api/action-settings/options` is answered at all.
+   *
+   * Nothing answers it, so the panel is left holding the reading it has *before* any answer arrives —
+   * the in-flight one, which only `missingReason(null)` words. It is a state of its own rather than a
+   * shorthand for either of the two above, and no other flag in this file can reach it: every other one
+   * settles. The ask is still recorded, so a test can see that it went out.
+   */
+  optionsPending?: boolean
   /** Whether `GET /api/accounts` answers at all. */
   accountListFails?: boolean
   /** Whether it answers with no account on the Platform. */
@@ -308,6 +317,12 @@ http.defaults.adapter = async config => {
   const search = new URLSearchParams(config.params as Record<string, string> | undefined).toString()
   const url = search === '' ? (config.url ?? '') : `${config.url ?? ''}?${search}`
   requests.push({ method, url })
+  // A request that is out and has not come back. Recorded above on purpose, so the state under test is
+  // a real ask in flight rather than a page that never asked; the promise is never settled, so the panel
+  // waits on it for as long as the test lives.
+  if (scenario.optionsPending === true && url.includes('/api/action-settings/options')) {
+    return new Promise<never>(() => {})
+  }
   const data = fixtureFor(method, url)
   return { data, status: 200, statusText: 'OK', headers: {}, config }
 }
@@ -380,18 +395,52 @@ function factsBlockOf(label: string): HTMLElement | null {
 }
 
 /**
- * One read's own line inside that block, flattened.
+ * The block's own heading line, flattened — the one sentence that says what the block is.
+ *
+ * Scoped to the line rather than to the block on purpose: the block also holds every read's label, its
+ * help and its rows, so a block-wide `toContain` cannot say whether a claim belongs to the heading or to
+ * a read underneath it.
+ */
+function factsLineOf(rowLabel: string): string {
+  const line = factsBlockOf(rowLabel)?.querySelector<HTMLElement>('.facts-line')
+  if (line === undefined || line === null) throw new Error(`no facts line in ${rowLabel}`)
+  return (line.textContent ?? '').replace(/\s+/g, ' ')
+}
+
+/**
+ * One read's own element inside that block, or a throw.
  *
  * Scoped to the read rather than to the block on purpose: the two reads are two sentences about two
- * sources, and the moment both readings are on the screen at once a block-wide `toContain` cannot say
- * which of them it found — which is precisely the pair of sentences this file exists to keep apart.
+ * sources, and the moment both readings are on the screen at once a block-wide query cannot say which
+ * of them it found — which is precisely the pair of sentences this file exists to keep apart.
  */
-function factOf(rowLabel: string, factLabel: string): string {
+function factElementOf(rowLabel: string, factLabel: string): HTMLElement {
   const fact = [...rowElement(rowLabel).querySelectorAll<HTMLElement>('.fact')].find(
     candidate => (candidate.querySelector('.fact-label')?.textContent ?? '').trim() === factLabel
   )
   if (fact === undefined) throw new Error(`no fact for ${factLabel} in ${rowLabel}`)
-  return (fact.textContent ?? '').replace(/\s+/g, ' ')
+  return fact
+}
+
+/** One read's own line inside that block, flattened, so an assertion reads what a person reads. */
+function factOf(rowLabel: string, factLabel: string): string {
+  return (factElementOf(rowLabel, factLabel).textContent ?? '').replace(/\s+/g, ' ')
+}
+
+/**
+ * The note a read's list block falls back to when it has no rows — the element whose class carries the
+ * reading.
+ *
+ * Found **structurally** rather than by class, and that is not a style choice: which of the three classes
+ * it carries is the thing under test, so a lookup naming one of them would be asserting the answer. It
+ * is the one child of `.fact-items` that is not a row, which is the shape the template draws it in.
+ */
+function factNoteOf(rowLabel: string, factLabel: string): HTMLElement {
+  const note = [...factElementOf(rowLabel, factLabel).querySelectorAll<HTMLElement>('.fact-items > div')].find(
+    candidate => !candidate.classList.contains('fact-item')
+  )
+  if (note === undefined) throw new Error(`no read note for ${factLabel} in ${rowLabel}`)
+  return note
 }
 
 /** Clicks one row's own button, then lets the request chain it starts land. */
@@ -568,6 +617,13 @@ describe('the account-level facts a preferences page shows', () => {
     // the failure's sentence — the two readings the route's `ChoiceView` union exists to keep apart.
     expect(shown).toContain('一个可选项都没有')
     expect(shown).not.toContain('网页会话已失效')
+    // …and the colour agrees with the sentence: an answer that arrived empty is the quiet `note-empty`,
+    // never the failure's red. This half holds on both sides of the change the case below pins — what was
+    // mis-drawn was the reading with no answer at all — and it is asserted here so the three readings are
+    // pinned as a set rather than only the broken one.
+    const note = factNoteOf('清仓', FOLLOW_FIELD.label)
+    expect(note.classList.contains('note-empty')).toBe(true)
+    expect(note.classList.contains('missing')).toBe(false)
   })
 
   /**
@@ -597,6 +653,40 @@ describe('the account-level facts a preferences page shows', () => {
     expect(facts).not.toContain('电棍的直播间')
     // And the read that did answer is still drawn: one request failing is not the page going blind.
     expect(facts).toContain('小苏的直播间')
+    // …and it is drawn as the failure it is. `missing` is the red `--row-danger`, and it is the class the
+    // reading below may not carry: the distinction between the two is the colour, since both readings are
+    // one sentence in an otherwise identical element.
+    expect(factNoteOf('清仓', FOLLOW_FIELD.label).classList.contains('missing')).toBe(true)
+  })
+
+  /**
+   * The third reading, and the one the class binding drew wrongly: a request that is out and not back.
+   *
+   * `readOf` answers `null` while the read is in flight — that is the state the panel is in on its first
+   * frame, and the only state `missingReason(null)` words — and a two-way test on `kind` (`'ok'`, or
+   * everything else) read it as `.missing`, `--row-danger`. So 「正在读取可选项…」 was drawn in the failure's
+   * colour over a request with nothing wrong with it, in a template whose own comment says only the
+   * failure is coloured as one.
+   *
+   * Red before the change: the note carried `missing` while no answer had arrived.
+   */
+  it('draws a read that is still in flight as a wait, not as a failure', async () => {
+    scenario = {
+      followedRooms: { kind: 'ok', items: [FOLLOWED_ITEM] },
+      medalRooms: { kind: 'ok', items: [MEDAL_ITEM] },
+      optionsPending: true
+    }
+    await mountPanel()
+
+    const note = factNoteOf('清仓', FOLLOW_FIELD.label)
+    // The in-flight reading's own sentence, so the element under these assertions is the one being read.
+    expect(note.textContent).toContain('正在读取可选项…')
+    // A wait is not a failure, so it may not carry the failure's class…
+    expect(note.classList.contains('missing')).toBe(false)
+    // …and it carries one of its own, which is what makes the two readings distinguishable on screen.
+    expect(note.classList.contains('note-pending')).toBe(true)
+    // And the ask really is out — the wait is a request in flight rather than a page that never asked.
+    expect(askedFields()).toContain(FOLLOW_FIELD.name)
   })
 
   /**
@@ -660,6 +750,37 @@ describe('the account-level facts a preferences page shows', () => {
     expect(shown).toContain('这个平台还没有绑定账号')
     expect(shown).not.toContain('账号列表这次没读到')
     expect(askedFields()).toEqual([])
+  })
+
+  /**
+   * The block's heading names the level, and claims no read.
+   *
+   * 「这几条都是按账号读出来的实情」 was false in one reachable state, and no line of code made it true
+   * in that state: with `accountId === null` — nothing bound, or the account list missing —
+   * `loadAccountReads` asks no source at all and writes `noAccountReason(accountsLoaded)` into the answer
+   * itself, so every item under the heading is the panel's own sentence about a read that did not happen.
+   * The heading reads instead as naming the block's **level** — the design's split, whose discriminator is
+   * `descriptor.needsTarget`, which is what `shownReadsOf` reads — and that is the reading which holds in
+   * every state, because the rows themselves already say which case each one is in. So it is worded as
+   * the level it names.
+   *
+   * Red before the change: the heading carried 「按账号读出来的实情」 while nothing had been read — no
+   * source was even asked, as the test above also pins.
+   */
+  it('names the account-level reads without claiming a read where none happened', async () => {
+    scenario = {
+      followedRooms: { kind: 'ok', items: [FOLLOWED_ITEM] },
+      medalRooms: { kind: 'ok', items: [MEDAL_ITEM] },
+      accountListFails: true
+    }
+    await mountPanel()
+
+    const heading = factsLineOf('清仓')
+    // Still names the level, which is the declaration `shownReadsOf` reads and the reason the block is on
+    // this page rather than on the task page.
+    expect(heading).toContain('这个动作不需要目标，所以这几条都是账号这一级的读')
+    // And never the read: this is the state the old wording was false in.
+    expect(heading).not.toContain('按账号读出来的实情')
   })
 
   /**

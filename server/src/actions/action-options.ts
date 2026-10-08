@@ -208,6 +208,15 @@ export const ACTION_SHOWN_READS: Readonly<Record<string, Readonly<Record<string,
      * read was registered and unreachable — `douyu.medalRooms` names it, no field names it as a source,
      * so the page could not display it and no route could be asked for it.
      *
+     * **The `help` names the level for the reason the heading does, and it has to: the panel draws this
+     * sentence unconditionally.** The block comes from `shownReadsOf` — a declaration, not an answer — so
+     * in the state where `accountId === null` (nothing bound, or the account list did not arrive)
+     * `ActionSettingsPanel.vue`'s `loadAccountReads` asks no source at all and writes its own sentence
+     * into the answer, which each row then shows. A `help` claiming a read would have to follow that read
+     * state, and a declaration that follows a read is one fact in two homes. 「账号这一级的读」 is the
+     * declaration this table makes, and it holds whether or not the read happened; the second half — the
+     * reservation is summed per room and filled in nowhere — is the arithmetic and is untouched.
+     *
      * Only this one is declared. 「我关注了哪些直播间」 (`douyu.followedRooms`) is already displayed,
      * because it is 「默认倾泻直播间」's own `source`: one read, two uses, which is the mechanism this
      * channel had to reach rather than a second fetch path.
@@ -216,7 +225,7 @@ export const ACTION_SHOWN_READS: Readonly<Record<string, Readonly<Record<string,
       {
         name: 'medalRooms',
         label: '有牌的直播间',
-        help: '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是按账号读出来的实情，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。',
+        help: '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是账号这一级的读，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。',
         source: 'douyu.medalRooms'
       }
     ]

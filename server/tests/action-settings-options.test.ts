@@ -442,7 +442,7 @@ describe('the display-only read channel', () => {
     // source and carries the two sentences a person reads, and **no `kind`** — there is no control
     // for it, which is what keeps a 牌子清单 out of the form a person can change. What those two
     // sentences have to say is pinned where they can be read against the code — see
-    // `names the read for the set it returns` and `makes both claims of the help true of the code`
+    // `names the read for the set it returns` and `makes every claim of the help true of the code`
     // below — and this case is about the channel's shape.
     expect(action.shownReads).toEqual([
       { name: 'medalRooms', label: expect.any(String), help: expect.any(String), source: MEDAL_ROOMS_SOURCE }
@@ -577,8 +577,17 @@ describe('the display-only read channel', () => {
    * `0` when the room has no outstanding row today. So the reservation is a sum over the same rooms
    * this read returns, recomputed from today's reads on every run (nothing stores it — `clearoutWalkIn`
    * is handed it), which is what makes 「算出来的，不是填的」 true rather than decorative.
+   *
+   * **Its opening clause was the label's mistake one layer further down.** 「这一条是按账号读出来的实情」
+   * claims a read, and the panel draws this sentence unconditionally — the block comes from
+   * `shownReadsOf`, not from an answer — so in the state where `accountId === null` (nothing bound, or
+   * the account list did not arrive) no source is asked at all and the row beneath says so itself. A
+   * claim about a read would therefore have to follow the read state, and a declaration that follows a
+   * read is one fact in two homes. So that clause names the **level** instead — 「账号这一级的读」, the
+   * declaration `shownReadsOf` reads — which holds in every state, and it is the same wording the panel's
+   * own heading uses. The arithmetic after it is untouched and stays pinned whole.
    */
-  it('makes both claims of the help true of the code, rather than of the intent', async ({ server, session }) => {
+  it('makes every claim of the help true of the code, rather than of the intent', async ({ server, session }) => {
     const action = await clearoutDescriptor(server, session.auth())
     const [read] = action.shownReads ?? []
     if (read === undefined) throw new Error('the catalogue no longer declares a shown read for clearout_props')
@@ -591,10 +600,14 @@ describe('the display-only read channel', () => {
     expect(read.help).toContain('今天还差')
     expect(read.help).toContain('保留量')
 
+    // Half three: the clause that used to claim a read. The marker is that claim itself — nine characters
+    // no neighbouring text can assemble — so a reworded sentence cannot pass by accident.
+    expect(read.help).not.toContain('按账号读出来的实情')
+
     // And the whole sentence, pinned: a claim about a set is a sentence, and only the sentence is what a
     // person reads.
     expect(read.help).toBe(
-      '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是按账号读出来的实情，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。'
+      '账号持有粉丝牌的每个直播间都在这张清单里，今天涨没涨亲密度由每一行自己写着。这一条是账号这一级的读，不是能改的参数——保留量是这些直播间今天还差的礼物件数加起来，不是在这里填的。'
     )
   })
 

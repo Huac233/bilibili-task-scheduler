@@ -451,6 +451,24 @@ function readItemsOf(platformKey: string, entry: PlatformEntry, read: ActionShow
 }
 
 /**
+ * Which class one read's note is drawn with — one per reading `missingReason` words.
+ *
+ * **Three readings, three classes, and only the refusal is a failure.** `readOf` answers `null` while
+ * the request is in flight, so a two-way test on `kind` — `'ok'`, or everything else — drew the in-flight
+ * row as `.missing`, `--row-danger`: 「正在读取可选项…」 in the failure's colour on the first frame of every
+ * row, over a request with nothing wrong with it. The reading that has arrived empty is not a failure
+ * either — it is the *account's* answer — so it keeps the quiet class it already had, and the wait needs
+ * one of its own rather than a reuse of that name: a wait and an empty answer are two different facts,
+ * and the class names are how the two are told apart. Which colour each name resolves to is the
+ * stylesheet's business, and the stylesheet's comment states the rule this function has to keep.
+ */
+function factNoteClass(platformKey: string, entry: PlatformEntry, read: ActionShownRead): string {
+  const answer = readOf(platformKey, entry, read)
+  if (answer === null) return 'note-pending'
+  return answer.kind === 'ok' ? 'note-empty' : 'missing'
+}
+
+/**
  * Reads every account-level fact this page shows, once per name.
  *
  * **One request per read, because the route answers per name** — one source refusing must not take
@@ -958,21 +976,25 @@ onUnmounted(() => {
                 </div>
 
                 <!--
-                  What this action read about the account, shown rather than only used as a source
-                  of choices.
+                  What this action read about the account — or why it could not — shown rather than only
+                  used as a source of choices.
 
                   Last in the row on purpose: these are read-outs, and the list of rooms an account holds
                   a medal in is long, so a block above the controls would push the controls — the one
                   thing on the row a person presses — to wherever the list happens to end.
 
-                  The heading claims the shape and the page, both of which are facts the code read:
-                  the block exists only for `needsTarget === false` actions, and each item below it is
-                  the answer to a read this page made for the bound account. **The two halves of the
-                  facts-line are the two channels, and neither may claim the other's fact**: a `choice`
-                  field's source fills the form's list under it, and a `shownReads` entry is displayed
-                  and never set. What stood here said every read on the list was a parameter's source,
-                  which was true exactly while every displayed read was one — the second channel is
-                  what made it false, and the two halves are what hold for both kinds.
+                  The heading names the level, and claims nothing about a read: the block is drawn from
+                  `shownReadsOf`, whose first line is `descriptor.needsTarget`, so 「账号这一级的读」 is a
+                  declaration this page read rather than a fact a read produced. **A heading claiming a
+                  read is false in a reachable state** — `accountId === null` asks no source at all, and
+                  `loadAccountReads` writes `noAccountReason(accountsLoaded)` into the answer itself — and
+                  each row already says which case it is in, so that sentence belongs to the row.
+                  **The two halves of the facts-line are the two channels, and neither may claim the
+                  other's fact**: a `choice` field's source fills the form's list under it, and a
+                  `shownReads` entry is displayed and never set. What stood here said every read on the
+                  list was a parameter's source, which was true exactly while every displayed read was one
+                  — the second channel is what made it false, and the two halves are what hold for both
+                  kinds.
 
                   The list and the failure are drawn apart, never collapsed: `missingReason` carries
                   the three readings (in flight, refused, arrived-and-empty) and only the failure is
@@ -981,7 +1003,7 @@ onUnmounted(() => {
                 -->
                 <div v-if="shownReadsOf(entry).length > 0" class="account-facts">
                   <div class="facts-line">
-                    这个动作不需要目标，所以这几条都是按账号读出来的实情：动作参数用得上的那几条，参数表单里的清单就是它们的同一个来源；不参与参数的那几条，只看不改。
+                    这个动作不需要目标，所以这几条都是账号这一级的读：动作参数用得上的那几条，参数表单里的清单就是它们的同一个来源；不参与参数的那几条，只看不改。
                   </div>
 
                   <div v-for="fact in shownReadsOf(entry)" :key="`fact-${fact.name}`" class="fact">
@@ -999,7 +1021,7 @@ onUnmounted(() => {
 
                       <div
                         v-if="readItemsOf(platform.key, entry, fact).length === 0"
-                        :class="readOf(platform.key, entry, fact)?.kind === 'ok' ? 'note-empty' : 'missing'"
+                        :class="factNoteClass(platform.key, entry, fact)"
                       >
                         {{ missingReason(readOf(platform.key, entry, fact)) }}
                       </div>
@@ -1296,6 +1318,17 @@ onUnmounted(() => {
 /* Only a refused read is coloured as a failure; a source that answered nothing is an answer. */
 .missing {
   color: var(--row-danger);
+}
+
+/*
+ * And the reading that has no answer yet is neither of those: the request is out, `missingReason(null)`
+ * says so, and the row carries that sentence in the quiet colour the rest of a row's read-outs use —
+ * the same colour the empty answer resolves to, since neither of them is a fault. It is a name of its
+ * own rather than a reuse of `.note-empty` because a wait and an answer of nothing are two different
+ * facts, and the template picks between the three by name.
+ */
+.note-pending {
+  color: var(--row-quiet);
 }
 
 .note-empty {
