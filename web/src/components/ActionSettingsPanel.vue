@@ -4,15 +4,15 @@ import {
   NButton,
   NCard,
   NEmpty,
-  NFormItem,
   NInput,
   NSpin,
   NSwitch,
   NTag,
   useDialog,
-  useMessage
+  useMessage,
+  useThemeVars
 } from 'naive-ui'
-import { onMounted, ref } from 'vue'
+import { type CSSProperties, computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { describeError } from '../api/client.js'
 import { accountApi, actionSettingApi, platformApi, taskApi } from '../api/endpoints.js'
@@ -40,26 +40,39 @@ import { namingNote } from './naming-note.js'
  * person has allowed, per Platform. It is a switch, not a form — the server's `PUT
  * /api/action-settings` takes one action at a time, because that is how a person changes their mind.
  *
- * Three things are deliberately loud here.
+ * **Two things are loud here, and both of them are the page's rules rather than the row's.** Off is the
+ * default, and the panel says why: an action that is on runs by itself on a timer, and the catalogue
+ * contains actions that spend something the account owns, so shipping every action dark is the only way
+ * to guarantee that nothing spends an account's balance without a person saying so. And a costly action
+ * asks first — turning one on opens a confirmation that names the cost, while turning it off never asks,
+ * because stopping something is not the dangerous direction. Both are the notes drawn above the first
+ * card, which is where a rule about the page belongs, and both are `NAlert`s because both are cautions.
  *
- * **Off is the default, and the panel says why.** An action that is on runs by itself on a timer,
- * and the catalogue contains actions that spend something the account owns, so shipping every action
- * dark is the only way to guarantee that nothing spends an account's balance without a person
- * saying so.
+ * **Every row is one block, and the weight inside it follows the job.** 设置参数 is what a person does on
+ * an ordinary visit, so it is the row's one filled control; the offer to make the Task that names the
+ * action is the repair for a single state, so it is a quiet button beside that control rather than a bar
+ * across the card; and the Target box, the sentence about the action's aim and the sentence about where
+ * it stands are three parts of that one block instead of three blocks of their own. **Nothing in the row
+ * was dropped to get there** — 会消耗账号资产, the aim, which Tasks name the action, the finished-Task
+ * count, the Target box and the parameter form are all still on it.
  *
- * **A costly action asks first.** Turning one on opens a confirmation that names the cost; turning
- * it off never asks, because stopping something is not the dangerous direction.
+ * **A switch and a Task are two things, and this panel keeps them apart.** The switch answers *may this
+ * action run at all*; a Task answers *when, against which Target, and which action*. And a reconcile Task
+ * names **exactly one** action — the one it runs — so an action switched on with no Task naming it does
+ * nothing at all, silently. That is a *state*, not a fault: it is where anybody stands the moment they
+ * switch an action on, so the row says it in one sentence beside the offer that answers it rather than
+ * twice, in an alarm. Every action still says which Tasks name it, or says there is none. **Naming is not
+ * running**, which is why the list is headed by the naming rather than by the running: the carrier query
+ * keeps a `paused` row on purpose, and a paused Task is left alone by the sweep, so each row carries its
+ * own status word instead of the heading claiming one for all of them. Merging the two into a single
+ * control would hide the safety property the switch exists for, so they stay two parts of one card.
  *
- * **A switch and a Task are two things, and this panel keeps them apart.** The switch answers *may
- * this action run at all*; a Task answers *when, against which Target, and which action*. And a
- * reconcile Task names **exactly one** action — the one it runs — so an action switched on with no
- * Task naming it does nothing at all, silently, and that is what the `#where` block below refuses to
- * let happen quietly: every action says which Tasks name it, or says there is none and offers the one
- * Task that is missing. **Naming is not running**, which is why the list is headed by the naming rather
- * than by the running: the carrier query keeps a `paused` row on purpose, and a paused Task is left
- * alone by the sweep, so each row carries its own status word instead of the heading claiming one for
- * all of them. Merging the two into a single control would hide the safety property the switch exists
- * for, so they stay two parts of one card.
+ * **The Target box says what it resolved to, and this page parses nothing.** `POST
+ * /api/targets/resolve` is the adapter's own answer to *which room is this* (`Platform.resolveTarget`,
+ * whose contract is "turns pasted input into a target"), and the box asks it where the text is typed
+ * instead of only at the moment of creation — so a link pasted into a row is answered on that row, by
+ * whichever adapter owns that Platform's shapes. A parser here would be one fact with two homes, and the
+ * day a Platform starts accepting a short link the page would go on refusing it.
  *
  * **An account-level action's facts are shown here, and what makes them account-level is
  * `needsTarget`.** An action that needs no Target reads facts about the account — the rooms it
@@ -74,7 +87,7 @@ import { namingNote } from './naming-note.js'
  * displayed and is nothing a person sets — which is why `shownReadsOf` is a union, and why the
  * sentence above the list may not claim that every read under it is a parameter's source.
  *
- * **The parameter form is the third thing, and it lives here rather than in the view** because this
+ * **The parameter form lives here rather than in the view** because this
  * is the file the switches are rendered in and a form is per-action: `ActionSettingsView.vue` draws
  * the page's header count and this panel, so a form that read `optionFields` off the same catalogue
  * would either duplicate that read or reach past this component for it.
@@ -83,6 +96,30 @@ import { namingNote } from './naming-note.js'
 const catalog = usePlatformStore()
 const message = useMessage()
 const dialog = useDialog()
+const themeVars = useThemeVars()
+
+/**
+ * The panel's palette, read from the live theme rather than written into the stylesheet.
+ *
+ * Every colour in this component's styles used to be a hex literal (`#888`, `#333`, `#fafafa`, …), which
+ * is one theme's private copy of a fact the theme already owns: under a dark theme the page would have
+ * stayed light while the rest of the app went dark, and the two would have disagreed about the same row.
+ * They land here as custom properties — one name per role — and the stylesheet reads the name rather than
+ * the literal. `AppFooter.vue` is the same instrument on one element; a panel with this many roles needs
+ * the names to be declared once.
+ */
+const themeStyle = computed<CSSProperties>(() => {
+  const vars = themeVars.value
+  return {
+    '--row-title': vars.textColor1,
+    '--row-body': vars.textColor2,
+    '--row-quiet': vars.textColor3,
+    '--row-line': vars.borderColor,
+    '--row-surface': vars.actionColor,
+    '--row-danger': vars.errorColor,
+    '--row-radius': vars.borderRadiusSmall
+  }
+})
 
 /** The action whose switch is mid-flight, so only that row shows as loading. */
 const pending = ref<string | null>(null)
@@ -146,8 +183,37 @@ const accountReads = ref<Record<string, Record<string, ActionChoice>>>({})
 /** The typed Target per row, for an action that is aimed at one. */
 const targetInputs = ref<Record<string, string>>({})
 
-/** The Target a resolution ended as, per row, so a person can see what the id became. */
-const resolvedTargets = ref<Record<string, string>>({})
+/**
+ * What one row's Target box resolved to.
+ *
+ * **The answer is keyed by the text it is about**, and that is the whole of why this is not a string per
+ * row. `Platform.resolveTarget` is a request over the network: it answers a moment after it is asked, and
+ * a box the person has typed past by then would otherwise be labelled with the answer to the previous
+ * question — a wrong sentence where the honest one is no sentence. Comparing the answer's own text
+ * against the box's is what makes a stale answer invisible, and it is also what lets the create path
+ * reuse an answer instead of asking the same question twice.
+ */
+const targetEchoes = ref<Record<string, TargetEcho>>({})
+
+/** One answer about one row's box: the text it is about, and what the server said about it. */
+interface TargetEcho {
+  /** The box's text at the moment it was asked about, unmodified. The key this answer is valid for. */
+  readonly text: string
+  readonly state: TargetEchoState
+}
+
+/**
+ * Three states, and the first is the one that must not be drawn as an answer.
+ *
+ * `resolving` is a read in flight, `ok` is the adapter's own `TargetInfo`, and `failed` carries the
+ * route's sentence rather than a blank: a shape the adapter cannot read is a 400 whose message says so
+ * (「无法从该链接解析出直播间号」), and a transport fault is a 502 — two facts a single empty string would
+ * flatten into one.
+ */
+type TargetEchoState =
+  | { readonly kind: 'resolving' }
+  | { readonly kind: 'ok'; readonly key: string; readonly title: string }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /** The row whose Target is mid-resolution, so its button says so. */
 const resolving = ref<string | null>(null)
@@ -210,9 +276,145 @@ function setTargetInput(row: string, value: string): void {
   targetInputs.value[row] = value
 }
 
+/**
+ * How long a box is left alone before the server is asked what it holds.
+ *
+ * One ask per pause rather than one per keystroke: the request goes out to a Platform, and a room link
+ * is pasted rather than typed. The box's own blur and Enter ask at once, so this delay is only ever what
+ * somebody still typing sees — and `web/tests/action-settings-panel.test.ts` unmounts the panel between
+ * tests precisely because this timer outlives a detached element.
+ */
+const RESOLVE_DEBOUNCE_MS = 400
+
+/** The asks still pending, keyed by row, so a second keystroke replaces the first rather than adding one. */
+const echoTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Cancels one row's pending ask, if it has one. */
+function cancelEcho(row: string): void {
+  const timer = echoTimers.get(row)
+  if (timer === undefined) return
+  clearTimeout(timer)
+  echoTimers.delete(row)
+}
+
+/** Records what one row's box should say, against the text it is about. */
+function setEcho(row: string, text: string, state: TargetEchoState): void {
+  targetEchoes.value = { ...targetEchoes.value, [row]: { text, state } }
+}
+
+/**
+ * Asks the server what one row's box holds, and writes the answer into that row's echo.
+ *
+ * **The page parses nothing**: which shapes a Platform accepts — a bare number, a room URL, a vanity path
+ * — is the adapter's own rule behind `Platform.resolveTarget`, and a second parser here would be one fact
+ * with two homes. So the text travels as typed and the answer is the adapter's, sentences included.
+ *
+ * Two rules keep the asking honest. **An empty box is not asked about**: there is no shape to look up,
+ * and the route's own answer to one is its 400 「请输入直播间链接或房间号」, so asking would be a request
+ * made only to be refused. And **one ask per text**: the pause and the box's own blur both call this, and
+ * only the first gets through — except after a failure, where an explicit blur or Enter is a person
+ * asking again about a link that may have been a transient transport fault.
+ */
+async function resolveEcho(platformKey: string, entry: PlatformEntry): Promise<void> {
+  const row = rowOf(platformKey, entry)
+  const text = targetInputOf(row)
+
+  if (text.trim() === '') {
+    targetEchoes.value = Object.fromEntries(Object.entries(targetEchoes.value).filter(([key]) => key !== row))
+    return
+  }
+
+  const answered = targetEchoes.value[row]
+  if (answered !== undefined && answered.text === text && answered.state.kind !== 'failed') return
+
+  setEcho(row, text, { kind: 'resolving' })
+  try {
+    const target = await platformApi.resolveTarget(platformKey, text.trim())
+    setEcho(row, text, { kind: 'ok', key: target.key, title: target.title })
+  } catch (cause: unknown) {
+    setEcho(row, text, { kind: 'failed', reason: describeError(cause) })
+  }
+}
+
+/** Types into one row's box: the text, and the ask that follows it once the typing stops. */
+function onTargetInput(platformKey: string, entry: PlatformEntry, value: string): void {
+  const row = rowOf(platformKey, entry)
+  setTargetInput(row, value)
+  cancelEcho(row)
+  echoTimers.set(
+    row,
+    setTimeout(() => {
+      echoTimers.delete(row)
+      void resolveEcho(platformKey, entry)
+    }, RESOLVE_DEBOUNCE_MS)
+  )
+}
+
+/** Leaves the box, or presses Enter in it: the same ask as the pause makes, now instead of later. */
+function resolveEchoNow(platformKey: string, entry: PlatformEntry): void {
+  cancelEcho(rowOf(platformKey, entry))
+  void resolveEcho(platformKey, entry)
+}
+
+/**
+ * What one row's box says back, or null when it has nothing to say.
+ *
+ * Null is two facts with one rendering, and both of them are the honest one: an answer about text the box
+ * no longer holds — so the label can never describe a question the person has moved past — and a box that
+ * has not been asked about at all. An answer in flight is said as itself rather than drawn as a blank,
+ * because a blank beside a box reads as "nothing wrong here".
+ */
+function echoOf(row: string): { readonly text: string; readonly failed: boolean } | null {
+  const echo = targetEchoes.value[row]
+  if (echo === undefined || echo.text !== targetInputOf(row)) return null
+  if (echo.state.kind === 'resolving') return { text: '正在识别这个目标…', failed: false }
+  if (echo.state.kind === 'failed') return { text: echo.state.reason, failed: true }
+  // The title is cosmetic in the adapter's own contract (a Bilibili room that answers `room_init` may
+  // still fail its second, title-only read), so an answer without one still names the Target it became.
+  const named = echo.state.title === '' ? `目标 ${echo.state.key}` : echo.state.title
+  return { text: `已解析：${named}`, failed: false }
+}
+
 /** Where one action would run, or null while that read has not landed. */
 function workflowOf(platformKey: string, entry: PlatformEntry): ActionWorkflow | null {
   return workflows.value[rowOf(platformKey, entry)] ?? null
+}
+
+/**
+ * Whether this row can make its own Task, here.
+ *
+ * `create` is the route's own answer, and it is null exactly when something already names the action —
+ * the route builds it from `candidates.length > 0`, the same list `carriers` is mapped from — so the offer
+ * and the carrier list can never both be drawn. The other two clauses are this panel's own limits: a Task
+ * for an action that is switched off is refused by `POST /api/tasks`, and one for a `send` action also
+ * needs a text library, which this panel has no picker for.
+ */
+function canCreate(platformKey: string, entry: PlatformEntry): boolean {
+  const create = workflowOf(platformKey, entry)?.create ?? null
+  return create !== null && entry.enabled && !create.needsLibrary
+}
+
+/**
+ * Where the Task has to be made instead, in one sentence, or `''` when it can be made here.
+ *
+ * Two sentences, both of them a route's own rule read back: the create refuses a switched-off action, and
+ * answers 400 「需要选择文本库」 for a Task that needs a library it was not given. A row with a carrier has
+ * `create: null` and says nothing here — the carrier list above it is already the answer, and a sentence
+ * about where to create a Task that exists would be the panel describing a state it is not in.
+ */
+function createElsewhere(platformKey: string, entry: PlatformEntry): string {
+  const create = workflowOf(platformKey, entry)?.create ?? null
+  if (create === null) return ''
+  if (!entry.enabled) return '先把它打开再建任务：服务端不给关闭的动作建任务。'
+  if (create.needsLibrary) {
+    return '这个动作还要选一个文本库，所以任务在「创建任务」页建：那里能挑库，也能定下时间窗。'
+  }
+  return ''
+}
+
+/** Whether the Task this row would make also wants a Target, which is the box's only reason to exist. */
+function createWantsTarget(platformKey: string, entry: PlatformEntry): boolean {
+  return workflowOf(platformKey, entry)?.create?.needsTarget === true
 }
 
 /** The fields of one row whose values are read from a source rather than typed. */
@@ -416,12 +618,25 @@ async function createCarrier(platformKey: string, entry: PlatformEntry): Promise
     let targetKey = ''
     let targetTitle = ''
     if (wantsTarget) {
-      resolving.value = row
-      const target = await platformApi.resolveTarget(platformKey, typed)
-      resolving.value = null
-      targetKey = target.key
-      targetTitle = target.title
-      resolvedTargets.value[row] = targetTitle === '' ? `目标 ${target.key}` : targetTitle
+      // The box's own echo is the same read, of the same text, so a row that has already answered what is
+      // typed is not asked the same question twice: one question, one answer, whichever path asked it.
+      // The comparison is against the text the answer is about, so an edit made between the echo landing
+      // and the press falls through to resolving here rather than creating a Task for the wrong room.
+      const echoed = targetEchoes.value[row]
+      if (echoed !== undefined && echoed.state.kind === 'ok' && echoed.text.trim() === typed) {
+        targetKey = echoed.state.key
+        targetTitle = echoed.state.title
+      } else {
+        cancelEcho(row)
+        resolving.value = row
+        const target = await platformApi.resolveTarget(platformKey, typed)
+        resolving.value = null
+        targetKey = target.key
+        targetTitle = target.title
+        // Written back against the box's own text: a create that fails after resolving leaves the answer
+        // where the person typed the question, and one that succeeds clears the box, which hides it.
+        setEcho(row, targetInputOf(row), { kind: 'ok', key: target.key, title: target.title })
+      }
     }
 
     const now = Date.now()
@@ -536,11 +751,34 @@ onMounted(async () => {
 
   await loadWorkflows()
 })
+
+/**
+ * Drops the Target box's pending asks when the panel goes away.
+ *
+ * A paused ask that fires after unmount is a request nobody is waiting for, answered into a component that
+ * will never render it — and in a test it lands in the *next* test's request log, which is what half of
+ * that suite's assertions read.
+ */
+onUnmounted(() => {
+  for (const timer of echoTimers.values()) clearTimeout(timer)
+  echoTimers.clear()
+})
 </script>
 
 <template>
-  <div class="panel">
+  <div class="panel" :style="themeStyle">
     <NAlert v-if="error !== ''" type="error">{{ error }}</NAlert>
+
+    <!--
+      The page's two rules, each a note with its own heading.
+
+      These are the two loud things here, and deliberately so: one is the ADR-0002 default and the other is
+      the difference between a switch and a Task. Above the first card is where a rule about the page
+      belongs — drawn inside a row it would be repeated once per action, which is what the row's own quiet
+      sentences are for. Each heading is that note's own first clause rather than a new claim: a heading is
+      the one line a person may read instead of the paragraph, so it cannot say anything the paragraph, and
+      the code behind it, does not.
+    -->
 
     <!-- The reason a costly action ships dark, and **no instance of one**. This note is drawn once, above
          every Platform's card, so an action's name and its price may not appear in it: the price is stated
@@ -549,14 +787,14 @@ onMounted(async () => {
          that serves every Platform. It points at the row instead, at the two halves the row already
          draws: the marker `descriptor.costly` puts there, and that descriptor's own `description`,
          rendered on the row below. Nothing new is fetched to make this true — the words are the row's. -->
-    <NAlert type="warning" :bordered="false">
-      每个动作默认都是关闭的，需要哪个由你在这里亲手打开。原因很直接：打开的动作会按任务间隔自己跑，
+    <NAlert type="warning" :bordered="false" title="每个动作默认都是关闭的，需要哪个由你在这里亲手打开">
+      原因很直接：打开的动作会按任务间隔自己跑，
       其中有些会花掉账号里的东西——这类动作在下面都标了「会消耗账号资产」，花掉的是什么写在它自己那行说明里，
       所以新动作一律先关着，只有你点名要的那个才会运行。
     </NAlert>
 
-    <NAlert type="info" :bordered="false">
-      开关和任务是两回事，这里两件都摆出来。开关回答「这个动作允许不允许跑」；任务回答「什么时候、对着哪个目标跑、跑哪个动作」。
+    <NAlert type="info" :bordered="false" title="开关和任务是两回事">
+      这里两件都摆出来。开关回答「这个动作允许不允许跑」；任务回答「什么时候、对着哪个目标跑、跑哪个动作」。
       一个任务只跑它自己指名的那个动作，所以一个动作开着、却没有指名它的任务，它一趟也不会跑——下面每个动作都写了哪个任务指名它（这一次没读到的那一行会自己说明），
       没有的话可以补一个：这里能就地建的会给按钮，需要文本库的去「创建任务」页建。
       <!-- 「指名它」而不是「在跑它」：下面那单子按 action_key 命中取行，它刻意含 paused 行，而扫不到 paused。
@@ -604,15 +842,148 @@ onMounted(async () => {
                 <div class="action-title">
                   <span class="action-label">{{ entry.descriptor.label }}</span>
                   <NTag v-if="entry.descriptor.costly" size="tiny" type="warning">会消耗账号资产</NTag>
-                  <NTag size="tiny" :bordered="false" class="switch-state">
-                    {{ entry.enabled ? '已开启' : '已关闭' }}
-                  </NTag>
                 </div>
                 <div class="action-desc">{{ entry.descriptor.description }}</div>
 
                 <!--
+                  The one block a person acts in: how the action is aimed, where it stands, and the
+                  controls that change either.
+
+                  Four things used to be four blocks — a warning about having no Task, a bar across the
+                  card offering to create one, a Target box on a line of its own, and a borderless link for
+                  the parameters — which said the same thing at four different volumes and left the routine
+                  control as the least visible thing on the row. They are one block now, in the order a
+                  person reads them: what this action is aimed at, whether anything runs it, the Target a
+                  create would need, and then the row's two controls — the parameters first, because that
+                  is what a visit is normally for, and the create second, because it is the repair for one
+                  state. **The sentences are the same sentences**; where they sit, and how loudly, is what
+                  changed.
+                -->
+                <div class="row-work">
+                  <!-- How it is aimed, and which Tasks name it. The switch beside it decides whether it
+                       *may*; this decides whether anything asks for it, which is the half a person could
+                       not see. The heading claims the naming and not the running, because the carrier
+                       query keeps a `paused` row on purpose and the sweep leaves such a row alone — the
+                       row's own note carries that, so the heading does not have to claim it for all of
+                       them. -->
+                  <div v-if="workflowOf(platform.key, entry) !== null" class="where">
+                    <div class="where-shape">{{ workflowOf(platform.key, entry)?.wants.shape }}</div>
+
+                    <div v-if="(workflowOf(platform.key, entry)?.carriers.length ?? 0) > 0" class="carrier-list">
+                      <div class="where-line">指名这个动作的任务：</div>
+                      <div
+                        v-for="carrier in workflowOf(platform.key, entry)?.carriers ?? []"
+                        :key="`carrier-${String(carrier.id)}`"
+                        class="carrier"
+                      >
+                        <span class="carrier-name">{{ carrierLabel(carrier) }}</span>
+                        <span class="carrier-note">{{ carrierNote(carrier.id) }}</span>
+                      </div>
+                    </div>
+
+                    <!--
+                      The state its owner is actually in — on, and no Task asking for it — said once.
+
+                      It is where anybody stands the moment they switch an action on, so it is a sentence
+                      rather than an alarm, and it carries both halves in one place: that nothing runs it,
+                      and that the switch is only permission. This used to be two statements — this
+                      sentence inside a warning block, and a button beside it saying the same thing a
+                      second time in the accent colour — which is the doubling the owner reported.
+                    -->
+                    <div v-else class="nowhere">
+                      <div class="state-line">
+                        现在没有任何任务运行它，所以这个动作开着也不会动——开关只是允许它跑，真正让它跑起来的是一个在任务里指名了这个动作的任务。
+                      </div>
+
+                      <!-- Why a person may be looking at this state with a Task of their own in mind.
+                           A Task whose window has closed is finished for good, so it is not a carrier —
+                           and the count is what stops this panel from answering their question with
+                           「现在没有任何任务运行它」 and leaving it there. -->
+                      <div v-if="(workflowOf(platform.key, entry)?.finishedCarriers ?? 0) > 0" class="finished-line">
+                        {{ workflowOf(platform.key, entry)?.finishedCarriers }} 个任务已经把时间窗跑完了，不会再跑。要接着跑就重新建一个，建的时候把结束时间往后放。
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- The attribution read itself, and the only state where a row cannot say which Task
+                       names it: `loadWorkflows` answers a refusal with `null` for that action alone, so
+                       this is one row's failure rather than the page's. Drawing nothing here is what left
+                       the banner's promise unkept, and the once-read flag is what stops the same sentence
+                       appearing before the read has had its turn. -->
+                  <div v-else-if="workflowsRead" class="where">
+                    <div class="where-line">这个动作的归属这次没读到，所以这一行只有开关那一半的事实。</div>
+                  </div>
+
+                  <div class="row-actions">
+                    <!--
+                      The Target, and what it resolved to.
+
+                      The label, the box and the answer are one group because they are one question. The box
+                      used to sit in a block of its own with its answer nowhere at all, so a person who
+                      pasted a link was told nothing until they pressed the button that creates a Task —
+                      and that answer is the one the create itself uses, so it is worth having before the
+                      press. The read is the Platform adapter's own (`POST /api/targets/resolve`); nothing
+                      here parses the text, so whichever shapes an adapter accepts are accepted wherever
+                      they are pasted.
+                    -->
+                    <div
+                      v-if="canCreate(platform.key, entry) && createWantsTarget(platform.key, entry)"
+                      class="target-group"
+                    >
+                      <span class="target-label">针对哪个目标</span>
+                      <NInput
+                        :value="targetInputOf(rowOf(platform.key, entry))"
+                        placeholder="粘贴直播间链接或房间号"
+                        style="width: 320px"
+                        @update:value="(value: string) => onTargetInput(platform.key, entry, value)"
+                        @blur="() => resolveEchoNow(platform.key, entry)"
+                        @keydown.enter="() => resolveEchoNow(platform.key, entry)"
+                      />
+                      <span
+                        v-if="echoOf(rowOf(platform.key, entry)) !== null"
+                        class="target-echo"
+                        :class="{ failed: echoOf(rowOf(platform.key, entry))?.failed === true }"
+                      >
+                        {{ echoOf(rowOf(platform.key, entry))?.text }}
+                      </span>
+                    </div>
+
+                    <!-- The row's own control, and the row's primary one: an action is visited to set its
+                         parameters, and this is the only filled control the row has. An action that
+                         declares no option fields draws none — there would be nothing to set. -->
+                    <NButton
+                      v-if="(entry.descriptor.optionFields?.length ?? 0) > 0"
+                      size="small"
+                      type="primary"
+                      @click="() => toggleParameters(platform.key, entry.descriptor)"
+                    >
+                      {{ openForm === rowOf(platform.key, entry) ? '收起参数' : '设置参数' }}
+                    </NButton>
+
+                    <template v-if="canCreate(platform.key, entry)">
+                      <NButton
+                        size="small"
+                        :loading="creating === rowOf(platform.key, entry)"
+                        :disabled="resolving === rowOf(platform.key, entry)"
+                        @click="() => void createCarrier(platform.key, entry)"
+                      >
+                        建一个任务指名它
+                      </NButton>
+                    </template>
+
+                    <span v-else-if="createElsewhere(platform.key, entry) !== ''" class="create-line">
+                      {{ createElsewhere(platform.key, entry) }}
+                    </span>
+                  </div>
+                </div>
+
+                <!--
                   What this action read about the account, shown rather than only used as a source
                   of choices.
+
+                  Last in the row on purpose: these are read-outs, and the list of rooms an account holds
+                  a medal in is long, so a block above the controls would push the controls — the one
+                  thing on the row a person presses — to wherever the list happens to end.
 
                   The heading claims the shape and the page, both of which are facts the code read:
                   the block exists only for `needsTarget === false` actions, and each item below it is
@@ -655,120 +1026,18 @@ onMounted(async () => {
                     </div>
                   </div>
                 </div>
-
-                <!-- Which Tasks name it. The switch beside it decides whether it *may*; this decides
-                     whether anything asks for it, which is the half a person could not see. The heading
-                     claims the naming and not the running, because the carrier query keeps a `paused`
-                     row on purpose and the sweep leaves such a row alone — the row's own note carries
-                     that, so the heading does not have to claim it for all of them. -->
-                <div v-if="workflowOf(platform.key, entry) !== null" class="where">
-                  <div class="where-shape">{{ workflowOf(platform.key, entry)?.wants.shape }}</div>
-
-                  <div
-                    v-if="(workflowOf(platform.key, entry)?.carriers.length ?? 0) > 0"
-                    class="carrier-list"
-                  >
-                    <div class="where-line">指名这个动作的任务：</div>
-                    <div
-                      v-for="carrier in workflowOf(platform.key, entry)?.carriers ?? []"
-                      :key="`carrier-${String(carrier.id)}`"
-                      class="carrier"
-                    >
-                      <span class="carrier-name">{{ carrierLabel(carrier) }}</span>
-                      <span class="carrier-note">{{ carrierNote(carrier.id) }}</span>
-                    </div>
-                  </div>
-
-                  <!-- The state its owner was actually in: on, and no Task asking for it. -->
-                  <div v-else class="nowhere">
-                    <NAlert type="warning" :bordered="false">
-                      现在没有任何任务运行它，所以这个动作开着也不会动。开关只是允许它跑，真正让它跑起来的是一个在任务里
-                      指名了这个动作的任务。
-                    </NAlert>
-
-                    <!-- Why a person may be looking at this state with a Task of their own in mind.
-                         A Task whose window has closed is finished for good, so it is not a carrier —
-                         and the count is what stops this panel from answering their question with
-                         「现在没有任何任务运行它」 and leaving it there. -->
-                    <div
-                      v-if="(workflowOf(platform.key, entry)?.finishedCarriers ?? 0) > 0"
-                      class="finished-line"
-                    >
-                      {{ workflowOf(platform.key, entry)?.finishedCarriers }} 个任务已经把时间窗跑完了，不会再跑。
-                      要接着跑就重新建一个，建的时候把结束时间往后放。
-                    </div>
-
-                    <div v-if="!entry.enabled" class="create-line">
-                      先把它打开再建任务：服务端不给关闭的动作建任务。
-                    </div>
-
-                    <!--
-                      The offer is only made where this panel can carry it out.
-
-                      `create.needsLibrary` is the route's own answer, and it is the half this panel
-                      has no field for: a Task for such an action needs a library id, and a create
-                      built from the offer alone would come back as the route's 400 (「需要选择文本库」)
-                      every single time. Where that is the case, the sentence says where the Task can
-                      be made instead of drawing a button that cannot work.
-                    -->
-                    <div v-else-if="workflowOf(platform.key, entry)?.create?.needsLibrary === true" class="create-line">
-                      这个动作还要选一个文本库，所以任务在「创建任务」页建：那里能挑库，也能定下时间窗。
-                    </div>
-
-                    <div v-else-if="workflowOf(platform.key, entry)?.create !== null" class="create">
-                      <NFormItem
-                        v-if="workflowOf(platform.key, entry)?.create?.needsTarget === true"
-                        label="针对哪个目标"
-                      >
-                        <div class="target-line">
-                          <NInput
-                            :value="targetInputOf(rowOf(platform.key, entry))"
-                            placeholder="粘贴直播间链接或房间号"
-                            style="width: 320px"
-                            @update:value="(value: string) => setTargetInput(rowOf(platform.key, entry), value)"
-                          />
-                          <span v-if="resolvedTargets[rowOf(platform.key, entry)] !== undefined" class="hint">
-                            已解析：{{ resolvedTargets[rowOf(platform.key, entry)] }}
-                          </span>
-                        </div>
-                      </NFormItem>
-
-                      <NButton
-                        size="small"
-                        type="primary"
-                        :loading="creating === rowOf(platform.key, entry)"
-                        :disabled="resolving === rowOf(platform.key, entry)"
-                        @click="() => void createCarrier(platform.key, entry)"
-                      >
-                        建一个任务指名它
-                      </NButton>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- The attribution read itself, and the only state where a row cannot say which Task names
-                     it: `loadWorkflows` answers a refusal with `null` for that action alone, so this is one
-                     row's failure rather than the page's. Drawing nothing here is what left the banner's
-                     promise unkept, and the once-read flag is what stops the same sentence appearing before
-                     the read has had its turn. -->
-                <div v-else-if="workflowsRead" class="where">
-                  <div class="where-line">这个动作的归属这次没读到，所以这一行只有开关那一半的事实。</div>
-                </div>
-
-                <!-- An action that declares no option fields draws no form at all, rather than an
-                     empty one: there is nothing a person could set. -->
-                <div v-if="(entry.descriptor.optionFields?.length ?? 0) > 0" class="params">
-                  <NButton size="tiny" :bordered="false" @click="() => toggleParameters(platform.key, entry.descriptor)">
-                    {{ openForm === rowOf(platform.key, entry) ? '收起参数' : '设置参数' }}
-                  </NButton>
-                </div>
               </div>
 
-              <NSwitch
-                :value="entry.enabled"
-                :loading="pending === rowOf(platform.key, entry)"
-                @update:value="(value: boolean) => onToggle(platform.key, entry.descriptor, value)"
-              />
+              <div class="action-switch">
+                <NTag size="tiny" :bordered="false" class="switch-state">
+                  {{ entry.enabled ? '已开启' : '已关闭' }}
+                </NTag>
+                <NSwitch
+                  :value="entry.enabled"
+                  :loading="pending === rowOf(platform.key, entry)"
+                  @update:value="(value: boolean) => onToggle(platform.key, entry.descriptor, value)"
+                />
+              </div>
 
               <!--
                 The parameter form, keyed by row so switching action cannot reuse another's. It is handed
@@ -821,13 +1090,25 @@ onMounted(async () => {
   flex-direction: column;
 }
 
+/*
+ * One row per action, divided by a line rather than by whitespace alone.
+ *
+ * The divider used to be `#fafafa`, which is a surface colour and not a border: on a white card it was
+ * invisible, so four rows read as one paragraph of grey sentences. It is the theme's own border colour
+ * now, and the row carries enough padding to be an object rather than a line of text.
+ */
 .action-row {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
-  gap: 12px;
-  padding: 10px 0;
-  border-bottom: 1px solid #fafafa;
+  gap: 8px 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--row-line);
+}
+
+/* A rule under the last row would be a divider under nothing. */
+.action-row:last-child {
+  border-bottom: none;
 }
 
 .action-info {
@@ -841,30 +1122,161 @@ onMounted(async () => {
   gap: 8px;
 }
 
+/* The action's name leads the row: the one thing at the row's top weight. */
 .action-label {
-  font-weight: 500;
+  color: var(--row-title);
+  font-size: 15px;
+  font-weight: 600;
 }
 
+/* The Platform's own sentence about what the action does: the row's second read, and never greyed out to
+   the point of being unread — it is the sentence that says what the action is. */
 .action-desc {
-  color: #888;
+  color: var(--row-body);
   font-size: 13px;
-  margin-top: 4px;
+  margin-top: 2px;
+}
+
+/*
+ * The switch and its word, kept together at the row's right and out of the block below.
+ *
+ * The switch answers a different question from anything in there — *may this action run at all*, against
+ * *when, against which Target, and which action* — so it keeps its own column, and the word stays beside
+ * the control it describes however the row's content re-wraps.
+ */
+.action-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * The one block a person acts in.
+ *
+ * A tinted surface rather than a set of gaps, because the sentences and the controls inside it are one
+ * subject: how this action is aimed, where it stands, and what a person can do about either. The colour is
+ * the theme's `actionColor`, the same surface the parameter form uses — so pressing 设置参数 opens the form
+ * into the surface its own control sits on, instead of into a block that has nothing to do with it.
+ */
+.row-work {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--row-surface);
+  border-radius: var(--row-radius);
 }
 
 .where {
-  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
+/* How the action is aimed: definitional, and the same sentence however the row's state changes, so the
+   quietest line in the row. */
+.where-shape {
+  color: var(--row-quiet);
+  font-size: 12px;
+}
+
+/* The carrier list's heading. It claims the naming and not the running — see the template. */
+.where-line {
+  color: var(--row-quiet);
+  font-size: 12px;
+}
+
+/* The state of a row with no Task naming it: one sentence, at the weight of a status rather than of an
+   alarm, because it is where anybody stands the moment they switch an action on. */
+.state-line {
+  color: var(--row-body);
+  font-size: 13px;
+}
+
+.carrier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.carrier {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+/* The Task's own name, which is the fact this list exists for. */
+.carrier-name {
+  color: var(--row-title);
+  font-weight: 600;
+}
+
+.carrier-note {
+  color: var(--row-quiet);
+}
+
+.nowhere {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.create-line {
+  color: var(--row-quiet);
+  font-size: 12px;
+}
+
+.finished-line {
+  color: var(--row-quiet);
+  font-size: 12px;
+}
+
+/* What a person does to this row, in the order they read it: the Target, the parameters, the create. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The label, the box and the answer to it, as one group — they are one question. */
+.target-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.target-label {
+  color: var(--row-body);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* What the box resolved to, or why it could not be read. */
+.target-echo {
+  color: var(--row-quiet);
+  font-size: 12px;
+}
+
+.target-echo.failed {
+  color: var(--row-danger);
+}
+
+/* The read-outs, last in the row: see the template for why they may not sit above the controls. */
 .account-facts {
-  margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  margin-top: 10px;
 }
 
 .facts-line {
-  color: #666;
-  font-size: 13px;
+  color: var(--row-quiet);
+  font-size: 12px;
 }
 
 .fact {
@@ -876,11 +1288,12 @@ onMounted(async () => {
 }
 
 .fact-label {
-  font-weight: 500;
+  color: var(--row-title);
+  font-weight: 600;
 }
 
 .fact-help {
-  color: #888;
+  color: var(--row-quiet);
 }
 
 .fact-items {
@@ -891,94 +1304,23 @@ onMounted(async () => {
 }
 
 .fact-item {
-  color: #333;
+  color: var(--row-body);
 }
 
 /* Only a refused read is coloured as a failure; a source that answered nothing is an answer. */
 .missing {
-  color: #d03050;
+  color: var(--row-danger);
 }
 
 .note-empty {
-  color: #888;
-}
-
-.where-shape {
-  color: #666;
-  font-size: 13px;
-}
-
-.where-line {
-  color: #666;
-  font-size: 13px;
-  margin-top: 4px;
-}
-
-.carrier-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.carrier {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.carrier-name {
-  font-weight: 500;
-}
-
-.carrier-note {
-  color: #888;
-}
-
-.nowhere {
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.create-line {
-  color: #888;
-  font-size: 13px;
-}
-
-.finished-line {
-  color: #888;
-  font-size: 13px;
-}
-
-.create {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.target-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.params {
-  margin-top: 8px;
+  color: var(--row-quiet);
 }
 
 .form {
   flex-basis: 100%;
   margin-top: 12px;
   padding: 12px;
-  background: #fafafa;
-  border-radius: 4px;
-}
-
-.hint {
-  color: #888;
-  font-size: 13px;
+  background: var(--row-surface);
+  border-radius: var(--row-radius);
 }
 </style>

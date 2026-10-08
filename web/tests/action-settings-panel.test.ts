@@ -1,7 +1,7 @@
 import { NDialogProvider, NMessageProvider } from 'naive-ui'
 import { createPinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createApp, h, nextTick } from 'vue'
+import { type App, createApp, h, nextTick } from 'vue'
 
 import { http } from '../src/api/client.js'
 import ActionSettingsPanel from '../src/components/ActionSettingsPanel.vue'
@@ -391,6 +391,7 @@ async function settle(): Promise<void> {
 }
 
 let hosts: HTMLElement[] = []
+let apps: App<Element>[] = []
 
 async function mountPanel(): Promise<void> {
   const host = document.createElement('div')
@@ -407,6 +408,7 @@ async function mountPanel(): Promise<void> {
       })
   })
   app.use(createPinia())
+  apps.push(app)
   app.mount(host)
   await settle()
 }
@@ -500,6 +502,29 @@ async function type(input: HTMLInputElement, value: string): Promise<void> {
   await nextTick()
 }
 
+/** Leaves a box the way a click elsewhere does, then lets the read that starts land. */
+async function blur(input: HTMLInputElement): Promise<void> {
+  input.dispatchEvent(new Event('blur'))
+  await settle()
+}
+
+/** One row's work block: the one place that row's aim, state, Target and controls are drawn. */
+function workBlockOf(label: string): HTMLElement {
+  const block = rowElement(label).querySelector<HTMLElement>('.row-work')
+  if (block === null) throw new Error(`no work block in ${label}`)
+  return block
+}
+
+/**
+ * The buttons inside one element, by the words on them and in the order they are drawn.
+ *
+ * The order is the assertion in one of the tests below — the block reads from the thing a person
+ * does routinely to the thing that repairs one missing state — so the reader is not sorted.
+ */
+function buttonsIn(element: HTMLElement): string[] {
+  return [...element.querySelectorAll('button')].map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())
+}
+
 beforeEach(() => {
   document.body.innerHTML = ''
   scenario = { carried: false, finished: 0, choice: { kind: 'ok', items: [GIFT_ITEM] } }
@@ -507,6 +532,16 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  /*
+   * Unmounted, not merely detached.
+   *
+   * The panel's Target box asks the server what a pasted link resolves to, and it does so on a short
+   * delay so that a person typing a link is asked about once rather than once per keystroke. Removing
+   * the host leaves that timer armed — Vue runs no unmount hook for a detached element — so it would
+   * fire into *the next test's* request log, and a request log is what half of these assertions read.
+   */
+  for (const app of apps) app.unmount()
+  apps = []
   for (const host of hosts) host.remove()
   hosts = []
 })
@@ -554,8 +589,11 @@ describe('which Task runs an action', () => {
 
     expect(text()).toContain('账号列表这次没读到')
     expect(text()).not.toContain('还没有绑定账号')
-    // And nothing was posted against an account id this panel does not have.
-    expect(requests.some(request => request.method === 'post')).toBe(false)
+    // And nothing was posted against an account id this panel does not have. The predicate names the
+    // create route rather than every POST, because the Target box now has an echo of its own: that echo
+    // is a read that happens to travel as a POST to `/api/targets/resolve`, and what must not happen
+    // here is a *Task* being written.
+    expect(requests.some(request => request.method === 'post' && request.url.includes('/api/tasks'))).toBe(false)
   })
 
   it('creates the Task for the Target a person names, and re-reads the attribution', async () => {
@@ -793,6 +831,136 @@ describe('which Task runs an action', () => {
     // about the rows as they are drawn.
     expect(document.querySelectorAll('.where')).toHaveLength(4)
     expect(document.querySelectorAll('.carrier-list')).toHaveLength(0)
+  })
+})
+
+/**
+ * The row's own hierarchy: one block, and a weight per thing in it.
+ *
+ * What this answers is a complaint about weight rather than about facts. 「建一个任务指名它」 was the
+ * row's only filled control and it spanned the card; 「设置参数」 — the thing a person does routinely —
+ * was a borderless 12px link underneath it; and the state the two are about was said twice, once by a
+ * warning block and once by that button. Not one of the row's facts changed — where each one sits, and
+ * how loudly it is said, did. So these assertions are about the shape of the row rather than about a
+ * string: which element holds a row's whole job, which of its controls is the primary one, and whether
+ * the ordinary state is drawn as an alarm.
+ *
+ * Which of them is red before the change is marked on each: the ones that are properties worth keeping
+ * but were already true are called guards, because a claim of red-before that is not red is a fault of
+ * its own.
+ */
+describe('one row, one block', () => {
+  it('draws a row: its aim, its state, its Target and its two controls in one block, in reading order', async () => {
+    await mountPanel()
+
+    const block = workBlockOf('亲密度任务')
+    const text = (block.textContent ?? '').replace(/\s+/g, ' ')
+
+    // What the action is aimed at, and then where it stands…
+    expect(text).toContain('任务里要指名这个动作，再选一个目标')
+    expect(text).toContain('现在没有任何任务运行它')
+    // …and the block's own controls, routine first and the repair second. The order is asserted rather
+    // than the set on purpose: it is the order a person reads the row in.
+    expect(buttonsIn(block)).toEqual(['设置参数', '建一个任务指名它'])
+    // The Target box belongs to that same block rather than to a block of its own.
+    expect(block.querySelector('.target-group')).not.toBeNull()
+    expect(block.querySelector('input')).not.toBeNull()
+  })
+
+  it('makes 设置参数 the row’s only primary button, and the create offer the quieter one beside it', async () => {
+    await mountPanel()
+
+    const row = rowElement('亲密度任务')
+    const primary = [...row.querySelectorAll<HTMLElement>('button.n-button--primary-type')]
+
+    // Exactly one control on this row is the filled one, and it is the one a person presses on an
+    // ordinary visit. It was the other way round: the create spanned the card in the accent colour
+    // while 设置参数 was a borderless link, which is the inversion the owner reported.
+    expect(primary.map(button => (button.textContent ?? '').replace(/\s+/g, ' ').trim())).toEqual(['设置参数'])
+    // The offer is still on the row and still pressable — quietened, not hidden.
+    expect(buttonsIn(row)).toContain('建一个任务指名它')
+  })
+
+  it('says the no-Task state once, as a state rather than as a warning block', async () => {
+    await mountPanel()
+
+    // An action that is on with no Task naming it is the normal state just after somebody switches it
+    // on, so the row has no alarm to raise about it.
+    const row = rowElement('客户端签到')
+    expect(row.querySelectorAll('.n-alert')).toHaveLength(0)
+
+    // The sentence itself is the one the row already carried; what moved is where it sits — inside the
+    // block the row acts in, next to the offer that answers it — and that it is no longer doubled by a
+    // second statement of the same thing.
+    const state = (row.querySelector('.state-line')?.textContent ?? '').replace(/\s+/g, ' ')
+    expect(state).toContain('现在没有任何任务运行它')
+    expect(state).toContain('开关只是允许它跑')
+    expect(state).toContain('指名了这个动作的任务')
+    expect(state.split('开关只是允许它跑')).toHaveLength(2)
+  })
+
+  /**
+   * The box had no echo: a person pasted a link and no part of the page said what it became.
+   *
+   * `POST /api/targets/resolve` has answered that question all along — it is the call the create itself
+   * makes — but the panel only ever asked it *while creating a Task*, so the answer arrived after the
+   * press and never stood beside the box that raised it. The route is the Platform adapter's own
+   * (`resolveTarget`, whose contract is "turns pasted input into a target"), so the page asks and does
+   * not parse: which shapes a Platform accepts is that adapter's business and stays there.
+   */
+  it('says what the pasted link resolved to, before anything is created', async () => {
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, 'https://www.douyu.com/88013571')
+    await blur(box)
+
+    expect(requests.some(request => request.url.includes('/api/targets/resolve'))).toBe(true)
+
+    // The label, the box and the answer are one group — the four things this row used to draw as four
+    // separate blocks.
+    const group = rowElement('亲密度任务').querySelector('.target-group')
+    expect(group?.querySelector('input')).not.toBeNull()
+    expect((group?.textContent ?? '').replace(/\s+/g, ' ')).toContain('已解析：电棍')
+
+    // Looking is a read, and nothing was created by it.
+    expect(requests.some(request => request.method === 'post' && request.url.includes('/api/tasks'))).toBe(false)
+  })
+
+  /**
+   * Not red before the change: it guards the echo's second rule, which is what keeps the first one
+   * from being paid for on every visit to the row.
+   */
+  it('asks nothing about an empty box', async () => {
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '')
+    await blur(box)
+
+    // There is no shape to look up, and the route's own answer to an empty one is its 400
+    // 「请输入直播间链接或房间号」 — a request made only to be refused.
+    expect(requests.some(request => request.url.includes('/api/targets/resolve'))).toBe(false)
+    expect(rowOf('亲密度任务')).not.toContain('已解析：')
+  })
+
+  /**
+   * Enter is the other way a person asks, and it asks the same question the pause does — now.
+   *
+   * Red before the change with the test above it: the box had no listener and no echo to write into.
+   */
+  it('asks on Enter as well, and never twice for one text', async () => {
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '88013571')
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await settle()
+
+    expect(rowOf('亲密度任务')).toContain('已解析：电棍')
+    // One ask per text, whichever trigger got there first: the pause that every keystroke re-arms must not
+    // turn one link into two questions.
+    expect(requests.filter(request => request.url.includes('/api/targets/resolve'))).toHaveLength(1)
   })
 })
 
