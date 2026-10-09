@@ -100,6 +100,7 @@ import {
   signActivity,
   signFansHome,
   signGroupAndroid,
+  signGroupPc,
   YUBA_ALREADY_SIGNED,
   type YubaGroup
 } from './protocol.js'
@@ -839,11 +840,15 @@ const ROOM_READ_TIMEOUT_MS = 15_000
 const numeric = z.union([z.number(), z.string()]).pipe(z.coerce.number())
 
 /**
- * The room payload, narrowed to the five fields anything here needs.
+ * The room payload, narrowed to the six fields anything here needs.
  *
  * Unknown keys are dropped — `betard` answers ~77 KB of config alongside the room
  * and none of it is modelled. `owner_name` is defaulted because the title is worth
  * returning even when the anchor's name is missing.
+ *
+ * `videoLoop` is optional rather than required so that its absence is a reading the
+ * probe can judge (see `probe`), not a whole-payload failure that would also refuse
+ * rooms whose `show_status` is 2 and needs no such judgement.
  */
 const roomMetaSchema = z.object({
   room: z.object({
@@ -851,7 +856,8 @@ const roomMetaSchema = z.object({
     room_name: z.string(),
     owner_name: z.string().default(''),
     owner_uid: numeric,
-    show_status: numeric
+    show_status: numeric,
+    videoLoop: numeric.optional()
   })
 })
 
@@ -861,6 +867,8 @@ interface RoomMeta {
   readonly ownerName: string
   readonly ownerUid: number
   readonly showStatus: number
+  /** Douyu's 轮播 flag: `0` is an ordinary broadcast, anything else a re-broadcast. `null` when the body did not carry it. */
+  readonly videoLoop: number | null
 }
 
 /**
@@ -925,7 +933,8 @@ async function fetchRoomMeta(roomId: number): Promise<RoomMeta> {
     roomName: parsed.data.room.room_name,
     ownerName: parsed.data.room.owner_name,
     ownerUid: parsed.data.room.owner_uid,
-    showStatus: parsed.data.room.show_status
+    showStatus: parsed.data.room.show_status,
+    videoLoop: parsed.data.room.videoLoop ?? null
   }
 }
 
@@ -937,6 +946,12 @@ async function fetchRoomMeta(roomId: number): Promise<RoomMeta> {
  * to be told apart from. `probe` is where that fold happens.
  */
 const SHOW_STATUS_LIVE = 1
+
+/**
+ * Douyu's `videoLoop` for an ordinary broadcast. A 轮播 reports `show_status` 1 as well,
+ * so this is the only field that separates the two; the probe reads it only beside `1`.
+ */
+const VIDEO_LOOP_NONE = 0
 
 /**
  * A host that serves room pages, and only those.
@@ -1109,14 +1124,26 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
 /**
  * One liveness probe.
  *
- * Douyu's `show_status` is normalised to the seam's `LIVE_STATUS_LIVE`/`_OFFLINE`,
- * because the scheduler's liveness test must be one comparison for every Platform.
- * `SHOW_STATUS_LIVE` is the live value; `2` is what an anchor who is not streaming
- * reports, which is the only other value the captures contain. **Nothing here folds
- * `videoLoop` (轮播) in** —
- * one reference implementation gates liveness on `show_status == 1 && videoLoop == 0`,
- * but that interaction was never measured on this side, and inventing a third state
- * from one unverified source is how a probe starts lying.
+ * Douyu's `show_status` and `videoLoop` are normalised to the seam's
+ * `LIVE_STATUS_LIVE`/`_OFFLINE`, because the scheduler's liveness test must be one
+ * comparison for every Platform. A room is live only when `show_status` is
+ * `SHOW_STATUS_LIVE` (1) **and** `videoLoop` is 0; any other pair is offline.
+ *
+ * **Evidence, by claim.** The field is in the room body: `betard/3487376` was read live
+ * for this change as `show_status` 1 with `videoLoop` 1, and `betard/2561707` as 2 with 0.
+ * That `1`/`1` is a re-broadcast is the owner's own account of his room (behavioural
+ * report, not a capture). `1`/`0` is live by the reference rule and by the follow-list
+ * capture, where 2561707 was `1`/`0`; no `betard` body with `1`/`0` has been read. `2` is
+ * what an anchor who is not streaming reports, and it is offline whatever `videoLoop`
+ * says. Only `0` and `1` have been observed for `videoLoop`; any other non-zero value is
+ * read as a re-broadcast, which the reference rule does not contradict but nothing here
+ * has measured.
+ *
+ * **Absence is not a verdict.** A body with `show_status` 1 and no `videoLoop` could be
+ * a live room or a looping one, so it is refused and retried rather than read either
+ * way: calling it live is the defect this rule exists to stop, and calling it offline
+ * stops danmaku for a room that may be streaming. The refusal is a read that produced no
+ * verdict, not a third liveness state, and the scheduler never sees it as one.
  *
  * **A Douyu room accepts danmaku while offline.** That was verified at delivery
  * level — with `show_status` at `2` throughout, `loginres`/`joingroup` behaved as
@@ -1152,9 +1179,17 @@ async function probe(_account: PlatformAccount, targetKey: string): Promise<Prob
     return probeFailure(transportCodeOf(error), `读取直播间信息失败：${errorText(error)}`, 'retry')
   }
 
+  // `videoLoop` is only read when `show_status` says live: for any other status the room is
+  // offline already, and its absence there must not turn an offline verdict into a refusal.
+  if (meta.showStatus === SHOW_STATUS_LIVE && meta.videoLoop === null) {
+    return probeFailure(LocalCode.NoVerdict, '直播间显示为开播，但读不到轮播标记，无法判断是否真在播', 'retry')
+  }
+
+  const live = meta.showStatus === SHOW_STATUS_LIVE && meta.videoLoop === VIDEO_LOOP_NONE
+
   return {
     ok: true,
-    liveStatus: meta.showStatus === SHOW_STATUS_LIVE ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE,
+    liveStatus: live ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE,
     // Free here, unlike Bilibili's: the call this probe already made carries it.
     title: meta.roomName,
     code: String(meta.showStatus),
@@ -1467,10 +1502,14 @@ const MAX_GROUP_PAGES = 5
  * attempted and "already" is a success — the flag would only ever have caused a
  * group that needed signing to be skipped.
  *
- * **"Already signed" arrives two ways.** The preferred primitive (`fastSign`, which
- * needs no `Referer`) says it with a `200` and a level score of `0`, while the PC
- * twin says it with `status_code: 1001`. Both are handled, so the outcome does not
- * depend on which twin answered.
+ * **A `fastSign` score of `0` settles nothing by itself.** `fastSign` answered `0` on every
+ * call measured on 2026-10-10 (three calls, two boards), and nothing measured says whether that
+ * means "already signed" or "nothing was signed". So a positive score is a sign this run made,
+ * and a `0` is put to the PC twin: its `status_code: 1001` is the only already verdict this
+ * walk accepts from a zero, and any other success is a sign performed. Whatever the PC twin
+ * cannot answer is a failed item, which leaves the day unsettled so the next sweep retries it.
+ * A `fastSign` refusal with `1001` is still read as already, since that code is the endpoint's
+ * own named verdict rather than a value that merely could mean it.
  *
  * **The list can span pages.** Each page is de-duplicated by `group_id` before
  * anything is attempted, which is what makes the walk safe to keep asking: a service
@@ -1581,52 +1620,104 @@ async function reconcileYubaSign(
     }
 
     const result = signed.reply
-    if (result.ok) {
-      if (result.data.alreadySigned) {
+    if (!result.ok) {
+      if (result.code === YUBA_ALREADY_SIGNED) {
         already += 1
-        log(`鱼吧「${name}」：今天已经签到过了`)
+        log(`鱼吧「${name}」：今天已经签到过了（status_code ${String(YUBA_ALREADY_SIGNED)}）`)
         items.push({
           kind: 'group',
           label,
           outcome: 'already',
           detail: '已签',
-          code: String(result.code)
+          code: codeText(result.code)
         })
-      } else {
-        done += 1
-        log(`鱼吧「${name}」：签到成功，等级分 +${String(result.data.levelScore)}`)
-        items.push({
-          kind: 'group',
-          label,
-          outcome: 'done',
-          detail: `等级分 +${String(result.data.levelScore)}`,
-          code: String(result.code)
-        })
+        continue
       }
+
+      failures.push({
+        name,
+        code: codeText(result.code),
+        message: result.message,
+        classification: result.classification
+      })
+      log(`鱼吧「${name}」：签到失败（code ${codeText(result.code)}）`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: result.message, code: codeText(result.code) })
       continue
     }
 
-    if (result.code === YUBA_ALREADY_SIGNED) {
+    // A positive score is a sign this call performed: the one new-sign reading on record is 24.
+    if (result.data > 0) {
+      done += 1
+      log(`鱼吧「${name}」：签到成功，等级分 +${String(result.data)}`)
+      items.push({
+        kind: 'group',
+        label,
+        outcome: 'done',
+        detail: `等级分 +${String(result.data)}`,
+        code: String(result.code)
+      })
+      continue
+    }
+
+    // `fastSign`'s zero is not a verdict (see `signGroupAndroid`), so the same group is put to the
+    // PC twin before anything is settled. A transport failure ends the walk, as it does above.
+    const checked = await callGraded(
+      '鱼吧签到核实',
+      () => signGroupPc(credential.token, group.group_id),
+      credential.token
+    )
+    if (!checked.ok) {
+      failures.push({ name, code: checked.code, message: checked.detail, classification: 'retry' })
+      log(`鱼吧「${name}」：${checked.detail}（code ${checked.code}），其余版块本次不再尝试`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: checked.detail, code: checked.code })
+      break
+    }
+
+    const verdict = checked.reply
+    if (!verdict.ok) {
+      failures.push({
+        name,
+        code: codeText(verdict.code),
+        message: verdict.message,
+        classification: verdict.classification
+      })
+      log(`鱼吧「${name}」：核实签到失败（code ${codeText(verdict.code)}）`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: verdict.message, code: codeText(verdict.code) })
+      continue
+    }
+
+    if (verdict.data.alreadySigned) {
       already += 1
-      log(`鱼吧「${name}」：今天已经签到过了（status_code ${String(YUBA_ALREADY_SIGNED)}）`)
+      log(`鱼吧「${name}」：今天已经签到过了（核实 status_code ${String(YUBA_ALREADY_SIGNED)}）`)
       items.push({
         kind: 'group',
         label,
         outcome: 'already',
         detail: '已签',
-        code: codeText(result.code)
+        code: String(YUBA_ALREADY_SIGNED)
       })
       continue
     }
 
-    failures.push({
-      name,
-      code: codeText(result.code),
-      message: result.message,
-      classification: result.classification
+    // A 200 from the PC twin with no score cannot be told from "already", so it settles nothing:
+    // the item fails with `retry`, and the next sweep asks again.
+    if (verdict.data.levelScore <= 0) {
+      const detail = '签到核实没有给出等级分，今天是否已签判定不了，留待下次重试'
+      failures.push({ name, code: String(verdict.code), message: detail, classification: 'retry' })
+      log(`鱼吧「${name}」：${detail}`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail, code: String(verdict.code) })
+      continue
+    }
+
+    done += 1
+    log(`鱼吧「${name}」：签到成功（核实），等级分 +${String(verdict.data.levelScore)}`)
+    items.push({
+      kind: 'group',
+      label,
+      outcome: 'done',
+      detail: `等级分 +${String(verdict.data.levelScore)}`,
+      code: String(verdict.code)
     })
-    log(`鱼吧「${name}」：签到失败（code ${codeText(result.code)}）`)
-    items.push({ kind: 'group', label, outcome: 'failed', detail: result.message, code: codeText(result.code) })
   }
 
   return aggregateWalkOutcome({

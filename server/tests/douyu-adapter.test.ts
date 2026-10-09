@@ -23,7 +23,8 @@ import {
   growthPoolStatusSchema,
   OPFOY_SIGN_ALIAS,
   YUBA_ALREADY_SIGNED,
-  YUBA_FAST_SIGN_URL
+  YUBA_FAST_SIGN_URL,
+  YUBA_TOPIC_SIGN_URL
 } from '../src/platform/douyu/protocol.js'
 import type { ActionOutcome, PlatformAccount, RefreshResult } from '../src/platform/types.js'
 import { ActionKey, TaskAction } from '../src/repo/tasks.js'
@@ -49,6 +50,7 @@ const {
   claimFishBallMock,
   listFollowedGroupsMock,
   signGroupAndroidMock,
+  signGroupPcMock,
   readFanBadgesMock,
   signFansHomeMock,
   signActivityMock,
@@ -65,6 +67,7 @@ const {
   claimFishBallMock: vi.fn(),
   listFollowedGroupsMock: vi.fn(),
   signGroupAndroidMock: vi.fn(),
+  signGroupPcMock: vi.fn(),
   readFanBadgesMock: vi.fn(),
   signFansHomeMock: vi.fn(),
   signActivityMock: vi.fn(),
@@ -89,6 +92,7 @@ vi.mock('../src/platform/douyu/protocol.js', async importOriginal => {
     claimFishBall: claimFishBallMock,
     listFollowedGroups: listFollowedGroupsMock,
     signGroupAndroid: signGroupAndroidMock,
+    signGroupPc: signGroupPcMock,
     readFanBadges: readFanBadgesMock,
     signFansHome: signFansHomeMock,
     signActivity: signActivityMock,
@@ -140,6 +144,8 @@ function roomPayload(overrides: Record<string, unknown> = {}): unknown {
       owner_name: '电棍',
       owner_uid: 310260,
       show_status: 1,
+      // Present in both betard bodies read live for this change (rooms 3487376 and 2561707); 0 is an ordinary broadcast.
+      videoLoop: 0,
       ...overrides
     }
   }
@@ -234,7 +240,13 @@ beforeEach(() => {
   readFishBallBalanceMock.mockResolvedValue({ ok: true, code: 0, data: { num: 20, time: 15 } })
   claimFishBallMock.mockResolvedValue({ ok: true, code: 0, data: null })
   listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1')] })
-  signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } })
+  signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 3 })
+  // The PC twin's default is its already verdict: a zero from `fastSign` is then "already", as before.
+  signGroupPcMock.mockResolvedValue({
+    ok: true,
+    code: YUBA_ALREADY_SIGNED,
+    data: { levelScore: 0, alreadySigned: true }
+  })
   // 粉丝家园's default: the badge wall answers, and both rooms answer the one 200 body this
   // endpoint has ever been seen to send — 「今日已签到」.
   readFanBadgesMock.mockResolvedValue(badgeList())
@@ -708,6 +720,63 @@ describe('probe', () => {
     expect(result).toMatchObject({ ok: true, liveStatus: 0, code: '2', failure: 'none' })
   })
 
+  /**
+   * The owner's report: a 斗鱼 轮播 keeps `show_status` at 1, the same value a live room reports, so the
+   * status alone called a looping room live and danmaku kept going after the anchor stopped. `videoLoop`
+   * on the same payload is what tells them apart.
+   */
+  it('reads show_status 1 with videoLoop 0 (an ordinary broadcast) as live', async () => {
+    fetchMock.mockResolvedValue(roomResponse(roomPayload({ show_status: 1, videoLoop: 0 })))
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: true, liveStatus: 1, code: '1', failure: 'none' })
+  })
+
+  it('reads show_status 1 with videoLoop 1 (a looping room, 轮播) as not live', async () => {
+    fetchMock.mockResolvedValue(roomResponse(roomPayload({ show_status: 1, videoLoop: 1 })))
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: true, liveStatus: 0, code: '1', failure: 'none' })
+  })
+
+  it('reads show_status 2 as not live, whatever videoLoop says', async () => {
+    fetchMock.mockResolvedValue(roomResponse(roomPayload({ show_status: 2, videoLoop: 0 })))
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: true, liveStatus: 0, code: '2', failure: 'none' })
+  })
+
+  /**
+   * `videoLoop` is missing from the payload while `show_status` says live. Calling that live would repeat
+   * the defect; calling it offline would stop danmaku for a room that may be streaming. Neither verdict is
+   * established, so the read is refused and retried, the same grading an unreadable `show_status` gets.
+   */
+  it('refuses a live-looking room whose videoLoop is absent, rather than calling it live or offline', async () => {
+    fetchMock.mockResolvedValue(
+      roomResponse({ room: { room_id: 12306, room_name: 'r', owner_name: 'o', owner_uid: 310260, show_status: 1 } })
+    )
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: false, liveStatus: 0, code: 'no_verdict', failure: 'retry' })
+  })
+
+  // Absence only matters when `show_status` is 1: an anchor who is not streaming is offline without it.
+  it('still reads show_status 2 as not live when videoLoop is absent', async () => {
+    fetchMock.mockResolvedValue(
+      roomResponse({ room: { room_id: 12306, room_name: 'r', owner_name: 'o', owner_uid: 310260, show_status: 2 } })
+    )
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: true, liveStatus: 0, code: '2', failure: 'none' })
+  })
+
+  it('refuses a videoLoop it cannot read, rather than reading the room as live', async () => {
+    fetchMock.mockResolvedValue(roomResponse(roomPayload({ show_status: 1, videoLoop: 'abc' })))
+    const result = await douyuPlatform.probe(account(), '12306')
+
+    expect(result).toMatchObject({ ok: false, liveStatus: 0, failure: 'retry' })
+  })
+
   it('reports a room it could not read at all, graded retry', async () => {
     fetchMock.mockResolvedValue(new Response('<html>not found</html>', { status: 404 }))
     const result = await douyuPlatform.probe(account(), '12306')
@@ -990,10 +1059,10 @@ describe('reconcile', () => {
       })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) => {
         // fastSign says "already" with a 200 and a zero level score…
-        if (groupId === '2') return { ok: true, code: 200, data: { levelScore: 0, alreadySigned: true } }
+        if (groupId === '2') return { ok: true, code: 200, data: 0 }
         // …and the PC twin says it with 1001. Neither may be read as a failure.
         if (groupId === '3') return refused(YUBA_ALREADY_SIGNED, '今天已经签到过了')
-        return { ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } }
+        return { ok: true, code: 200, data: 3 }
       })
 
       const { outcomes, logs } = await reconcileWith([ActionKey.YubaSign])
@@ -1009,11 +1078,66 @@ describe('reconcile', () => {
 
     it('is only a success when nothing new happened — all already means already', async () => {
       listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1'), group('2')] })
-      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 0, alreadySigned: true } })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
 
       const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
 
       expect(outcome).toMatchObject({ outcome: 'already', failure: 'action_stop' })
+    })
+
+    it('never reads fastSign zero as already on its own: a PC sign with a score is a sign', async () => {
+      listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1', '主版块')] })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+      signGroupPcMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 5, alreadySigned: false } })
+
+      const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+
+      expect(signGroupPcMock).toHaveBeenCalledTimes(1)
+      expect(outcome).toMatchObject({ outcome: 'done', failure: 'none' })
+      expect(outcome.detail).toContain('新签 1')
+      expect(outcome.items).toEqual([
+        { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +5', code: '200' }
+      ])
+    })
+
+    it('does not settle a day on a fastSign zero that the PC twin answers with a score of zero', async () => {
+      listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1', '主版块')] })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+      signGroupPcMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 0, alreadySigned: false } })
+
+      const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+
+      // Neither "done" nor "already": the day stays open for the next sweep.
+      expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry' })
+      expect(outcome.detail).toContain('判定不了')
+      expect(outcome.items[0]).toMatchObject({ outcome: 'failed', code: '200' })
+    })
+
+    it('ends the walk when the PC check never arrives, and leaves the group unsettled', async () => {
+      listFollowedGroupsMock.mockResolvedValue({
+        ok: true,
+        code: 200,
+        data: [group('1', '主版块'), group('2', '安卓版块')]
+      })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+      signGroupPcMock.mockRejectedValue(new DouyuTransportError(YUBA_TOPIC_SIGN_URL, 0, 'fetch failed'))
+
+      const { outcomes } = await reconcileWith([ActionKey.YubaSign])
+      const outcome = outcomeOf(outcomes, ActionKey.YubaSign)
+
+      expect(outcome).toMatchObject({ outcome: 'failed', code: 'transport', failure: 'retry' })
+      expect(signGroupAndroidMock).toHaveBeenCalledTimes(1)
+      expect(outcome.items[0]).toMatchObject({ outcome: 'failed', code: 'transport' })
+    })
+
+    it('lets a PC refusal grade the group like any other refusal', async () => {
+      listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1', '主版块')] })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+      signGroupPcMock.mockResolvedValue(refused(1002, '用户未登陆或token已过期'))
+
+      const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+
+      expect(outcome).toMatchObject({ outcome: 'failed', code: '1002', failure: 'account_stop' })
     })
 
     it('skips when the account follows nothing', async () => {
@@ -1036,9 +1160,7 @@ describe('reconcile', () => {
     it('lets an account_stop outrank a group that signed successfully', async () => {
       listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1'), group('2')] })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) =>
-        groupId === '2'
-          ? refused(1002, '用户未登陆或token已过期')
-          : { ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } }
+        groupId === '2' ? refused(1002, '用户未登陆或token已过期') : { ok: true, code: 200, data: 3 }
       )
 
       const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
@@ -1603,18 +1725,18 @@ describe('reconcile', () => {
         data: [group('1', '主版块'), group('2', '安卓版块'), group('3', 'PC 版块')]
       })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) => {
-        // The same three answers the aggregate test uses: a fresh sign, `fastSign`
-        // saying already with a 200, and the PC twin saying it with 1001.
-        if (groupId === '2') return { ok: true, code: 200, data: { levelScore: 0, alreadySigned: true } }
+        // A fresh sign; `fastSign`'s zero, which the PC twin answers with its 1001; and `fastSign`
+        // refusing with 1001 itself.
+        if (groupId === '2') return { ok: true, code: 200, data: 0 }
         if (groupId === '3') return refused(YUBA_ALREADY_SIGNED, '今天已经签到过了')
-        return { ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } }
+        return { ok: true, code: 200, data: 3 }
       })
 
       const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
 
       expect(outcome.items).toEqual([
         { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +3', code: '200' },
-        { kind: 'group', label: '安卓版块', outcome: 'already', detail: '已签', code: '200' },
+        { kind: 'group', label: '安卓版块', outcome: 'already', detail: '已签', code: String(YUBA_ALREADY_SIGNED) },
         {
           kind: 'group',
           label: 'PC 版块',
@@ -1628,9 +1750,7 @@ describe('reconcile', () => {
     it('gives a refused group an item that says why', async () => {
       listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1', '主版块'), group('2')] })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) =>
-        groupId === '2'
-          ? refused(1002, '用户未登陆或token已过期')
-          : { ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } }
+        groupId === '2' ? refused(1002, '用户未登陆或token已过期') : { ok: true, code: 200, data: 3 }
       )
 
       const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
@@ -1679,7 +1799,7 @@ describe('reconcile', () => {
       })
       claimFishBallMock.mockResolvedValue(refused(FISH_BALL_ALREADY_CLAIMED, '当天已经领过鱼丸'))
       listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1'), group('2')] })
-      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 0, alreadySigned: true } })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
       signActivityMock.mockResolvedValue({ ok: true, code: ACTIVITY_ALREADY_SIGNED, data: { alreadySigned: true } })
 
       await expectItemsToAgree()
@@ -1693,8 +1813,8 @@ describe('reconcile', () => {
       })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) => {
         if (groupId === '3') return refused(0, '服务端异常')
-        if (groupId === '2') return { ok: true, code: 200, data: { levelScore: 0, alreadySigned: true } }
-        return { ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } }
+        if (groupId === '2') return { ok: true, code: 200, data: 0 }
+        return { ok: true, code: 200, data: 3 }
       })
 
       await expectItemsToAgree()

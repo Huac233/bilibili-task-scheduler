@@ -1014,9 +1014,13 @@ export interface HealthInfo {
  *
  * `LiveStatus.Live`/`Offline` are the **normalised** values `ProbeResult` reports
  * on any Platform, which is what a task's `lastLiveStatus` carries. `Round` is
- * Bilibili's raw `2` and can only reach the UI through a freshly resolved
- * Target, never through a probe — the adapters fold it into "not live" before
- * the scheduler ever compares it.
+ * Bilibili's raw `live_status` `2` and can only reach the UI through a freshly
+ * resolved Target, never through a probe — the adapters fold it into "not live"
+ * before the scheduler ever compares it.
+ *
+ * A resolved Target's `liveStatus` is the Platform's **raw** value, so this table
+ * is only right for Bilibili's encoding. Douyu's raw `1` can be a 轮播 (`videoLoop`
+ * 1) and its raw `2` is an anchor who is not streaming, not a 轮播.
  */
 export const LiveStatus = {
   Offline: 0,
@@ -1024,6 +1028,7 @@ export const LiveStatus = {
   Round: 2
 } as const
 
+/** Labels a normalised status or a raw Bilibili Target value; see LiveStatus for why Douyu's raw values do not fit. */
 export function describeLiveStatus(status: number | null): string {
   switch (status) {
     case LiveStatus.Live:

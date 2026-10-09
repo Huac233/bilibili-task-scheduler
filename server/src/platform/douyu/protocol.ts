@@ -468,9 +468,9 @@ function readCookie(setCookie: readonly string[], name: string): string | null {
  * transform accepted whatever it was handed — `'abc'` parsed *successfully* as `NaN`,
  * so a mistyped field reached callers as a number nothing downstream questioned —
  * while a bare `z.coerce.number()` would go the other way and accept `null`, `true`
- * and `[]` as `0`, which the union refuses and `fastSign` would read as a verdict
- * (`levelScore === 0` is its "already signed"). Coercion rejects `NaN`; the union
- * keeps the accepted input exactly as narrow as it was.
+ * and `[]` as `0`, and `fastSign` would then read a body that never carried a score as
+ * a score of `0`. Coercion rejects `NaN`; the union keeps the accepted input exactly as
+ * narrow as it was.
  */
 const counter = z.union([z.number(), z.string()]).pipe(z.coerce.number())
 
@@ -650,7 +650,8 @@ export async function claimFishBall(
  * `z.coerce.string()` answers `'null'` for a `null` id, and a group that cannot exist
  * would then be signed as though it did. `is_signed` is the service's claim and is
  * **not** a gate: §2.4 measured groups reported as `is_signed: 0` that answered
- * "今天已经签到过了" when signed. Sign first and treat "already signed" as success.
+ * "今天已经签到过了" when signed. Sign first; "already signed" is then read from the sign's
+ * own answer (see `signGroupAndroid` and `signGroupPc`), never from this flag.
  */
 export const yubaGroupSchema = z.object({
   group_id: z.union([z.number(), z.string()]).pipe(z.coerce.string()),
@@ -710,30 +711,36 @@ export interface YubaSignOutcome {
   /** 本次获得的鱼吧等级分 — not 鱼丸. The two twins answer it inside different envelopes. */
   readonly levelScore: number
   /**
-   * Whether this call found today's sign already in.
+   * Whether the PC twin answered its already-signed verdict, `status_code: 1001`, and nothing else.
    *
-   * **The two twins decide it from different evidence, and that is a fact about this file rather than
-   * a rule of Douyu's.** `signGroupAndroid` reads `0` as "already signed": `fastSign` answers the
-   * level score itself, so a call that did nothing is the one that answers `0`. `signGroupPc` does
-   * **not** read it that way: `status_code: 1001` is that endpoint's already-signed verdict, while an
-   * `addLevelScore` of `0` may equally mean "signed just now, and this time it was worth 0" — so it
-   * reports `alreadySigned: false` and lets the read-back settle it. Neither write endpoint has a
-   * captured response body, so nothing here claims the two share a convention nobody measured.
+   * `true` only for that verdict. A `200` is always `false`: the PC twin's success envelope is read
+   * as a sign that was performed, with `addLevelScore` (or `0` when it is absent). No PC body has been
+   * captured for this file, so whether a `200` can ever mean "already" is unmeasured, and this file
+   * does not claim it can not.
    */
   readonly alreadySigned: boolean
 }
 
 /**
- * `POST mapi-yuba/wb/v3/fastSign` — the primitive to prefer.
+ * `POST mapi-yuba/wb/v3/fastSign` — the level score the envelope carries, and nothing more.
  *
- * Two reasons over the PC twin: it needs no `Referer`, and `data` is the level
- * score itself, with `0` meaning today's sign is already in.
+ * `data` is `levelScore`, and **`0` is not a verdict.** Measured 2026-10-10 on the owner's
+ * account: `fastSign` answered `{"data":0,"message":"","status_code":200}` for group 7366311
+ * (twice, the second call a repeat) and for group 6672975 (once). Nothing measured here tells
+ * that `0` apart from "already signed" versus "nothing was signed". Only the new-sign side has
+ * an answer on record: the 2026-10-09 run in `action_logs` (id 34, a bot row, not a capture here)
+ * recorded group 历史 at `data` 24 with `status_code` 200, and that positive score is the one
+ * reading this file treats as a sign that happened.
+ *
+ * So the walk does not settle a day on a `0` from here. It asks the PC twin before it says
+ * "already" (see `signGroupPc`). This stays the first call for two reasons: it needs no `Referer`,
+ * and the walk has always made it first, so a positive score from it is a known sign.
  */
 export async function signGroupAndroid(
   token: string,
   groupId: string,
   options: DouyuRequestOptions = {}
-): Promise<DouyuResult<YubaSignOutcome>> {
+): Promise<DouyuResult<number>> {
   const spec: CallSpec = {
     url: YUBA_FAST_SIGN_URL,
     method: 'POST',
@@ -749,21 +756,27 @@ export async function signGroupAndroid(
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  const result = await callYuba(spec, counter)
-  if (!result.ok) return result
-  const levelScore = result.data
-  return { ok: true, code: result.code, data: { levelScore, alreadySigned: levelScore === 0 } }
+  return await callYuba(spec, counter)
 }
 
 /** The PC twin answers the level score inside an object, so the success shape is not the same as fastSign's. */
 const yubaTopicSignDataSchema = z.object({ addLevelScore: counter.optional() })
 
 /**
- * `POST ybapi/topic/sign` — the PC twin of the fast sign.
+ * `POST ybapi/topic/sign` — the PC twin of the fast sign, and the call that settles a
+ * `fastSign` `0`.
  *
- * Needs `Referer: https://yuba.douyu.com/group/<id>` and reports "already signed"
- * as `status_code: 1001` with no `data` at all, which is why it is implemented
- * against its own schema and its own success code list.
+ * Needs `Referer: https://yuba.douyu.com/group/<id>` and reports "already signed" as
+ * `status_code: 1001` with no `data` at all, which is why it is implemented against its own
+ * schema. Evidence for `1001` as the already verdict: the constant's existing use in this file,
+ * and the one third-party client seen for this endpoint (`bighammer-link/Common-scripts`,
+ * `yuba_check.py`), which reads `200` as signed and `1001` as 「今天已经签到了」. Neither is a
+ * capture from this account, and no PC body has been captured here.
+ *
+ * Its `200` is read as a sign performed (see `YubaSignOutcome`). There is no read-back here:
+ * no endpoint that reports today's sign state was found, and the group page's `isSigned`
+ * was `0` on all four of the owner's boards on 2026-10-10 even though he reports signing one
+ * of them by hand, so it is not used as one either.
  */
 export async function signGroupPc(
   token: string,
