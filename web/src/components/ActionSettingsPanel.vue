@@ -150,19 +150,29 @@ const targetInputs = ref<Record<string, string>>({})
 /**
  * What one row's Target box resolved to.
  *
- * **The answer is keyed by the text it is about**, and that is the whole of why this is not a string per
- * row. `Platform.resolveTarget` is a request over the network: it answers a moment after it is asked, and
+ * **The answer is keyed by the question it answers, and that is the whole of why this is not a string per
+ * row.** `Platform.resolveTarget` is a request over the network: it answers a moment after it is asked, and
  * a box the person has typed past by then would otherwise be labelled with the answer to the previous
- * question — a wrong sentence where the honest one is no sentence. Comparing the answer's own text
- * against the box's is what makes a stale answer invisible, and it is also what lets the create path
- * reuse an answer instead of asking the same question twice.
+ * question — a wrong sentence where the honest one is no sentence. Comparing the answer's own question
+ * against the box's is what makes a stale answer invisible, and it is also what lets the create path reuse
+ * an answer instead of asking the same question twice. `targetAsk` below is where that question is spelled.
  */
 const targetEchoes = ref<Record<string, TargetEcho>>({})
 
-/** One answer about one row's box: the text it is about, and what the server said about it. */
+/** One answer about one row's box: the question it answers, and what the server said about it. */
 interface TargetEcho {
-  /** The box's text at the moment it was asked about, unmodified. The key this answer is valid for. */
+  /** The box's text at the moment it was asked about, unmodified. Half of the key this answer is valid for. */
   readonly text: string
+  /**
+   * The account the ask was made as, or `null` when the ask was made with none bound.
+   *
+   * **The other half of the key, and it is not decoration.** What the route answers depends on this: a
+   * Platform hands back a Room's own name only when the request carries the credential, and says why in
+   * `titleNote` when it could not. So the same text asked as a different account is a different question,
+   * and an answer to the old one left standing is the row telling a person 「未选择账号，读不到主播名」 about a
+   * row whose account is bound — a sentence from a state the page is no longer in.
+   */
+  readonly accountId: number | null
   readonly state: TargetEchoState
 }
 
@@ -176,7 +186,7 @@ interface TargetEcho {
  */
 type TargetEchoState =
   | { readonly kind: 'resolving' }
-  | { readonly kind: 'ok'; readonly key: string; readonly title: string }
+  | { readonly kind: 'ok'; readonly key: string; readonly title: string; readonly note: string }
   | { readonly kind: 'failed'; readonly reason: string }
 
 /** The row whose Target is mid-resolution, so its button says so. */
@@ -261,9 +271,33 @@ function cancelEcho(row: string): void {
   echoTimers.delete(row)
 }
 
-/** Records what one row's box should say, against the text it is about. */
-function setEcho(row: string, text: string, state: TargetEchoState): void {
-  targetEchoes.value = { ...targetEchoes.value, [row]: { text, state } }
+/**
+ * The question one row's box is asking: the text in it, and the account the answer must have been read as.
+ *
+ * **One home for the key, because three callers ask about it** — `resolveEcho`'s 「already asked」, `echoOf`'s
+ * 「is this answer about the box as it stands」, and `createCarrier`'s 「is the echo reusable」 — and a key
+ * spelled three times is a key that disagrees with itself the day one of them is edited. The account is
+ * `accountFor(platformKey)?.id`, the same lookup the parameter form and the create are handed.
+ */
+function targetAsk(row: string, platformKey: string): { readonly text: string; readonly accountId: number | null } {
+  return { text: targetInputOf(row), accountId: accountFor(platformKey)?.id ?? null }
+}
+
+/** Whether one answer answers one question — the text **and** the account it was read as. */
+function answersNow(
+  echo: TargetEcho | undefined,
+  ask: { readonly text: string; readonly accountId: number | null }
+): echo is TargetEcho {
+  return echo !== undefined && echo.text === ask.text && echo.accountId === ask.accountId
+}
+
+/** Records what one row's box should say, against the question it was asked. */
+function setEcho(
+  row: string,
+  ask: { readonly text: string; readonly accountId: number | null },
+  state: TargetEchoState
+): void {
+  targetEchoes.value = { ...targetEchoes.value, [row]: { text: ask.text, accountId: ask.accountId, state } }
 }
 
 /**
@@ -275,28 +309,33 @@ function setEcho(row: string, text: string, state: TargetEchoState): void {
  *
  * Two rules keep the asking honest. **An empty box is not asked about**: there is no shape to look up,
  * and the route's own answer to one is its 400 「请输入直播间链接或房间号」, so asking would be a request
- * made only to be refused. And **one ask per text**: the pause and the box's own blur both call this, and
+ * made only to be refused. And **one ask per question**: the pause and the box's own blur both call this, and
  * only the first gets through — except after a failure, where an explicit blur or Enter is a person
  * asking again about a link that may have been a transient transport fault.
+ *
+ * **The account is part of that question**, and the read is made as the one in hand: a Platform reads a Room's
+ * own name only with the credential, so asking anonymously and keeping the answer would be this row saying
+ * 「未选择账号，读不到主播名」 beside an account it is bound to. The answer is stored against the question that
+ * produced it, so a later ask under another account is a new ask rather than a cache hit.
  */
 async function resolveEcho(platformKey: string, entry: PlatformEntry): Promise<void> {
   const row = rowOf(platformKey, entry)
-  const text = targetInputOf(row)
+  const ask = targetAsk(row, platformKey)
 
-  if (text.trim() === '') {
+  if (ask.text.trim() === '') {
     targetEchoes.value = Object.fromEntries(Object.entries(targetEchoes.value).filter(([key]) => key !== row))
     return
   }
 
   const answered = targetEchoes.value[row]
-  if (answered !== undefined && answered.text === text && answered.state.kind !== 'failed') return
+  if (answersNow(answered, ask) && answered.state.kind !== 'failed') return
 
-  setEcho(row, text, { kind: 'resolving' })
+  setEcho(row, ask, { kind: 'resolving' })
   try {
-    const target = await platformApi.resolveTarget(platformKey, text.trim())
-    setEcho(row, text, { kind: 'ok', key: target.key, title: target.title })
+    const target = await platformApi.resolveTarget(platformKey, ask.text.trim(), ask.accountId)
+    setEcho(row, ask, { kind: 'ok', key: target.key, title: target.title, note: target.titleNote })
   } catch (cause: unknown) {
-    setEcho(row, text, { kind: 'failed', reason: describeError(cause) })
+    setEcho(row, ask, { kind: 'failed', reason: describeError(cause) })
   }
 }
 
@@ -323,20 +362,28 @@ function resolveEchoNow(platformKey: string, entry: PlatformEntry): void {
 /**
  * What one row's box says back, or null when it has nothing to say.
  *
- * Null is two facts with one rendering, and both of them are the honest one: an answer about text the box
- * no longer holds — so the label can never describe a question the person has moved past — and a box that
- * has not been asked about at all. An answer in flight is said as itself rather than drawn as a blank,
- * because a blank beside a box reads as "nothing wrong here".
+ * Null is two facts with one rendering, and both of them are the honest one: an answer about a question the
+ * row is no longer asking — so the label can never describe a question the person has moved past, **nor one
+ * that was asked as another account or as none** — and a box that has not been asked about at all. An answer
+ * in flight is said as itself rather than drawn as a blank, because a blank beside a box reads as "nothing
+ * wrong here".
+ *
+ * The third reading is `note`: the adapter's own sentence about what its label cannot say, drawn beside it
+ * and never in the failure's class — the Target resolved, and only the refusal above is coloured as one.
  */
-function echoOf(row: string): { readonly text: string; readonly failed: boolean } | null {
+function echoOf(
+  platformKey: string,
+  entry: PlatformEntry
+): { readonly text: string; readonly failed: boolean; readonly note: string } | null {
+  const row = rowOf(platformKey, entry)
   const echo = targetEchoes.value[row]
-  if (echo === undefined || echo.text !== targetInputOf(row)) return null
-  if (echo.state.kind === 'resolving') return { text: '正在识别这个目标…', failed: false }
-  if (echo.state.kind === 'failed') return { text: echo.state.reason, failed: true }
+  if (!answersNow(echo, targetAsk(row, platformKey))) return null
+  if (echo.state.kind === 'resolving') return { text: '正在识别这个目标…', failed: false, note: '' }
+  if (echo.state.kind === 'failed') return { text: echo.state.reason, failed: true, note: '' }
   // The title is cosmetic in the adapter's own contract (a Bilibili room that answers `room_init` may
   // still fail its second, title-only read), so an answer without one still names the Target it became.
   const named = echo.state.title === '' ? `目标 ${echo.state.key}` : echo.state.title
-  return { text: `已解析：${named}`, failed: false }
+  return { text: `已解析：${named}`, failed: false, note: echo.state.note }
 }
 
 /** Where one action would run, or null while that read has not landed. */
@@ -616,24 +663,30 @@ async function createCarrier(platformKey: string, entry: PlatformEntry): Promise
     let targetKey = ''
     let targetTitle = ''
     if (wantsTarget) {
-      // The box's own echo is the same read, of the same text, so a row that has already answered what is
+      // The box's own echo is the same read, of the same question, so a row that has already answered what is
       // typed is not asked the same question twice: one question, one answer, whichever path asked it.
-      // The comparison is against the text the answer is about, so an edit made between the echo landing
-      // and the press falls through to resolving here rather than creating a Task for the wrong room.
+      // The comparison is against the whole question — the text *and* the account it was read as — so an edit
+      // made between the echo landing and the press, or an account bound in between, falls through to
+      // resolving here rather than creating a Task for a room whose title was read for somebody else.
       const echoed = targetEchoes.value[row]
-      if (echoed !== undefined && echoed.state.kind === 'ok' && echoed.text.trim() === typed) {
+      if (answersNow(echoed, targetAsk(row, platformKey)) && echoed.state.kind === 'ok') {
         targetKey = echoed.state.key
         targetTitle = echoed.state.title
       } else {
         cancelEcho(row)
         resolving.value = row
-        const target = await platformApi.resolveTarget(platformKey, typed)
+        const target = await platformApi.resolveTarget(platformKey, typed, account.id)
         resolving.value = null
         targetKey = target.key
         targetTitle = target.title
-        // Written back against the box's own text: a create that fails after resolving leaves the answer
-        // where the person typed the question, and one that succeeds clears the box, which hides it.
-        setEcho(row, targetInputOf(row), { kind: 'ok', key: target.key, title: target.title })
+        // Written back against the question the box is asking: a create that fails after resolving leaves the
+        // answer where the person typed the question, and one that succeeds clears the box, which hides it.
+        setEcho(row, targetAsk(row, platformKey), {
+          kind: 'ok',
+          key: target.key,
+          title: target.title,
+          note: target.titleNote
+        })
       }
     }
 
@@ -938,11 +991,17 @@ onUnmounted(() => {
                         @keydown.enter="() => resolveEchoNow(platform.key, entry)"
                       />
                       <span
-                        v-if="echoOf(rowOf(platform.key, entry)) !== null"
+                        v-if="echoOf(platform.key, entry) !== null"
                         class="target-echo"
-                        :class="{ failed: echoOf(rowOf(platform.key, entry))?.failed === true }"
+                        :class="{ failed: echoOf(platform.key, entry)?.failed === true }"
                       >
-                        {{ echoOf(rowOf(platform.key, entry))?.text }}
+                        {{ echoOf(platform.key, entry)?.text }}
+                        <!-- The adapter's own sentence about what its label cannot say — drawn beside the
+                             answer, in a class of its own, because a hint is not a refusal: the failed
+                             reading above is the route's 4xx, and nothing of this one is coloured as it. -->
+                        <span v-if="(echoOf(platform.key, entry)?.note ?? '') !== ''" class="hint">
+                          {{ echoOf(platform.key, entry)?.note }}
+                        </span>
                       </span>
                     </div>
 
@@ -1272,6 +1331,20 @@ onUnmounted(() => {
 
 .target-echo.failed {
   color: var(--row-danger);
+}
+
+/*
+ * The adapter's own sentence beside the answer, when the answer needs explaining.
+ *
+ * **A third reading, and it resolves to the quiet colour the answer itself carries.** Nothing went wrong on
+ * this row — the Target resolved, and what the sentence says is the half a label structurally cannot: a
+ * Platform hands back a Room's own name only when the request carried a credential, and its fallback is the
+ * broadcast's 标题. So a hint must not be read as the refusal, which is what `.failed` above is for, and it
+ * gets a name of its own for the same reason `.note-pending` and `.note-empty` do: the template picks a
+ * reading by name, and the next reader cannot fold a hint into the failure's class by accident.
+ */
+.hint {
+  color: var(--row-quiet);
 }
 
 /* The read-outs, last in the row: see the template for why they may not sit above the controls. */

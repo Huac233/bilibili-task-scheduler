@@ -246,6 +246,15 @@ interface Scenario {
    * `missingReason(null)` words — which is the state the form is drawn in on its first frame.
    */
   choicePending?: boolean
+  /**
+   * The label the resolve fixture answers with, overriding the one its own branch would give.
+   *
+   * `''` is a real answer — a Room the adapter could name neither anchorwise nor from its own 标题 — and the
+   * label falls back to 「目标 <key>」, which is the reading this knob exists to put on screen.
+   */
+  resolvedTitle?: string
+  /** The adapter's own sentence beside that label, overriding the one its own branch would give. */
+  resolveNote?: string
 }
 
 /**
@@ -256,6 +265,29 @@ interface Scenario {
  * from a four-digit code matched inside a timestamp beside a 「+100」, and `AGENTS.md` made the rule of it.
  */
 const CHOICE_READ_REFUSED = '这次读礼物清单时请求没有回来，所以这一档读不到，重新打开一次参数试试。'
+
+/**
+ * The two things one paste answers with, which is the whole of why `titleNote` exists.
+ *
+ * A Platform reads a Room's own name only when the request carries a session — Bilibili's 主播名 needs one,
+ * and what it falls back to is the broadcast's own 标题 — so 「铁人」 arrives with a sentence saying the name
+ * could not be read, and 「电棍」 arrives with nothing to add. **Neither is a refusal**: the Target resolved,
+ * which is why the sentence is drawn beside the label rather than as an error. The fixture answers on
+ * whether the ask carried an account; *which* Platform behaves this way is the adapter's business, and this
+ * panel never names one.
+ */
+const ANCHOR_NAME = '电棍'
+const BROADCAST_TITLE = '铁人'
+
+/**
+ * The adapter's own sentence for a read that had no credential, verbatim from where it is written
+ * (`server/src/platform/bilibili/index.ts`).
+ *
+ * Used in a negative assertion — 「the row no longer says its account is missing」 — so it is a whole
+ * sentence on purpose: `AGENTS.md`'s rule is that a marker in a negative assertion must be too long for two
+ * adjacent rendered values to spell it.
+ */
+const NO_ACCOUNT_NOTE = '未选择账号，读不到主播名：B 站只在请求带上账号的登录 cookie 时才给出这个字段'
 
 interface RecordedRequest {
   readonly method: string
@@ -280,6 +312,11 @@ function askedFields(): string[] {
   return requests
     .filter(request => request.url.includes('/api/action-settings/options'))
     .map(request => query(request.url, 'field'))
+}
+
+/** The asks one row's box made of the Target route, in the order they went out. */
+function asks(): RecordedRequest[] {
+  return requests.filter(request => request.url.includes('/api/targets/resolve'))
 }
 
 /** The Task that names the per-Target action, as the Task list answers it, in the scenario's status. */
@@ -372,9 +409,22 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
     }
   }
   if (route.endsWith('/api/targets/resolve')) {
+    // **Whether the ask carried an account is what the answer turns on**, and that is the contract this
+    // route grew: a Platform that can read a Room's own name only with a credential answers differently
+    // without one. Read off the body rather than off the scenario, so the fixture cannot pass a page that
+    // forgot to send the account.
+    const sent = body as { accountId?: number }
+    const credentialed = sent.accountId !== undefined
     return {
       ok: true,
-      target: { key: '88013571', title: '电棍', anchorId: '310260', anchorName: '电棍', liveStatus: 1 }
+      target: {
+        key: '88013571',
+        title: scenario.resolvedTitle ?? (credentialed ? ANCHOR_NAME : BROADCAST_TITLE),
+        anchorId: credentialed ? '310260' : '',
+        anchorName: credentialed ? ANCHOR_NAME : '',
+        liveStatus: 1,
+        titleNote: scenario.resolveNote ?? (credentialed ? '' : NO_ACCOUNT_NOTE)
+      }
     }
   }
   if (method === 'post' && route.endsWith('/api/tasks')) {
@@ -436,7 +486,7 @@ async function settle(): Promise<void> {
 let hosts: HTMLElement[] = []
 let apps: App<Element>[] = []
 
-async function mountPanel(): Promise<void> {
+async function mountPanel(): Promise<App<Element>> {
   const host = document.createElement('div')
   document.body.append(host)
   hosts.push(host)
@@ -454,6 +504,45 @@ async function mountPanel(): Promise<void> {
   apps.push(app)
   app.mount(host)
   await settle()
+  return app
+}
+
+/**
+ * The panel's own setup state, returned so a test can hand a row a different account list.
+ *
+ * **This is the one state the panel has no public surface for.** Its account list is read once per mount
+ * (`onMounted`'s `accountApi.list()`), and every read of the box is made as the account that list holds — so
+ * 「the account changed after a text was resolved」, the state the box's own cache key is about, cannot be
+ * produced by a click the way it can on the create form's account picker. The walk is
+ * `task-create.test.ts`'s idiom, and for its reason: a test-only `defineExpose` would be production surface
+ * added for the test's benefit.
+ */
+function panelStateOf(app: App<Element>): Record<string, unknown> {
+  function walk(node: unknown, depth: number): Record<string, unknown> | null {
+    if (node === null || node === undefined || typeof node !== 'object' || depth > 60) return null
+
+    const record = node as Record<string, unknown>
+    const state = record['setupState']
+    if (typeof state === 'object' && state !== null) {
+      const fields = state as Record<string, unknown>
+      if ('targetEchoes' in fields && 'targetInputs' in fields && 'accounts' in fields) return fields
+    }
+
+    const children = record['children']
+    const next: unknown[] = [record['component'], record['subTree'], record['dynamicChildren']]
+    if (Array.isArray(children)) next.push(...children)
+    else next.push(children)
+
+    for (const child of next) {
+      const found = walk(child, depth + 1)
+      if (found !== null) return found
+    }
+    return null
+  }
+
+  const found = walk(app._instance, 0)
+  if (found === null) throw new Error('the mounted ActionSettingsPanel setup state could not be found')
+  return found
 }
 
 /** The page as a person reads it. */
@@ -1023,6 +1112,158 @@ describe('one row, one block', () => {
     // One ask per text, whichever trigger got there first: the pause that every keystroke re-arms must not
     // turn one link into two questions.
     expect(requests.filter(request => request.url.includes('/api/targets/resolve'))).toHaveLength(1)
+  })
+
+  /**
+   * The read takes an account, and this row is where it comes from.
+   *
+   * `accountFor(platformKey)` is this panel's one answer to 「this row would run as which account」 — the same
+   * lookup the create path and the parameter form use — so the box's own read is asked **as that account**
+   * rather than as nobody. It matters because what the answer *is* depends on it: a Platform reads a Room's
+   * own name only when the request carries a session, so the same paste answers 「铁人」 with an explanation
+   * and 「电棍」 with none, and a page that asked anonymously would be showing the first to somebody whose
+   * account is right here.
+   */
+  it('asks the route as the account this row would run as, rather than as nobody', async () => {
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '88013571')
+    await blur(box)
+
+    const asked = asks()
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.body).toMatchObject({ platform: 'douyu', input: '88013571', accountId: 1 })
+  })
+
+  /**
+   * The second place this component asks the route: a box with no answer of its own yet.
+   *
+   * The create resolves the Target itself when the echo has nothing to reuse, and that read is the same
+   * question of the same route — so it takes the same account. Left out, the create path would read the
+   * Target's name for nobody while creating a Task that runs as account 1, which is the shape of a Task
+   * whose title never matches the room it names.
+   */
+  it('asks as the account on the create path as well, when the box has no answer of its own', async () => {
+    await mountPanel()
+
+    // Typed and pressed with no blur between: the press is what asks first, so this is the create's own
+    // resolve rather than the box's echo being reused.
+    await type(inputInRow('亲密度任务'), '88013571')
+    await clickInRow('亲密度任务', '建一个任务指名它')
+
+    const asked = asks()
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.body).toMatchObject({ platform: 'douyu', input: '88013571', accountId: 1 })
+  })
+
+  /**
+   * What a label structurally cannot say, and the reason `titleNote` is on the wire at all.
+   *
+   * A Platform's answer is a fallback chain — an Anchor's name when a credential can read it, the broadcast's
+   * own 标题 when it cannot — and the two are indistinguishable to a reader: 「铁人」 is a room's subject line
+   * and a person shown it has no way to know that this build failed to read 「电棍」. So the adapter says why,
+   * and the page draws it beside the label.
+   *
+   * **As a hint, and never as a refusal.** The Target resolved — `TargetRefusal` is what a refusal is, and the
+   * route answers one with a 4xx that this row draws red — so the sentence carries the quiet reading's own
+   * name and the failure's class stays off both the label and the sentence. This is the third reading of one
+   * element: a refusal, an answer that held nothing, and a hint that nothing went wrong. It is drawn from a
+   * read with no account, which is where a Platform actually says it.
+   */
+  it('draws the adapter’s own sentence beside the label, as a hint rather than as a refusal', async () => {
+    scenario = { carried: false, finished: 0, accountListEmpty: true, choice: { kind: 'ok', items: [GIFT_ITEM] } }
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '88013571')
+    await blur(box)
+
+    const echo = rowElement('亲密度任务').querySelector<HTMLElement>('.target-echo')
+    // The label behaves exactly as it did: 「已解析：<title>」 for an answer that carries one.
+    expect(echo?.textContent).toContain(`已解析：${BROADCAST_TITLE}`)
+    // …and the sentence the adapter sent stands beside it.
+    expect(echo?.textContent).toContain(NO_ACCOUNT_NOTE)
+
+    const hint = echo?.querySelector<HTMLElement>('.hint')
+    expect(hint?.textContent).toBe(NO_ACCOUNT_NOTE)
+    // Nothing here is coloured as a failure: the refusal's class is on nothing at all, and a hint is not a
+    // reading that can carry it.
+    expect(echo?.classList.contains('failed')).toBe(false)
+    expect(hint?.classList.contains('failed')).toBe(false)
+  })
+
+  /**
+   * The other half of 「the label behaves as before」, over an answer that has neither name.
+   *
+   * A Room the adapter could read anchorwise *nowhere* — no name and no 标题 — still falls back to
+   * 「目标 <key>」, and the note does not take that label's place: it stands beside it. Both halves are drawn
+   * from one answer, so this is a rendering assertion rather than a second read.
+   */
+  it('keeps the 「目标 <key>」 label for an answer with no title, with the hint beside it', async () => {
+    scenario = {
+      carried: false,
+      finished: 0,
+      accountListEmpty: true,
+      resolvedTitle: '',
+      choice: { kind: 'ok', items: [GIFT_ITEM] }
+    }
+    await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '88013571')
+    await blur(box)
+
+    const echo = rowElement('亲密度任务').querySelector<HTMLElement>('.target-echo')
+    expect(echo?.textContent).toContain('目标 88013571')
+    expect(echo?.querySelector<HTMLElement>('.hint')?.textContent).toBe(NO_ACCOUNT_NOTE)
+  })
+
+  /**
+   * ⓷ The box's cache, and the half of its key that was missing.
+   *
+   * `resolveEcho` used to answer 「already asked」 from the text alone, and `echoOf` used to call an answer
+   * current on the same terms — which was true while the route read a Target without a credential and is not
+   * true now that it takes one. The same text asked as a different account is a different question, and an
+   * answer to the old one left on screen is the page telling a person something the code no longer believes:
+   * 「未选择账号，读不到主播名」 over a row whose account is bound.
+   *
+   * The account is read once per mount, so the fixture cannot move it with a click: the list is handed to the
+   * panel the way a landing (or re-read) list would arrive, and both halves of the key are then asserted — the
+   * sentence from the state the row has left is gone, and the box is asked again rather than answered out of
+   * the cache.
+   */
+  it('re-asks the same text when the row’s account changes, and drops the sentence from the old one', async () => {
+    scenario = { carried: false, finished: 0, accountListEmpty: true, choice: { kind: 'ok', items: [GIFT_ITEM] } }
+    const panel = await mountPanel()
+
+    const box = inputInRow('亲密度任务')
+    await type(box, '88013571')
+    await blur(box)
+
+    // Asked while nothing was bound: the label is the broadcast's own and the adapter says why.
+    expect(rowOf('亲密度任务')).toContain(`已解析：${BROADCAST_TITLE}`)
+    expect(rowOf('亲密度任务')).toContain(NO_ACCOUNT_NOTE)
+    expect(asks()).toHaveLength(1)
+
+    // The account arrives — the one move this row's answer depends on.
+    panelStateOf(panel).accounts = [...ACCOUNTS]
+    await settle()
+
+    // The row may not go on saying it has no account: that sentence is about a state it has left.
+    expect(rowOf('亲密度任务')).not.toContain(NO_ACCOUNT_NOTE)
+
+    // And the same text is a new question, so it is asked rather than answered from the cache — which is
+    // exactly what the text-only comparison did.
+    await blur(inputInRow('亲密度任务'))
+
+    const asked = asks()
+    expect(asked).toHaveLength(2)
+    expect(asked[1]?.body).toMatchObject({ platform: 'douyu', input: '88013571', accountId: 1 })
+
+    const answered = rowOf('亲密度任务')
+    expect(answered).toContain(`已解析：${ANCHOR_NAME}`)
+    expect(answered).not.toContain(NO_ACCOUNT_NOTE)
   })
 })
 

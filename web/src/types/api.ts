@@ -180,6 +180,20 @@ export interface Account {
 export interface TargetInfo {
   readonly key: string
   readonly title: string
+  /**
+   * What `title` does not say, as a sentence the page shows beside it — `''` when there is nothing to explain.
+   *
+   * Mirrors `TargetInfo.titleNote` in `server/src/platform/types.ts`, whose note is the contract's own: a
+   * label can be a fallback, and a fallback that does not say it is one reads as an answer. Bilibili's
+   * `title` is the Anchor's name when a credential can read it and the broadcast's 标题 when it cannot, and
+   * the two are indistinguishable to a reader — so the adapter says why, and **the page draws it as a note
+   * beside the label rather than as an error**: the Target did resolve, and a refusal is a thrown
+   * `TargetRefusal`, which arrives as a 4xx the page shows in its own error slot.
+   *
+   * **Empty means "nothing to add", not "no reason recorded"**, which is why it is required here as well:
+   * every adapter states which of the two it is rather than leaving a reader to guess from a missing key.
+   */
+  readonly titleNote: string
   readonly anchorId: string
   readonly anchorName: string
   /** The Platform's own liveness value; only meaningful for live-room targets. */

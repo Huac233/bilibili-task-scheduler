@@ -352,13 +352,36 @@ async function resolveTarget(): Promise<void> {
   target.value = null
 
   try {
-    target.value = await platformApi.resolveTarget(chosen.key, targetInput.value.trim())
+    // Asked as the account this Task will run as: a Platform hands back a Room's own name only when the
+    // request carries the credential, and answers `titleNote` when it could not — so a read made as nobody
+    // is a read this form would have to explain away on a page where the account is right there.
+    target.value = await platformApi.resolveTarget(chosen.key, targetInput.value.trim(), accountId.value)
   } catch (cause: unknown) {
     error.value = describeError(cause)
   } finally {
     resolving.value = false
   }
 }
+
+/**
+ * Drops a resolved Target when the account changes, because the answer was read **as** that account.
+ *
+ * `resolveTarget` now takes the account, and what comes back depends on it: a Platform reads a Room's own
+ * name only with a session, so what stands in `target` belongs to the account that was chosen when it was
+ * read. Leaving it on screen while another account is selected is this form showing a name read for somebody
+ * else — the same defect as the settings panel's Target echo, one `ref` over, and reachable here in two
+ * clicks, because with more than one account bound this form preselects none (`syncPlatformDefaults`) and a
+ * person may resolve a room before saying which account runs it.
+ *
+ * Dropping rather than re-asking on the account's behalf: a Platform change already drops it the same way,
+ * and so does a switch to an action with no Target (the descriptor watcher above), so this is the form's
+ * existing move rather than a new one — and `canSubmit` already refuses a Target-bearing submit with no
+ * resolved Target, so the button going quiet is the state the person is really in. The typed link is kept:
+ * that is their question, and pressing 解析 again asks it of the account now chosen.
+ */
+watch(accountId, () => {
+  target.value = null
+})
 
 /**
  * Turns the chosen action's switch on from here, so the form is not a dead end.
@@ -639,7 +662,24 @@ onMounted(async () => {
 
             <NAlert v-if="target !== null" type="success" :bordered="false">
               <NSpace align="center">
-                <span>{{ target.title !== '' ? target.title : `目标 ${target.key}` }}</span>
+                <!--
+                  The label and the adapter's own sentence about it, in one element.
+
+                  **The note is nested rather than a sibling, and that is not cosmetic.** `NSpace` keys every
+                  child it wraps with the literal `1` and the keyed fragment it produces breaks Vue's diff the
+                  moment that child count changes — the trap `nspace-fragment.test.ts` pins on this very form,
+                  where a changing `v-if` multiplied 「执行间隔」 and left 「加盐」 on screen for an action that has
+                  no such concept. A conditional sixth child here would be exactly that; a conditional span
+                  *inside* the label's own element leaves the child list as stable as it is, and reads the way
+                  the two facts are related: the sentence explains this label.
+
+                  It is a hint and never an error: the Target resolved, and a refusal is the route's 4xx,
+                  which this page draws in its own `error` bar above the card.
+                -->
+                <span>
+                  {{ target.title !== '' ? target.title : `目标 ${target.key}` }}
+                  <span v-if="target.titleNote !== ''" class="hint">{{ target.titleNote }}</span>
+                </span>
                 <NTag size="small">ID {{ target.key }}</NTag>
                 <div :key="'anchor'">
                   <NTag v-if="target.anchorName !== ''" size="small">{{ target.anchorName }}</NTag>
@@ -730,6 +770,11 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/*
+ * A sentence beside a control, rather than a warning about it: this is where the interval's own note, the
+ * 加盐 note and the adapter's `titleNote` beside a resolved Target all sit. The Target's note is the third
+ * of those and the only one drawn from an answer, which is why it is nested inside the label it explains.
+ */
 .hint {
   color: #888;
   font-size: 13px;

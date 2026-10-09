@@ -86,6 +86,64 @@ let catalogue: ActionDescriptor[] = [SEND, SIGN_IN, LIKE, GROWTH_POOL]
 /** Catalogued actions the fixture answers as switched off, so 「开启这个动作」 has something to do. */
 let switchedOff: string[] = []
 
+/** The one bound account the fixture answers with, unless a test asks for a second one. */
+const ACCOUNT_ONE = {
+  id: 1,
+  platform: 'bilibili',
+  displayName: '测试账号',
+  avatar: '',
+  externalId: 'uid-1',
+  createdAt: 0
+}
+
+/**
+ * The second account on the same Platform, so 「the account changes」 is a move this form really offers.
+ *
+ * **It is what makes the state below reachable at all.** With exactly one account bound the page preselects
+ * it (「there is no choice to make in that case」), so a person cannot resolve a Target before choosing one —
+ * and that order is the state whose answer this file has to pin: a Target read as nobody, on a form that is
+ * then told which account it runs as.
+ */
+const ACCOUNT_TWO = {
+  id: 2,
+  platform: 'bilibili',
+  displayName: '第二个账号',
+  avatar: '',
+  externalId: 'uid-2',
+  createdAt: 0
+}
+
+/** Whether both accounts are bound. Off by default: the four-action page is what most of this file reads. */
+let secondAccount = false
+
+/**
+ * The two things one paste answers with, which is the whole of why `titleNote` exists.
+ *
+ * A Platform reads a Room's own name only when the request carries a session — Bilibili's 主播名 needs one, and
+ * what it falls back to is the broadcast's own 标题 — so 「铁人」 arrives with a sentence saying the name could
+ * not be read and 「电棍」 with nothing to add. **Neither is a refusal**: the Target resolved, and the route
+ * answers a real refusal with a 4xx this form puts in its error bar instead. The fixture answers on whether
+ * the ask carried an account.
+ */
+const ANCHOR_NAME = '电棍'
+const BROADCAST_TITLE = '铁人'
+
+/**
+ * The adapter's own sentence for a read that had no credential, verbatim from where it is written
+ * (`server/src/platform/bilibili/index.ts`).
+ *
+ * Used in negative assertions — 「the form no longer answers as nobody」 — so it is a whole sentence on
+ * purpose: `AGENTS.md`'s rule is that a marker in a negative assertion must be too long for two adjacent
+ * rendered values to spell it.
+ */
+const NO_ACCOUNT_NOTE = '未选择账号，读不到主播名：B 站只在请求带上账号的登录 cookie 时才给出这个字段'
+
+/** The label a test forces the fixture to answer, or null to let it answer on the ask. */
+let resolvedTitle: string | null = null
+
+/** The sentence a test forces the fixture to answer, or null to let it answer on the ask. */
+let resolveNote: string | null = null
+
 /** When set, the account list is refused: the page then cannot say whether anything is bound. */
 let accountsRefused = false
 
@@ -151,16 +209,26 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
   if (url.endsWith('/api/accounts')) {
     if (accountsRefused) throw new Error('这一次没读到账号列表')
     if (accountsEmpty) return { ok: true, accounts: [] }
-    return {
-      ok: true,
-      accounts: [
-        { id: 1, platform: 'bilibili', displayName: '测试账号', avatar: '', externalId: 'uid-1', createdAt: 0 }
-      ]
-    }
+    return { ok: true, accounts: secondAccount ? [ACCOUNT_ONE, ACCOUNT_TWO] : [ACCOUNT_ONE] }
   }
   if (url.endsWith('/api/targets/resolve')) {
     if (targetResolveRefused) throw new Error('解析不了这个房间号')
-    return { ok: true, target: { key: '8801', title: '电棍', anchorId: '1', anchorName: '电棍', liveStatus: 1 } }
+    // Whether the ask carried an account is what the answer turns on, and that is the contract this route
+    // grew. Read off the body rather than off the fixture's own flags, so a page that forgot to send the
+    // account cannot pass here.
+    const sent = body as { accountId?: number }
+    const credentialed = sent.accountId !== undefined
+    return {
+      ok: true,
+      target: {
+        key: '8801',
+        title: resolvedTitle ?? (credentialed ? ANCHOR_NAME : BROADCAST_TITLE),
+        anchorId: credentialed ? '1' : '',
+        anchorName: credentialed ? ANCHOR_NAME : '',
+        liveStatus: 1,
+        titleNote: resolveNote ?? (credentialed ? '' : NO_ACCOUNT_NOTE)
+      }
+    }
   }
   if (url.endsWith('/api/libraries')) {
     if (librariesRefused) throw new Error('这一次没读到文本库列表')
@@ -220,6 +288,7 @@ Object.defineProperty(globalThis, 'ResizeObserver', { configurable: true, value:
  */
 interface ViewState {
   platformKey: string | null
+  accountId: number | null
   actionKey: string | null
   descriptor: ActionDescriptor | null
   interval: number
@@ -402,6 +471,9 @@ beforeEach(() => {
   switchedOff = []
   accountsRefused = false
   accountsEmpty = false
+  secondAccount = false
+  resolvedTitle = null
+  resolveNote = null
   librariesRefused = false
   targetResolveRefused = false
   createdStatus = 'running'
@@ -743,5 +815,155 @@ describe('TaskCreateView, and the two lists it has to ask about', () => {
     // second copy of a library they already have.
     expect(selectPlaceholderOf('文本库')).toContain('文本库列表这次没读到')
     expect(pageText()).not.toContain('还没有文本库')
+  })
+})
+
+/** The asks the form made of the Target route, in the order they went out. */
+function targetAsks(): RecordedRequest[] {
+  return requests.filter(request => request.url.endsWith('/api/targets/resolve'))
+}
+
+/** The alert that announced the Target, found through the label it carries rather than by position. */
+function alertCarrying(needle: string): HTMLElement | undefined {
+  return [...document.querySelectorAll<HTMLElement>('.n-alert')].find(node => (node.textContent ?? '').includes(needle))
+}
+
+/**
+ * The Target read: what it takes with it, and what the page may do with the answer.
+ *
+ * **The read takes an account, and the answer depends on it.** A Platform reads a Room's own name only when
+ * the request carries a session — Bilibili reads 主播名 that way, and what it falls back to is the broadcast's
+ * own 标题 — so the same paste answers 「铁人」 plus a sentence saying the name could not be read, or 「电棍」 with
+ * nothing to add. The form is where that account is *chosen*, which makes this the page where 「the account
+ * changed after a Target was read」 is reachable — and the two halves of that are one question asked twice:
+ * the read has to be made as the chosen account, and an answer read as another one may not go on standing on
+ * the form.
+ */
+describe('TaskCreateView, and the Target it resolves', () => {
+  /**
+   * ⓐ The read is asked as the account the form runs as, and `accountId.value` is where that comes from — the
+   * same ref `submit` sends as the Task's own account. Left out, the form would read the Room's name for
+   * nobody and then create a Task for account 1 whose stored title was never the room's own.
+   */
+  it('asks the route as the account the form would run as, rather than as nobody', async () => {
+    const view = await mountView()
+
+    // The one account bound to the only Platform: the page preselects it, because there is no choice to make.
+    expect(view.accountId).toBe(1)
+    await choose(view, SEND.key)
+
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    const asked = targetAsks()
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.body).toMatchObject({ platform: 'bilibili', input: '8801', accountId: 1 })
+  })
+
+  /**
+   * The other half, and not a red-before claim: **no account travels as no field at all**.
+   *
+   * The route's schema takes a positive integer or nothing — `accountId: null` is a third thing it answers
+   * 400 for — so a form with nothing bound has to omit the key rather than send a placeholder, which is the
+   * same idiom `actionSettingApi.set` uses for a bare toggle. Guarded rather than invented: it was true
+   * before this change and is the shape a wrong fix would break.
+   */
+  it('sends no account at all when the form has none, rather than a placeholder', async () => {
+    accountsEmpty = true
+    const view = await mountView()
+    await choose(view, SEND.key)
+    expect(view.accountId).toBeNull()
+
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    expect(targetAsks()[0]?.body).not.toHaveProperty('accountId')
+  })
+
+  /**
+   * What a label structurally cannot say: the adapter's own sentence about the name it could not read.
+   *
+   * 「铁人」 is a broadcast's subject line, and a person shown it has no way to know that this build failed to
+   * read 「电棍」 — so the adapter says why and the page draws it beside the label. **As a hint, and never as an
+   * error**: the Target resolved, and a real refusal is the route's 4xx, which this page puts in its `error`
+   * bar above the card. The sentence is drawn once, inside the alert that announced the Target.
+   */
+  it('draws the adapter’s own sentence beside the Target it explains, as a hint rather than an error', async () => {
+    accountsEmpty = true
+    const view = await mountView()
+    await choose(view, SEND.key)
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    const announced = alertCarrying(BROADCAST_TITLE)
+    expect(announced).not.toBeUndefined()
+    // The sentence carries this page's own class for a sentence that explains rather than warns…
+    expect(announced?.querySelector<HTMLElement>('.hint')?.textContent).toBe(NO_ACCOUNT_NOTE)
+    // …and it is in the alert that announced the Target, so nothing else on the page is claiming it — the
+    // failure bar is a different element drawn from `error`, which this read did not write.
+    expect(alertCarrying(NO_ACCOUNT_NOTE)).toBe(announced)
+  })
+
+  /**
+   * The label's other reading, which the note must not take over.
+   *
+   * A Room the adapter could name nowhere — no anchor name and no 标题 — still falls back to
+   * 「目标 <key>」, exactly as it did before there was a note to draw beside it.
+   */
+  it('keeps the 「目标 <key>」 label for an answer with no title, with the hint beside it', async () => {
+    accountsEmpty = true
+    resolvedTitle = ''
+    const view = await mountView()
+    await choose(view, SEND.key)
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    const announced = alertCarrying('目标 8801')
+    expect(announced).not.toBeUndefined()
+    expect(announced?.querySelector<HTMLElement>('.hint')?.textContent).toBe(NO_ACCOUNT_NOTE)
+  })
+
+  /**
+   * ⓑ The answer was read **as** an account, so it may not outlive the choice of one.
+   *
+   * With two accounts bound the page preselects neither (「anything else is left empty so the user does not
+   * confirm a default they did not look at」), so a person really can resolve a Target before saying which
+   * account the Task runs as — and the answer they get is the one read without a credential. Choosing an
+   * account then makes that label a name read for somebody else: the same defect as the settings panel's
+   * Target echo, one `ref` over, and the same fix in this form's own idiom — a Platform change drops the
+   * Target the same way (`syncPlatformDefaults`), because the answer to 「which room is this」 is read per
+   * account. Dropping rather than re-asking keeps one trigger per read, and `canSubmit` already refuses a
+   * Target-bearing submit with no resolved Target.
+   */
+  it('drops a Target read without an account once the form runs as one, and asks again as that account', async () => {
+    secondAccount = true
+    const view = await mountView()
+    await choose(view, SEND.key)
+    expect(view.accountId).toBeNull()
+
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    // Read as nobody: the label is the broadcast's own, with the adapter's sentence about it.
+    expect(cardText()).toContain(BROADCAST_TITLE)
+    expect(cardText()).toContain(NO_ACCOUNT_NOTE)
+
+    view.accountId = 1
+    await settle()
+
+    // The label would be a name read for somebody else, so it goes rather than standing — and the form says
+    // so by refusing to submit without one.
+    expect(view.target).toBeNull()
+    expect(cardText()).not.toContain(NO_ACCOUNT_NOTE)
+    expect(view.canSubmit).toBe(false)
+
+    // The typed link is still the person's own question, so asking it again answers as the account now chosen.
+    await clickButton('解析')
+
+    const asked = targetAsks()
+    expect(asked).toHaveLength(2)
+    expect(asked[1]?.body).toMatchObject({ platform: 'bilibili', input: '8801', accountId: 1 })
+    expect(cardText()).toContain(ANCHOR_NAME)
+    expect(cardText()).not.toContain(NO_ACCOUNT_NOTE)
   })
 })

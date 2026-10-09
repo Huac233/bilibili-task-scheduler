@@ -85,9 +85,26 @@ export const platformApi = {
    * host allowlist applies, which slug maps to which id, and which of several
    * endpoints returns the title; resolving here also proves the Target exists, so
    * a typo surfaces in the form rather than as a task that monitors nothing.
+   *
+   * **`accountId` is what makes some of that answer readable at all.** A Platform may hand back a Room's own
+   * name only when the request carries an account's credential — Bilibili's 主播名 needs the session trio,
+   * measured rather than assumed — and the reply says so in `TargetInfo.titleNote` when it could not. So a
+   * caller that has the account it would act as passes it, and the answer is the one read as that account.
+   * The route answers an id that names no account with 404 and one bound to another Platform with 400 rather
+   * than quietly resolving anonymously, because a silent fallback would be a label claiming an answer the
+   * credential was needed for.
+   *
+   * `null` and `undefined` are the same thing here — no account — and both travel as **the absent field**
+   * rather than as `null`: the route's schema takes a positive integer or nothing, and `null` is a third
+   * thing it refuses. Every caller holds one of the two (`accountId.value` is a `number | null`,
+   * `accountFor(key)?.id` a `number | undefined`), so the omission is decided here, once.
    */
-  async resolveTarget(platform: string, input: string): Promise<TargetInfo> {
-    const { data } = await http.post<{ ok: boolean; target: TargetInfo }>('/api/targets/resolve', { platform, input })
+  async resolveTarget(platform: string, input: string, accountId?: number | null): Promise<TargetInfo> {
+    const { data } = await http.post<{ ok: boolean; target: TargetInfo }>('/api/targets/resolve', {
+      platform,
+      input,
+      ...(typeof accountId === 'number' ? { accountId } : {})
+    })
     return data.target
   }
 }
