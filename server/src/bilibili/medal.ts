@@ -55,7 +55,14 @@ import { envelopedOptionalData } from './types.js'
  * 所以这里不自己造 controller、也没有需要和调用方 signal 组合的地方。
  */
 
-/** 房间级读侧。无需 WBI，无需 csrf。 */
+/**
+ * 房间级读侧。**不需要 WBI 也不需要 csrf —— 但需要一个带 cookie 的客户端。**
+ *
+ * 模块头部那句「不需要 WBI，也不需要 csrf」是在**本模块这条带凭据的读路径**上量的（读侧客户端由
+ * `clientFor` 造，jar 里带着绑定账号的 cookie），所以它推不出「匿名客户端也能读」。实测（2026-10-09，房间
+ * 14709735）：无 cookie 时这个端点答 `code -352`、`data` 整个缺席，一个字段都读不到。完整记录与推论错在哪，
+ * 在 `live.ts` 的 `fetchAnchorName`。
+ */
 export const ROOM_INFO_BY_ROOM_URL = 'https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom'
 
 /** 勋章级读侧（一枚牌子）。 */

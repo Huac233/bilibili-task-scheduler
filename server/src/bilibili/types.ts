@@ -224,8 +224,13 @@ export const anchorNameDataSchema = z.object({
  *
  * A `data` that *is* present still has to carry the anchor block, also as above: a read that succeeds
  * and says nothing about the anchor is a contract change, and the loud reading of it — `fetchAnchorName`
- * throws, its caller keeps the task without a name — leaves a trace, where an optional block would
- * quietly answer `''` for both states.
+ * throws, its caller keeps the task and labels it with the room's 标题 instead — leaves a trace, where an
+ * optional block would quietly answer `''` for both states.
+ *
+ * The tolerated absent `data` is the shape Bilibili actually uses for this endpoint's other refusal:
+ * `-352` (risk control) arrives as `{"code":-352,"message":"-352","ttl":1}` with no `data` at all, which
+ * is what a **cookie-less** client is answered (measured 2026-10-09, kept in
+ * `tests/captured/bilibili-getInfoByRoom-14709735-anonymous.json`; `live.ts` 的 `fetchAnchorName` 记着完整实测).
  */
 export const anchorNameSchema = envelopedOptionalData(anchorNameDataSchema.nullable())
 

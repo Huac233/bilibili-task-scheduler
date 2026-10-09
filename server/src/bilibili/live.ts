@@ -181,7 +181,20 @@ export async function fetchRoomInfo(http: BiliHttp, roomId: number): Promise<Roo
  * fact with two homes, and the day Bilibili moves the path exactly one of them would break — the
  * module that no longer reads it is the one that would go unnoticed. That module's header also
  * records the endpoint's own contract, which this read relies on and states nowhere else: **no WBI
- * and no csrf are needed**, so it answers the cookie-less client `resolveTarget` runs on.
+ * and no csrf are needed**.
+ *
+ * **A cookie is needed, though, and this header used to infer the opposite from the sentence above.**
+ * 「no WBI, no csrf」 was measured on the like gate's client, which `clientFor` builds *with* the bound
+ * account's cookies; the step from there to 「so it answers the cookie-less client `resolveTarget` runs
+ * on」 was never measured, and it is false. Measured 2026-10-09 for room 14709735, browser User-Agent
+ * and a same-site `Referer` and no cookie: `{"code":-352,"message":"-352","ttl":1}` — no `data`, so no
+ * anchor block and no name to read (that envelope is kept verbatim in
+ * `tests/captured/bilibili-getInfoByRoom-14709735-anonymous.json`). The same room answered `code: 0`
+ * with `data.anchor_info.base_info.uname` = 「炫神_」 once the account's cookies travelled; **which of
+ * those cookies is load-bearing is not measured**, only that the jar is part of the contract. Which is
+ * why `resolveTarget` — anonymous on purpose, being built before an account is chosen — reads this
+ * endpoint's name first and falls back to the room's 标题, and why a `''` from an empty anchor block is
+ * a state its caller had to stop treating as the only alternative.
  *
  * **Named for the room, not for a user id, and that is the design decision here.** A name can be had
  * from a profile call as well (`live_user/v1/UserInfo/get_anchor_in_room?roomid=`, whose
@@ -211,7 +224,8 @@ export async function fetchAnchorName(http: BiliHttp, roomId: number): Promise<s
   }
 
   // A room that reports no name answers `''`, which is what "nothing to say" has to look like: the
-  // caller's fallback is about there being no name, and an invented one would read as a real answer.
+  // caller's own next step is its fallback (the room's 标题), and an invented name here would read as a
+  // real answer.
   return response.data?.anchor_info.base_info.uname ?? ''
 }
 

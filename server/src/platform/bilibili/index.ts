@@ -324,26 +324,50 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     throw error
   }
 
-  // **The label, and why this is the read that fills it.** `TargetInfo.title` is what a person reads
+  // **The label, and the order this member reads it in.** `TargetInfo.title` is what a person reads
   // back: 「已解析：…」 beside the box they pasted into (`ActionSettingsPanel.vue`), and a task row's
-  // `targetTitle`. So it has to name something they recognise, and for a Room that is the Anchor. The
-  // two endpoints this resolve already talks to carry no user name at all — `room_init` answers room
-  // id, uid and status, `get_info` answers uid, title and the areas — and `get_info`'s `title` is the
-  // broadcast's **subject line**, which changes with the stream and is not a name: room 84074 read
-  // 「贴人」 while its Anchor is 「炫神_」, and filling this field from that is the defect this read
-  // replaces. The name lives in the payload the room's own page reads (`getInfoByRoom`,
-  // `anchor_info.base_info.uname`), so `fetchAnchorName` is where it comes from now. It **replaces**
-  // that title read rather than joining it: the name is the only fact this member wants, and the
-  // request count stays what it was.
+  // `targetTitle`. Three sources, this order, and no fourth:
   //
-  // Cosmetic in the one sense that matters here — the room resolved, which is all the caller needs — so a
-  // failure must not block creating the task.
+  //   1. **The Anchor's name** (`fetchAnchorName`). A name is what that field is for, and neither of the
+  //      two endpoints this member used to talk to carries one: `room_init` answers room id, uid and
+  //      status, `get_info` answers uid, title and the areas.
+  //   2. **The room's 标题** (`fetchRoomInfo`), when no name arrives. It is the broadcast's *subject
+  //      line*, so it is the worse label — room 84074 answers 「铁人」 today and 「贴人」 in an earlier
+  //      capture, while its Anchor is 「炫神_」. **That argument against it is real, and it loses to showing
+  //      nothing**, which is what shipped: with the label empty, the page's own fallback answers
+  //      「目标 14709735」, so a person sees *less* than the 标题 this field held before the name read
+  //      existed — and cannot tell a name this build failed to read from a room that has none.
+  //   3. **`''`**, only when both reads are unavailable. That is the state `ActionSettingsPanel.vue`'s
+  //      echo renders as 「目标 <room id>」, and it stays reachable rather than being papered over.
+  //
+  // **Why step 2 is the ordinary path here rather than a rare net.** `getInfoByRoom` answers a cookie-less
+  // client `code: -352` with no `data` at all (measured 2026-10-09 for room 14709735, and the envelope is
+  // kept verbatim in `tests/captured/bilibili-getInfoByRoom-14709735-anonymous.json`; the same room
+  // answered `code: 0` with `data.anchor_info.base_info.uname` = 「炫神_」 once the account's cookies
+  // travelled). This member's client is anonymous on purpose (see above), so **step 1 does not fire for it
+  // today**: what ships is the 标题, and the name becomes reachable the day this member has an account to
+  // read with. An endpoint that can answer *without* a name must not be able to take the label away from
+  // a read that can — `tests/bilibili-target-label.test.ts` drives that captured refusal through this
+  // exact path.
+  //
+  // Cosmetic in the one sense that matters here — the room resolved, which is all the caller needs — so
+  // neither failure may block creating the task. The order costs one extra request, and only on the path
+  // where no name arrived: a name that arrives still short-circuits.
   let title = ''
   try {
     title = await fetchAnchorName(http, room.room_id)
   } catch {
-    // Ignored: a task with no name is still a task, and an empty `title` is what the page already
-    // renders as 「目标 <room id>」.
+    // Ignored: a task this read could not name is still a task, and the 标题 below is what the label
+    // falls back to.
+  }
+
+  if (title === '') {
+    try {
+      title = (await fetchRoomInfo(http, room.room_id)).title
+    } catch {
+      // Ignored: both reads unavailable, so the label stays `''` — the state the page already renders as
+      // 「目标 <room id>」.
+    }
   }
 
   return {
@@ -357,7 +381,9 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     // and `anchorName` is the create form's second, smaller tag, which would then print one name
     // twice. (The comment it replaces said no room endpoint carries the name and that it would take a
     // separate profile call. The first half was true of the two endpoints this member talked to, and
-    // false of the room page's own payload, which is where the name turned out to be.)
+    // false of the room page's own payload, which is where the name turned out to be.) `title` carries
+    // the 标题 whenever that read does not answer, and that is a fallback for the same one field rather
+    // than a second label — so it is no reason to fill this one either.
     anchorName: '',
     // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.
     liveStatus: room.live_status

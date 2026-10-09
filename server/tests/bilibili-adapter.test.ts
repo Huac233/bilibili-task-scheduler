@@ -565,27 +565,31 @@ describe('resolveTarget', () => {
 
     expect(target.title).toBe(ANCHOR_NAME)
     expect(target.key).toBe('84074')
-    // The read that answers the 标题 was *replaced*, not joined: a resolve asks the Platform for the
-    // name and nothing else beyond the room lookup, so the count of requests this path makes is
-    // unchanged.
+    // The 标题 read is a **fallback for an absent name**, not a second source consulted anyway: a name
+    // that arrives short-circuits it, so this path still makes the number of requests it made before the
+    // fallback existed.
     expect(fetchRoomInfoMock).not.toHaveBeenCalled()
   })
 
   /**
-   * A name that is empty is not a name, and the field says so.
+   * An empty name is not a name, so the label falls through to the room's 标题 — the order
+   * `resolveTarget` states in full.
    *
-   * The page renders an empty `title` as 「目标 <room id>」 (`ActionSettingsPanel.vue`'s `echoOf`), which
-   * is the fallback this field has always had for a room it could not name. Substituting the 标题 here
-   * is the one thing that must not happen: that is the string the reported defect put in this field,
-   * and a person cannot tell it from a name.
+   * **This case asserted the opposite until the regression was found, and that belongs on the record.**
+   * `''` *is* what the page renders as 「目标 22637261」, so the assertion read as a deliberate choice —
+   * and nothing in this file could see its cost, because `fetchAnchorName` is a mock here and no mock
+   * knew that every anonymous client is refused. The captured refusal and the real reader are
+   * `tests/bilibili-target-label.test.ts`'s job. What this case pins is the order itself.
    */
-  it('leaves the label empty when the room reports no Anchor name at all', async () => {
+  it('falls back to the room’s 标题 when the room reports no Anchor name at all', async () => {
     fetchAnchorNameMock.mockResolvedValue('')
 
     const target = await bilibiliPlatform.resolveTarget('22637261')
 
-    expect(target.title).toBe('')
+    expect(target.title).toBe('标题')
     expect(target.key).toBe('22637261')
+    // Asked of the real room id, as every read here is: `get_info` takes what `room_init` mapped to.
+    expect(fetchRoomInfoMock).toHaveBeenCalledWith(expect.anything(), 22637261)
   })
 
   /**
@@ -674,15 +678,32 @@ describe('resolveTarget', () => {
     await expect(bilibiliPlatform.resolveTarget('22637261')).rejects.toBeInstanceOf(BiliHttpError)
   })
 
-  it('does not let a cosmetic name read block a task, and leaves the field empty rather than filled', async () => {
+  it('does not let a refused name read block a task, and labels it with the 标题 instead', async () => {
+    // The code the endpoint actually answers an anonymous client, and the one that shipped the
+    // regression: a *refusal* must not be able to take the label away from a read that can answer.
     fetchAnchorNameMock.mockRejectedValue(new Error('getInfoByRoom answered code -352'))
 
     const target = await bilibiliPlatform.resolveTarget('22637261')
 
     expect(target.key).toBe('22637261')
-    // `''` is the state the page renders as 「目标 22637261」: a name this build could not read is not a
-    // reason to put the room's 标题 in a field a person reads as a name.
+    expect(target.title).toBe('标题')
+  })
+
+  /**
+   * The third step, and the only state that keeps 「目标 <room id>」 reachable.
+   *
+   * Both reads unavailable is the one case where the label stays `''`; the page's own fallback
+   * (`ActionSettingsPanel.vue`'s `echoOf`) then names the room by the key this resolve did confirm, which
+   * is the honest answer: a number that resolved and could not be named.
+   */
+  it('leaves the label empty only when neither read answers', async () => {
+    fetchAnchorNameMock.mockRejectedValue(new Error('getInfoByRoom answered code -352'))
+    fetchRoomInfoMock.mockRejectedValue(new RoomRefusedError(1, '房间不存在'))
+
+    const target = await bilibiliPlatform.resolveTarget('22637261')
+
     expect(target.title).toBe('')
+    expect(target.key).toBe('22637261')
   })
 })
 
