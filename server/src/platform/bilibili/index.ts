@@ -157,8 +157,20 @@ const ACTIONS: readonly ActionDescriptor[] = [
     maxMessageLength: 0,
     /**
      * The daily chores are idempotent and read first — an already-done action is a cheap read
-     * that says so — so a tighter cadence buys nothing and only adds requests against a
+     * that says so — so a tighter cadence buys little and only adds requests against a
      * Platform that rate-limits. Same reasoning as every Douyu check-in.
+     *
+     * **What this cadence now also carries is the Platform's own lag**, and that is worth naming
+     * because the first sentence could be read as "nothing here is ever waiting on the cadence": a
+     * like run that stops because the counter has not kept up hands the day to the *next* run, so
+     * this interval is the gap in which the Platform books what it accepted. That gap is measured
+     * and it is generous: on 2026-10-09 a write at 20:51:05 was already reflected as `10/10` at
+     * 20:51:43 — **38 s**, the first measurement of this latency — while the same counter had moved
+     * 6 → 8 → 9 → 10 across the four runs between 20:36 and 20:56. Even the floor below (60 s) is
+     * past that lag, so the read the next run makes is of what actually landed, not of what was
+     * merely sent. A shorter cadence would fill the day faster and cost more requests against the
+     * Platform that is already behind; 300 s is kept, and the cost of keeping it is stated where it
+     * is spent.
      */
     defaultIntervalSeconds: 300,
     /** The same floor the other daily chores use; the like's own pacing is the room's `cooldown`. */
@@ -235,17 +247,26 @@ const ACTIONS: readonly ActionDescriptor[] = [
  * carries the liker's own uid, the other two because the viewing handshake signs with a device
  * cookie the live domain has to hand out and echoes two area ids the room payload has to carry —
  * and failing closed with a name for the gap beats sending a request with a made-up value in it.
- * `like_unfinished` is the one that is not a gap: the server accepted the likes and did not count
- * them, which is a fact worth surfacing. `watch_in_progress` is the opposite kind of state: nothing
+ * `like_unfinished` is the one that is not a gap: the server accepted the likes and its own counter
+ * had not caught up with them, which is a fact worth surfacing **and not a failure** — the four runs
+ * of 2026-10-09 were each reported `failed` for it while the counter was advancing behind them, and
+ * the day ended `任务已完成`. Its outcome is `blocked` for that reason (see `reconcileLikeDanmaku`), so the day stays
+ * open, the feed gets an 动作受阻 rather than an 动作失败, and the next run reads again.
+ * `watch_in_progress` is the opposite kind of state: nothing
  * is wrong at all, the slice simply ended before the day's watching was credited, and its name is
  * what separates "still going" from "stuck" in the event feed.
  *
  * 点亮粉丝牌's four are the same idea for a different chore. `medal_room_offline` is the *normal*
  * state of that action — an anchor nobody is watching is exactly when the like cannot be sent —
  * and it is a `blocked`, not a skip, so the sweep comes back. `medal_already_lit` and
- * `medal_relight_unconfirmed` split the two ways a medal can end a run still lit or still dark,
- * and the second one exists because `code: 0` is not evidence: the like was accepted and the
- * re-read disagreed. `not_account_scoped` is the odd one and is not about the Platform at all:
+ * `medal_relight_unconfirmed` split the two ways a medal can end a run still lit or still dark, and
+ * the second one exists because `code: 0` is not evidence: the like was accepted and the re-read did
+ * not show the medal lit. **It is `blocked` + `retry`, and that grading is a correction rather than a
+ * softening**: one read-back cannot tell "the Platform has not applied the write yet" from "the write
+ * was never counted", and on 2026-10-09 it was the first — the medal the 19:42 run reported as still
+ * dark was lit when the 19:47 run read the same list, so that failure was about a state nothing had
+ * observed. The day stays open on it, which is what lets the next read answer, and the sentence names
+ * only what this run read. `not_account_scoped` is the odd one and is not about the Platform at all:
  * it says this invocation is not the one that owns the work.
  */
 const LocalCode = {
@@ -687,8 +708,8 @@ async function reconcileAction(key: string, context: ReconcileContext, http: Bil
  *  - **The daily cap is per medal and level-dependent.** `sub_title` is `<claimed>/<limit>`,
  *    and the two observed points are level 1 → 1 and level 30 → 10. **The mapping between a
  *    medal's level and its cap is not established**, so nothing here may hold either the cap
- *    or the number of rounds it implies: the first read's `remainingRounds` is the loop's
- *    budget, and the re-read is what says whether to spend another round.
+ *    or the number of rounds it implies: the gate hands over the two numbers it read, and a
+ *    re-read is what says whether to spend another round.
  *  - **`is_done` is the only completion signal, and there is no partial progress.** A batch is
  *    either counted (the flag flips) or indistinguishable from a discarded one — one
  *    `click_time=1` told us nothing either way. So the only shapes are "send a whole batch"
@@ -697,8 +718,33 @@ async function reconcileAction(key: string, context: ReconcileContext, http: Bil
  * A round is therefore: read the gate (the panel and the room's like switches, judged by the pure
  * `likeGate`), send exactly one whole batch, and read again. The loop ends when a read says the
  * task is done — reported `already` — when the gate refuses, reported by its own reason, or when
- * the budget is spent, reported as a **failure**, because a server that took the likes without
- * counting them is exactly the kind of fact an event should raise.
+ * **the Platform's counter stops keeping up with what this run sent**, reported `blocked` with the
+ * Platform's own count in the sentence. That last exit is a measurement rather than a preference,
+ * and it is the correction of a real defect. The four runs of 2026-10-09, with the counter each
+ * next run read:
+ *
+ * ```
+ * 20:36:05  sent 10 rounds / 300 likes  → 20:41:05 read 6/10  → next run (budget 4) sent 120 more
+ * 20:41:05  sent  4 rounds / 120 likes  → 20:46:05 read 8/10  → next run (budget 2) sent  60 more
+ * 20:46:05  sent  2 rounds /  60 likes  → 20:51:05 read 9/10  → next run (budget 1) sent  30 more
+ * 20:51:05  sent  1 round  /  30 likes  → 20:56:05 read 10/10 and `is_done` → 任务已完成
+ * ```
+ *
+ * Four runs sent **420 likes against a 300-like daily cap**, and each reported `failed` for it while
+ * the counter was in fact advancing behind them: every write was booked, and the 20:51:05 round was
+ * readable as `10/10` **38 seconds** later — the first measurement of this latency. So all four
+ * verdicts were about a state the run could not yet see. Two things produced that, and the loop
+ * below is where each is fixed: the entry read's `remainingRounds` was frozen as the whole run's
+ * budget, so a run fired rounds the counter had not acknowledged; and the next run then re-sent the
+ * difference, which is how 420 went out for a cap of 300 — the surplus (14 rounds accepted, 10
+ * creditable) being likes that could never be credited whatever the Platform behind them did.
+ *
+ * What the fix costs is named where the check lives: against a Platform this far behind, a run
+ * spends one round and hands the day to the next sweep, so a level-30 medal (10 rounds) fills over
+ * ten sweeps instead of in one burst. That is the trade taken here on purpose — a repeated,
+ * unrecallable write against somebody else's counter is worse than ten minutes of patience — and the
+ * 38 s measurement is what keeps it from being a stall: every cadence this action allows (floor 60 s,
+ * default 300 s) is past the lag.
  *
  * The evidence behind each gate lives in `like.ts` and is not re-derived here; what this
  * function decides is only how each refusal is reported. `LikeRefusal` has five members and
@@ -767,12 +813,16 @@ async function reconcileLikeDanmaku(context: ReconcileContext, http: BiliHttp | 
     return likeRefusalOutcome(key, targetKey, reading.refusal)
   }
 
-  // The budget is the server's own number from the first read — how many rounds this medal's
-  // cap still owes — not a constant, and not a counter that survives to the next run.
-  const budget = reading.gate.remainingRounds
+  // **The Platform's own two numbers are the loop's whole budget, and they are re-read every
+  // round.** What this medal still owes comes from the panel, never from a local count — and the
+  // round just spent is priced by whether that number *moved*. `claimedAtLastRead` is the count as
+  // the last read saw it; `roundsAtLastRead` is how many rounds had been sent by then. Nothing here
+  // counts rounds on its own.
   let gate = reading.gate
   let rounds = 0
   let clicks = 0
+  let claimedAtLastRead = gate.claimed
+  let roundsAtLastRead = 0
 
   while (true) {
     // Between rounds only: the first request follows a read, and this is the room's own
@@ -818,18 +868,44 @@ async function reconcileLikeDanmaku(context: ReconcileContext, http: BiliHttp | 
 
     const again = await readLike(http, csrf, realRoomId, anchorId)
     if (again.kind === 'ready') {
-      if (rounds >= budget) {
-        return roomOutcome(
-          key,
-          targetKey,
-          'failed',
-          `${clickProgressOf(rounds, clicks)}服务端接受了这些点赞，但任务仍未标记完成，这一轮到此为止。`,
-          LocalCode.LikeUnfinished,
-          'retry'
-        )
+      // **The next round is bought with evidence, not with the entry read's number.** Another round
+      // goes out only when the Platform's counter has advanced by at least every round this run has
+      // sent since that read — i.e. it has kept up, so what is left really is still owed. Anything
+      // less means it has not booked what was already accepted, and firing again would send the same
+      // likes twice: on 2026-10-09 the 20:36 run sent 10 rounds / 300 likes in a few seconds against a
+      // counter that had moved 6, and the 20:41 / 20:46 / 20:51 runs re-sent the difference each time
+      // — 420 likes against a 300-like cap, of which the last 120 could never be credited.
+      //
+      // **Why stopping is not a stall, by measurement rather than by hope.** The lag is tens of
+      // seconds (a 20:51:05 write read back as `10/10` at 20:51:43, i.e. 38 s), so with a run
+      // stopping here the next read is past the lag by an order of magnitude at any cadence this
+      // action allows (floor 60 s, default 300 s) — the day fills one round per sweep instead of
+      // filling the whole cap in one burst and paying for it with repeats. The alternative, pacing
+      // the rounds inside one run with a settle wait, was rejected for the reason `reconcileWatchLive`
+      // gives about holding the serial sweep: ten rounds × the measured lag is minutes of every other
+      // task waiting behind this one.
+      //
+      // The loop's ceiling is therefore the Platform's own `limit` — exactly what the old entry
+      // `remainingRounds` was, and no new exposure — reached only while `claimed` strictly rises.
+      if (again.gate.claimed - claimedAtLastRead >= rounds - roundsAtLastRead) {
+        claimedAtLastRead = again.gate.claimed
+        roundsAtLastRead = rounds
+        gate = again.gate
+        continue
       }
-      gate = again.gate
-      continue
+      // Not a failure: nothing broke, the Platform is merely behind, and the day is left open for the
+      // read that can answer. The sentence carries the Platform's own two numbers, so a person can
+      // tell 「发出去的一半还没被认账」 from 「一轮都没发出去」.
+      return roomOutcome(
+        key,
+        targetKey,
+        'blocked',
+        `${clickProgressOf(rounds, clicks)}服务端接受了这些点赞，但计数只走到 ${String(
+          again.gate.claimed
+        )}/${String(again.gate.limit)}（这一轮的发出已经超过它认账的速度），这一轮到此为止；下一次运行再读一次。`,
+        LocalCode.LikeUnfinished,
+        'retry'
+      )
     }
 
     if (again.kind === 'unreadable') {
@@ -1190,11 +1266,30 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
  *
  * **Not a measurement**, and it is written down as what it is: the reference implementation also
  * waits before re-reading, and an immediate re-read can see a write the server has accepted but not
- * yet applied — which would be reported as *unconfirmed* and cost a second batch of likes on the
- * next sweep. One second, once per run (never once per medal), is a floor on this run's patience
- * rather than a claim about the server. A run that had nothing to light does not wait at all.
+ * yet applied — which is the unconfirmed state `confirmRelight` reports as such, at the price of
+ * another batch of likes on the next sweep. One second, once per run (never once per medal), is a
+ * floor on this run's patience rather than a claim about the server.
+ *
+ * **And it is deliberately not longer.** The measurement of 2026-10-09 had that write reflected
+ * somewhere inside the five minutes between two sweeps, so no wait this run could afford would settle
+ * the question — a minute here would still report the medal unconfirmed, while holding the serial
+ * sweep that every other task is waiting behind. What resolves it is the next sweep, which is where
+ * the action already goes. A run that had nothing to light does not wait at all.
  */
 const RELIGHT_CONFIRM_DELAY_MS = 1_000
+
+/**
+ * 回读没反映过来时，那一枚牌子的行读这一句 —— 记不住的时候，只有这一句话可以说。
+ *
+ * **It states the observation and the limit of it, and nothing else**, because that is all one
+ * read-back supports: the like was accepted, the read taken this long afterwards still showed the
+ * medal dark, and *this* run cannot tell "the Platform has not applied it yet" from "it was never
+ * counted". Neither a failure nor a success may be claimed from that, so the sentence claims
+ * neither, and the seconds come from the delay the read actually waited rather than from prose.
+ */
+const RELIGHT_UNCONFIRMED_DETAIL = `点赞已发出、${String(
+  RELIGHT_CONFIRM_DELAY_MS / 1_000
+)} 秒后回读仍是熄灭（这一轮分不出「平台还没反映」和「根本没计入」，下一次运行再读）`
 
 /**
  * 点亮粉丝牌 (relight_medal) — re-light every dark 粉丝牌 the account holds, waiting for anchors
@@ -1241,7 +1336,10 @@ const RELIGHT_CONFIRM_DELAY_MS = 1_000
  *    all). So one batch per medal per run, and the re-read decides.
  *  - **`is_lighted` is read back before anything is called lit.** `code: 0` is not evidence: the
  *    reference implementation waits and re-reads too, and this project has been burned by treating an
- *    accepted request as a settled one.
+ *    accepted request as a settled one. **And the read-back that says "still dark" is not evidence
+ *    either** — the 2026-10-09 measurement has the like reflected minutes later, so that answer is
+ *    reported as unconfirmed rather than as a failed like. See `confirmRelight` for the three answers
+ *    a read-back can give and what each one costs.
  *  - **When no dark medal's anchor is live the run reports `blocked`**, never `skipped`. `blocked` is
  *    one of the two outcomes `runner.ts` refuses to count as a settled day, so the next sweep tries
  *    again and the window is caught whenever it opens; `skipped` would mark the day done and silently
@@ -1255,8 +1353,8 @@ const RELIGHT_CONFIRM_DELAY_MS = 1_000
  * between messages) one medal takes 100 s, so a run that walked all of them would hold the serial
  * sweep for the better part of an hour. A fallback of that shape is its own design, not a rider on
  * this one. So this action sends **no danmaku at all** — it says in its description what that route
- * costs (so the cost is visible before anyone switches it on), and when a like fails to light a medal
- * it names that route on the console line and leaves it there. Nothing public is ever sent.
+ * costs (so the cost is visible before anyone switches it on), and when a run ends with a medal still
+ * dark it names that route on the console line and leaves it there. Nothing public is ever sent.
  *
  * **It runs only from the task that names it, and the reason for that guard has changed while the
  * guard stayed.** This action discovers its own rooms by account, so being invoked for a *target*
@@ -1364,7 +1462,7 @@ async function reconcileRelightMedal(context: ReconcileContext, http: BiliHttp |
 
   if (toLight.length === 0) {
     // Nothing to act on, so the first read is the whole answer: no wait, no re-read, no write.
-    return medalWalkOutcome(key, subjects, new Set(), new Map())
+    return medalWalkOutcome(key, subjects, NOTHING_READ_BACK, new Map())
   }
 
   const csrf = http.cookies.csrfToken
@@ -1422,32 +1520,64 @@ async function reconcileRelightMedal(context: ReconcileContext, http: BiliHttp |
     context.log(`点亮粉丝牌「${subject.label}（房间 ${String(subject.roomId)}）」：点赞已发出，回读确认`)
   }
 
-  const confirmed = await confirmRelight(context, http, toLight, failures)
-  return medalWalkOutcome(key, subjects, confirmed, failures)
+  const readback = await confirmRelight(context, http, toLight, failures)
+  return medalWalkOutcome(key, subjects, readback, failures)
 }
 
 /**
- * 回读一次 `is_lighted`，把「已发出」和「已点亮」分开。
+ * One read-back's answer, split in two.
  *
- * `code: 0` 不是证据，所以这次读是这条动作唯一的完成判据 —— 还熄着的记**失败**（判重试），因为
- * 一次点赞没能点亮它这件事值得再来一轮。
+ * **One interface rather than two parameters, because the two are one read's result**: they are built
+ * from the same list at the same instant, and a caller that took one without the other would be
+ * reading a state the Platform never reported. `confirmed` is what that list showed lit; `unconfirmed`
+ * is what this run liked and the list did **not** show lit. A medal in neither was not attempted by
+ * this run — its anchor is offline — or its like never reached the Platform and is in `failures`
+ * instead.
+ */
+interface RelightReadback {
+  readonly confirmed: ReadonlySet<number>
+  readonly unconfirmed: ReadonlySet<number>
+}
+
+/**
+ * The read-back of a run that sent nothing: no like, so nothing to confirm or leave unconfirmed.
  *
- * 回读自己失败时，这一轮已经发出去的点赞就都确认不了，于是它们全部记为失败并带上回读的原因：
- * 半份答案不许当成功用，这条理由和「`code: 0` 不算数」是同一条。
+ * A constant rather than two empty sets written at each call site, because "this run wrote nothing"
+ * is one fact, and two `new Set()`s side by side read like two.
+ */
+const NOTHING_READ_BACK: RelightReadback = { confirmed: new Set(), unconfirmed: new Set() }
+
+/**
+ * 回读一次 `is_lighted`，把三件事分开：**已点亮**、**还没反映**、**读不回来**。
+ *
+ * `code: 0` is not evidence, so this read is the action's only completion criterion — and the three
+ * answers are deliberately three, because they are three different facts with three different fates:
+ *
+ *  - **Read, and lit → confirmed.** The only thing that lets a medal be called done.
+ *  - **Read, and still dark → unconfirmed.** This is *not* a failed like, and the owner's own evening
+ *    is what settled it: the 19:42 run reported 「点赞已发出、回读时粉丝牌仍是熄灭」 as a failure, and
+ *    the 19:47 run read the same list with that medal lit (原已点亮 2 → 3). The like had worked; the
+ *    sentence was about a state nothing had observed. One read cannot tell "the Platform has not
+ *    reflected the write yet" from "the write was never counted", so what leaves this function is the
+ *    observation — and `medalWalkOutcome` grades it `blocked` + `retry`, which keeps the day open for
+ *    the read that can answer.
+ *  - **Could not be read → failures, with the read's own code.** Half an answer is never used as a
+ *    success, for the same reason `code: 0` is not evidence. Its sibling is a like the Platform
+ *    *refused*: that one was already in `failures` before this read, and it is never re-read.
  */
 async function confirmRelight(
   context: ReconcileContext,
   http: BiliHttp,
   toLight: readonly MedalSubject[],
   failures: Map<number, MedalFailure>
-): Promise<ReadonlySet<number>> {
+): Promise<RelightReadback> {
   await sleep(RELIGHT_CONFIRM_DELAY_MS)
 
   const againRead = await readGraded('点亮后回读', () => fetchMedalPanel(http))
   if (!againRead.ok) {
     context.log(`点亮粉丝牌：回读失败（code ${againRead.code}），这一轮发出的点赞都没能确认`)
     markUnconfirmed(toLight, failures, againRead.code, `点赞已发出、${againRead.detail}`, 'retry')
-    return new Set()
+    return NOTHING_READ_BACK
   }
 
   const again = againRead.value
@@ -1462,7 +1592,7 @@ async function confirmRelight(
       `点赞已发出、回读失败：${again.error}`,
       again.code === SendDanmakuCode.NotLoggedIn ? 'account_stop' : 'retry'
     )
-    return new Set()
+    return NOTHING_READ_BACK
   }
 
   const confirmed = new Set<number>()
@@ -1470,20 +1600,21 @@ async function confirmRelight(
     if (item.medal.is_lighted !== 0) confirmed.add(item.medal.target_id)
   }
 
+  // The medals this run liked and this read did not see lit. Nothing is written about them here: the
+  // sentence and the grade belong to the item, so that the record's line and the item's line cannot
+  // disagree about the same medal. See the note above for why this is not a failure.
+  const unconfirmed = new Set<number>()
   for (const subject of toLight) {
     if (confirmed.has(subject.anchorId) || failures.has(subject.anchorId)) continue
-    failures.set(subject.anchorId, {
-      label: subject.label,
-      code: LocalCode.RelightUnconfirmed,
-      detail: '点赞已发出、回读时粉丝牌仍是熄灭',
-      classification: 'retry'
-    })
+    unconfirmed.add(subject.anchorId)
   }
 
   // The one place the other lighting route is ever mentioned, and only to say it is not taken: ten
   // public messages into somebody else's room is a person's decision, not this action's fallback.
   // Said only here because this is the one branch that *knows* those medals are still dark — the two
-  // reads that failed above know no such thing and say so instead. See the note on the action.
+  // reads that failed above know no such thing and say so instead. The count is every medal this run
+  // has not seen lit: a refused like is in it too, since that list said dark for it as well. See the
+  // note on the action.
   const stillDark = toLight.filter(subject => !confirmed.has(subject.anchorId))
   if (stillDark.length > 0) {
     context.log(
@@ -1491,7 +1622,7 @@ async function confirmRelight(
     )
   }
 
-  return confirmed
+  return { confirmed, unconfirmed }
 }
 
 /** 回读失败时，这一轮发出的点赞全部记为「确认不了」，并带上回读的原因与它自己的分级。 */
@@ -1542,12 +1673,15 @@ interface MedalFailure {
  * **「不计亲密度」 is written into the lit one and is not decoration.** Both of a dark medal's rows
  * have an empty `add_text` (measured), so a run that lit twelve medals says nothing whatever about
  * tonight's 亲密度 — and a row reading only 「已点亮」 would let a reader assume it did.
+ *
+ * **An unconfirmed medal is `blocked`, and it is neither of the two neighbours it sits between.** It
+ * is not `done`: nothing saw it lit. It is not `failed` either — the like was accepted and the only
+ * thing that disagrees is a read taken one second later, which is the measurement of 2026-10-09's own
+ * shape (see `confirmRelight`). `blocked` is the codebase's word for exactly that: something this run
+ * could not settle, expected back on a later sweep, with `retry` on the record so no alarm fires for
+ * a Platform that is merely behind.
  */
-function medalItemOf(
-  subject: MedalSubject,
-  confirmed: ReadonlySet<number>,
-  failure: MedalFailure | undefined
-): ActionItem {
+function medalItemOf(subject: MedalSubject, readback: RelightReadback, failure: MedalFailure | undefined): ActionItem {
   if (failure !== undefined) {
     return { kind: 'room', label: subject.label, outcome: 'failed', detail: failure.detail, code: failure.code }
   }
@@ -1561,13 +1695,22 @@ function medalItemOf(
       code: LocalCode.MedalAlreadyLit
     }
   }
-  if (confirmed.has(subject.anchorId)) {
+  if (readback.confirmed.has(subject.anchorId)) {
     return {
       kind: 'room',
       label: subject.label,
       outcome: 'done',
       detail: '已点亮（回读确认）、不计亲密度',
       code: String(SendDanmakuCode.Ok)
+    }
+  }
+  if (readback.unconfirmed.has(subject.anchorId)) {
+    return {
+      kind: 'room',
+      label: subject.label,
+      outcome: 'blocked',
+      detail: RELIGHT_UNCONFIRMED_DETAIL,
+      code: LocalCode.RelightUnconfirmed
     }
   }
   return {
@@ -1582,35 +1725,50 @@ function medalItemOf(
 /**
  * One whole walk, collapsed into the single record the action log keeps.
  *
- * The order below is the part that matters, and both of its choices are deliberate:
+ * The order below is the part that matters, and its choices are deliberate:
  *
  *  1. **A failure is reported as a failure** (the worst one), however many medals were lit: a refused
- *     like is something broken, and it deserves the event that `failed` raises.
- *  2. **Anything still waiting for an anchor outranks `done`.** `done` settles the day, and a day
+ *     like, or a read that never came back, is something broken, and it deserves the event that
+ *     `failed` raises.
+ *  2. **An unconfirmed medal outranks `done` and the offline ones**, and it is `blocked` + `retry`
+ *     rather than `failed`. Nothing is broken and nothing was settled: the write was accepted and the
+ *     read one second later had not seen it, which is a state the next sweep's read answers. Grading
+ *     it `failed` is what produced the owner's false line on 2026-10-09 (see `confirmRelight`), and
+ *     grading it settled would call a still-dark medal lit — the one mistake this action exists to
+ *     avoid. `failed` + `retry` and `blocked` + `retry` cost the same in likes; they differ in what
+ *     they assert.
+ *  3. **Anything still waiting for an anchor outranks `done`.** `done` settles the day, and a day
  *     settled with 21 medals still dark is a day whose windows are thrown away. That is the other half
  *     of "never `skipped`".
- *  3. Only a walk that left nothing behind is `done`; a walk that found everything already lit is
+ *  4. Only a walk that left nothing behind is `done`; a walk that found everything already lit is
  *     `already` and parks with `action_stop`, the same way its two neighbours do.
  *
  * The counts are taken **from the items themselves**, so the record's own line cannot disagree with the
- * rows underneath it. The items travel untouched, which is what makes "the record's verdict is one its
- * items recognise" true by construction rather than by assertion.
+ * rows underneath it — including the two kinds of `blocked`, which are counted by the code that named
+ * them because the counts line has to add up to the medals it lists. The items travel untouched, which
+ * is what makes "the record's verdict is one its items recognise" true by construction rather than by
+ * assertion.
  */
 function medalWalkOutcome(
   actionKey: string,
   subjects: readonly MedalSubject[],
-  confirmed: ReadonlySet<number>,
+  readback: RelightReadback,
   failures: ReadonlyMap<number, MedalFailure>
 ): ActionOutcome {
-  const items = subjects.map(subject => medalItemOf(subject, confirmed, failures.get(subject.anchorId)))
+  const items = subjects.map(subject => medalItemOf(subject, readback, failures.get(subject.anchorId)))
   const countOf = (outcome: ActionOutcomeValue): number => items.filter(item => item.outcome === outcome).length
+  const countOfCode = (code: string): number => items.filter(item => item.code === code).length
 
   // 「点亮不计亲密度」在这条记录自己的那一行里也说一次：这一行是很多人唯一会读的一行，而点亮这件事
   // 确实一点都不产亲密度（熄灭牌子的两条任务 `add_text` 都是空的），说了才不会被读成「加了」。
   const lit = countOf('done')
+  const unconfirmed = items.filter(item => item.code === LocalCode.RelightUnconfirmed)
+  const [firstUnconfirmed] = unconfirmed
+  // 未确认单独数一列：它和「等开播」都是 `blocked`，但一个是「发出去还没反映」、一个是「一个请求都没
+  // 发」—— 一列里混着两件事的那张表，读的人没法从它上面知道今晚到底动了几个手。
   const counts =
-    `${lit === 0 ? '点亮 0' : `点亮 ${String(lit)}（不计亲密度）`}、等开播 ${String(countOf('blocked'))}、` +
-    `原已点亮 ${String(countOf('already'))}（共 ${String(items.length)} 枚粉丝牌）`
+    `${lit === 0 ? '点亮 0' : `点亮 ${String(lit)}（不计亲密度）`}、未确认 ${String(unconfirmed.length)}、` +
+    `等开播 ${String(countOfCode(LocalCode.MedalRoomOffline))}、原已点亮 ${String(countOf('already'))}（共 ${String(items.length)} 枚粉丝牌）`
 
   let worst: MedalFailure | null = null
   for (const failure of failures.values()) {
@@ -1630,7 +1788,20 @@ function medalWalkOutcome(
       items
     }
   }
-  if (countOf('blocked') > 0) {
+  if (firstUnconfirmed !== undefined) {
+    // The clause is built from the item, the way the failure branch's is built from `worst` — so the
+    // sentence names the medal it is about by the row the reader can find underneath it.
+    return {
+      actionKey,
+      targetKey: TARGET_KEY_ACCOUNT_SCOPED,
+      outcome: 'blocked',
+      code: LocalCode.RelightUnconfirmed,
+      detail: `${counts}；「${firstUnconfirmed.label}」${firstUnconfirmed.detail}`,
+      failure: 'retry',
+      items
+    }
+  }
+  if (countOfCode(LocalCode.MedalRoomOffline) > 0) {
     return {
       actionKey,
       targetKey: TARGET_KEY_ACCOUNT_SCOPED,

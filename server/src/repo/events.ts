@@ -55,6 +55,16 @@ export const EventKind = {
 } as const
 export type EventKind = (typeof EventKind)[keyof typeof EventKind]
 
+/**
+ * The kinds that name themselves, i.e. every one but `Other`.
+ *
+ * The complement is the point, and it is why this exists instead of a `kind = 'other'` comparison:
+ * `toKind` reads every stored value it does not recognise as `Other`, so "the rows the page labels
+ * 「未知事件」" is `kind NOT IN (these)`. A row that literally stored the word is in that bucket as
+ * well, which is the same rule read from the other side.
+ */
+const NAMED_KINDS = Object.values(EventKind).filter(kind => kind !== EventKind.Other)
+
 export const EventSeverity = {
   Info: 'info',
   Warning: 'warning',
@@ -198,11 +208,72 @@ export function listEventsSince(db: DatabaseSync, userId: number, sinceId: numbe
   return rows.map(toEvent)
 }
 
-/** Newest first, for the in-app activity list. */
-export function listRecentEvents(db: DatabaseSync, userId: number, limit = 50): SystemEvent[] {
-  const rows = db
-    .prepare('SELECT * FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?')
-    .all(userId, Math.max(1, Math.min(limit, 200)))
+/** Bind markers for `count` values: `?, ?, ?`. */
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(', ')
+}
+
+/**
+ * The SQL that keeps only the kinds a caller asked for, and the values it binds.
+ *
+ * **`Other` is a bucket rather than a word, and it is the one case a plain list cannot express.**
+ * `toKind` reads every stored value this build does not recognise as `Other`, so a filter naming
+ * `Other` has to match those rows too; `kind IN ('other')` would match only a row that literally
+ * stored the word — the same mistake, in reverse, that `toKind` exists to avoid. Selecting `Other`
+ * *and* a named kind is therefore two conditions rather than one longer list.
+ *
+ * Values are bound, never interpolated: the only text this builds is `?` and the column name.
+ *
+ * Never called with an empty list — that request is answered before this point, because `IN ()` is
+ * not SQL.
+ */
+function kindFilter(kinds: readonly EventKind[]): { readonly sql: string; readonly params: readonly string[] } {
+  const named = kinds.filter(kind => kind !== EventKind.Other)
+  const conditions: string[] = []
+  const params: string[] = []
+
+  if (named.length > 0) {
+    conditions.push(`kind IN (${placeholders(named.length)})`)
+    params.push(...named)
+  }
+  if (kinds.includes(EventKind.Other)) {
+    conditions.push(`kind NOT IN (${placeholders(NAMED_KINDS.length)})`)
+    params.push(...NAMED_KINDS)
+  }
+
+  return { sql: conditions.join(' OR '), params }
+}
+
+/**
+ * Newest first, for the in-app activity list.
+ *
+ * `kinds` is the page's own filter and nobody else's. An absent one means **no filter at all**,
+ * which is what every caller that predates this parameter asks for; an **empty list is a caller
+ * asking for nothing**, which is an owner who unticked every box. The two are kept apart on
+ * purpose — answering the second with the whole feed would show him exactly the noise he just
+ * hid — and an empty list cannot reach the SQL below, where `IN ()` would not parse.
+ *
+ * **The filter belongs in the query rather than over its result.** `IntegrationsView` keeps the
+ * newest `limit` rows, so filtering the fifty it happened to fetch would let a hidden kind consume
+ * a place in that window: the feed would look short, or empty, while the rows the owner wants sat
+ * immediately behind them.
+ */
+export function listRecentEvents(
+  db: DatabaseSync,
+  userId: number,
+  limit = 50,
+  kinds?: readonly EventKind[]
+): SystemEvent[] {
+  if (kinds !== undefined && kinds.length === 0) return []
+
+  const filter = kinds === undefined ? null : kindFilter(kinds)
+  const size = Math.max(1, Math.min(limit, 200))
+  const rows =
+    filter === null
+      ? db.prepare('SELECT * FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, size)
+      : db
+          .prepare(`SELECT * FROM events WHERE user_id = ? AND (${filter.sql}) ORDER BY id DESC LIMIT ?`)
+          .all(userId, ...filter.params, size)
   return rows.map(toEvent)
 }
 

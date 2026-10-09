@@ -1,9 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { closeDatabase, openDatabase } from '../src/db/index.js'
 import { ACTIVITY_SIGN_SUCCESS, classifyError } from '../src/platform/douyu/errors.js'
 import { douyuPlatform } from '../src/platform/douyu/index.js'
+import { GROWTH_POOL_ALREADY_CLOCKED } from '../src/platform/douyu/protocol.js'
+import { startOfPlatformDay } from '../src/platform/time.js'
 import type { ActionOutcome, PlatformAccount } from '../src/platform/types.js'
+import { appendActionLog, settledActionKeysSince } from '../src/repo/action-logs.js'
 import { ActionKey } from '../src/repo/tasks.js'
 
 /**
@@ -122,6 +126,17 @@ const MEASURED_POOL = { ywTotal: 38400, joinTotal: 192, clockLeftTime: 107999 }
 const BEFORE_CHECK_IN = { signStatus: 1, ywTotal: 884800, joinTotal: 4424 }
 const AFTER_CHECK_IN = { signStatus: 0, ywTotal: 78400, joinTotal: 392 }
 const AFTER_JOIN = { ywTotal: 78800, joinTotal: 394 }
+
+/**
+ * The latch the two `57004` runs of 2026-10-09 19:45 and 19:50 read, verbatim.
+ *
+ * `signStatus` is still `1` — 已报名 for a round — which is why those runs reached the check-in half
+ * at all, and the pool pair is a **different round's** entries rather than the `884800`/`4424` that
+ * tonight's check-in closed out. Together with the `0` that same call answered at 19:00:20, this is
+ * the whole state that explains the code: a latch saying the account is in a round, and a check-in
+ * that had already landed for today.
+ */
+const ALREADY_CLOCKED_STATE = { signStatus: 1, ywTotal: 596400, joinTotal: 2982 }
 
 /**
  * The one `doSign` body this repo holds from the service, verbatim.
@@ -245,6 +260,51 @@ async function outcomeOf(enabledActions: readonly string[], now: number): Promis
   const found = (await reconcile(enabledActions, now)).find(outcome => outcome.actionKey === enabledActions[0])
   if (found === undefined) throw new Error(`no outcome for ${String(enabledActions[0])}`)
   return found
+}
+
+/**
+ * Whether `runner.ts`'s `settledToday` would stop asking about this outcome for the rest of the day.
+ *
+ * Written through the two real functions instead of as a list of outcome names repeated here:
+ * `settledToday` is `settledActionKeysSince` over a Platform-day range, and that query judges every
+ * stored row through `repo/action-logs.ts`'s own settled set. So this is the chain the sweep reads —
+ * one write, one query — and an outcome outside that set answers `false` here.
+ *
+ * The three parent rows are written as rows, the way `action-logs.test.ts`'s own `seed` writes them:
+ * `action_logs.task_id` has a foreign key, and the repositories that would build these want a user,
+ * an account and a Task behind them. This file drives the wire; the subject here is one outcome value.
+ */
+function settledForTheDay(outcome: ActionOutcome, now: number): boolean {
+  const db = openDatabase(':memory:')
+  try {
+    db.prepare("INSERT INTO users (username, password_hash, created_at, updated_at) VALUES ('tester', 'x', 0, 0)").run()
+    db.prepare(
+      `INSERT INTO accounts (user_id, platform, external_id, display_name, avatar, credentials, meta, created_at, updated_at)
+       VALUES (1, 'douyu', '456918967', '', '', '{}', '{}', 0, 0)`
+    ).run()
+    db.prepare(
+      `INSERT INTO tasks (
+         id, user_id, platform, account_id, library_id, action, action_key, target_key, target_title,
+         start_time, end_time, interval, status, created_at, updated_at
+       ) VALUES (1, 1, 'douyu', 1, NULL, 'reconcile', 'growth_pool', '', '', 0, 86400000, 86400, 'running', 0, 0)`
+    ).run()
+    appendActionLog(
+      db,
+      {
+        taskId: 1,
+        actionKey: outcome.actionKey,
+        targetKey: outcome.targetKey,
+        outcome: outcome.outcome,
+        detail: outcome.detail,
+        code: outcome.code,
+        items: outcome.items
+      },
+      now
+    )
+    return settledActionKeysSince(db, 1, startOfPlatformDay(now)).includes(outcome.actionKey)
+  } finally {
+    closeDatabase()
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -481,6 +541,32 @@ describe('打卡分鱼丸 at the wire', () => {
     expect(outcome.failure).not.toBe('action_stop')
     expect(outcome.detail).toContain('下一次运行再试')
     expect(outcome.detail).not.toContain('需要重新绑定')
+  })
+
+  it('takes 57004 as today’s card already in place, and settles the day on it', async () => {
+    // 2026-10-09 19:45 and 19:50, the owner's own runs: the check-in had landed at 19:00:20, the
+    // latch still said 已报名, and `clockSignActivity` answered this — with an empty `msg`, twice.
+    script.poolStatus = { json: { error: 0, data: ALREADY_CLOCKED_STATE, msg: '' } }
+    script.clock = { json: { error: GROWTH_POOL_ALREADY_CLOCKED, msg: '' } }
+
+    const outcome = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+
+    expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    // 业主读到的那一句是「打卡失败」，而这一天是打过的 —— 一句话讲一个代码没观察到的状态。
+    // `already` 是这份记录里「今天的义务已经履行」的那个取值（客户端签到、活动签到、鱼丸都用它）。
+    expect(outcome).toMatchObject({
+      outcome: 'already',
+      code: String(GROWTH_POOL_ALREADY_CLOCKED),
+      failure: 'action_stop'
+    })
+    expect(outcome.detail).toContain('已打卡')
+    expect(outcome.detail).not.toContain('打卡失败')
+    // 一个写请求都没有：这一趟是读出来「已经打过」，不是再打一次。
+    expect(sentTo(POOL_JOIN_PATH)).toHaveLength(0)
+    expect(sentTo(CSRF_PATH)).toHaveLength(1)
+    // 而这一天真的停下来了：`already` 在落定的三个取值里，所以 `runner.ts` 的 `settledToday` 从下一轮
+    // 起不再问这条动作 —— 否则它会每隔一轮报一次「失败」到当晚结束，而什么都没坏。
+    expect(settledForTheDay(outcome, INSIDE_CLOCK_WINDOW)).toBe(true)
   })
 
   it('re-offers 报名 on the next run, because the check-in clears the latch', async () => {

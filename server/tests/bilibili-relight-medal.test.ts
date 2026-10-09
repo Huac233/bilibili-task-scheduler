@@ -54,6 +54,9 @@ interface CapturedMedal {
   readonly roomId: number
 }
 
+/** 业主那一晚回读没确认的那一枚（§3.4 那张表的第 8 行）。 */
+const BACK_2_THE_MOON: CapturedMedal = { targetId: 503_235_511, name: 'Back_2The_Moon', level: 8, roomId: 24_472_839 }
+
 /** §3.4：24 枚熄灭的牌子，顺序也照那张表。 */
 const DARK_MEDALS: readonly CapturedMedal[] = [
   { targetId: 5_012_449, name: '小圈宝', level: 21, roomId: 6_107_929 },
@@ -61,7 +64,8 @@ const DARK_MEDALS: readonly CapturedMedal[] = [
   { targetId: 8_599_153, name: '喵仙人ovo', level: 14, roomId: 238_736 },
   { targetId: 355_071_645, name: 'BLG_whzy', level: 11, roomId: 25_277_646 },
   { targetId: 191_205_009, name: '春日影゙', level: 10, roomId: 26_509_279 },
-  { targetId: 503_235_511, name: 'Back_2The_Moon', level: 8, roomId: 24_472_839 },
+  BACK_2_THE_MOON,
+  { targetId: 14_861_191, name: '电刑Valentine', level: 7, roomId: 1_225_000 },
   { targetId: 14_861_191, name: '电刑Valentine', level: 7, roomId: 1_225_000 },
   { targetId: 13_557_341, name: '黑灵灵灵灵', level: 7, roomId: 209_929 },
   { targetId: 867_152, name: '蕾蕾大表哥', level: 7, roomId: 81_414 },
@@ -108,10 +112,37 @@ interface FakeBili {
   readonly live: Set<number>
   /** 点赞认不认账：`false` 用来演「`code: 0` 但服务端没计入」。 */
   countsLikes: boolean
+  /**
+   * 「平台记下了、列表这一刻还没反映」—— **业主 2026-10-09 那一晚的形状**：19:42 发出的那一下点赞到
+   * 19:47 那一轮才在列表里看得见（`原已点亮` 2 → 3）。
+   *
+   * 置上之后点赞进 `pending`，不碰 `lit`：`settleLikes()` 是那五分钟过去这件事，也就是「两个 sweep
+   * 之间，平台把已经接受的写反映出来了」。它和 `countsLikes` 不同时用。
+   */
+  lagLikes: boolean
+  /** 已接受、还没反映出来的那些 `target_id`。只有 `settleLikes()` 会把它们挪进 `lit`。 */
+  readonly pending: Set<number>
 }
 
 function newFake(): FakeBili {
-  return { lit: new Set([LIT_XIAOMEI.targetId, LIT_MINGJU.targetId]), live: new Set(), countsLikes: true }
+  return {
+    lit: new Set([LIT_XIAOMEI.targetId, LIT_MINGJU.targetId]),
+    live: new Set(),
+    countsLikes: true,
+    lagLikes: false,
+    pending: new Set()
+  }
+}
+
+/**
+ * 平台把这段时间里接受的点赞反映出来 —— 两次运行之间过掉的那五分钟，不是本实现的一次本地记账。
+ *
+ * 它是测试这边的一个动作，因为真假在这里的分界正是**时间**：同一份列表读，早五分钟是熄灭、晚五分钟是
+ * 点亮，而动作本身对这两次读说不出区别。业主那一晚就是这个差。
+ */
+function settleLikes(): void {
+  for (const anchorId of server.pending) server.lit.add(anchorId)
+  server.pending.clear()
 }
 
 /** 一行面板。未声明的键（`medal` 的另外十一个、`room_info.url`）留着，正是为了证明它们会被 zod 丢掉。 */
@@ -242,10 +273,15 @@ const LIKE_OK = { code: 0, message: 'OK', ttl: 1, data: {} }
 
 /**
  * 点赞：**服务端的状态唯一在这里改变**。认账就是把那枚牌子点亮；`countsLikes` 关掉时只回 `code: 0`
- * 而什么都不改 —— 那正是「`code: 0` 不是证据」这个用例要的形状。
+ * 而什么都不改 —— 那正是「`code: 0` 不是证据」这个用例要的形状；`lagLikes` 打开时记进 `pending`，
+ * 也就是「记下了，但列表还没反映」。
  */
 const likeRoute: Route = request => {
-  if (server.countsLikes) server.lit.add(Number(new URL(request.url).searchParams.get('anchor_id')))
+  const anchorId = Number(new URL(request.url).searchParams.get('anchor_id'))
+  // `lagLikes` 优先：两者同时置上是本文件的构造错误，而「还没反映」是要演的那一个 —— 它比「当场认账」
+  // 更接近真实的服务端，所以出问题时应该看见的是它那一侧的行为。
+  if (server.lagLikes) server.pending.add(anchorId)
+  else if (server.countsLikes) server.lit.add(anchorId)
   return LIKE_OK
 }
 
@@ -570,7 +606,7 @@ describe('点亮', () => {
     for (const medal of DARK_MEDALS) expect(likesForRoom(medal.roomId)).toHaveLength(1)
   })
 
-  it('`code: 0` 不是证据：回读仍是熄灭时记失败，不记点亮', async () => {
+  it('`code: 0` 不是证据：回读没反映过来时记「未确认」，不记点亮、也不记失败', async () => {
     server.live.add(5_012_449)
     server.countsLikes = false
 
@@ -580,15 +616,57 @@ describe('点亮', () => {
     // 回读真的发生了（两次整份读）。
     expect(pagesRead()).toEqual([1, 2, 3, 1, 2, 3])
 
-    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'medal_relight_unconfirmed' })
+    // 「点赞被拒」和「平台还没反映」在**这一次**读里长得一模一样，所以这一轮不许挑一个来说：它只能说它
+    // 读到的那件事。`blocked` 是这份记录里「不落定、下一轮再来」的那个取值 —— 当天没有被判成做完（那会
+    // 把一枚熄着的牌子当成点亮），也没有被判成失败（那是业主那晚读到的、它没有挣到的那句话）。
+    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'retry', code: 'medal_relight_unconfirmed' })
     const row = itemOf(outcome, '小圈宝')
-    expect(row).toMatchObject({ outcome: 'failed', code: 'medal_relight_unconfirmed' })
+    expect(row).toMatchObject({ outcome: 'blocked', code: 'medal_relight_unconfirmed' })
     expect(row.detail).toContain('仍是熄灭')
-    // 失败的那一枚进了记录自己的那句话，点得出是哪一枚。
+    // 未确认的那一枚单独数出来：它既不是「等开播」（那几枚一个请求都没发），也不是「点亮」。
+    expect(outcome.detail).toContain('未确认 1')
+    // 这一句点得出是哪一枚。
     expect(outcome.detail).toContain('「小圈宝」')
+    expect(outcome.detail).not.toContain('失败')
     // 剩下那条路只被说出来，不被走。
     expect(logs.join('\n')).toContain('本动作不发')
     expect(requestsTo(MSG_SEND_URL)).toEqual([])
+  })
+
+  it('业主那一晚：第一次回读时平台还没反映，这一轮不许说「失败」，下一轮读到它已经亮着', async () => {
+    // 2026-10-09 19:42:14 那一轮报的是「失败」，而 19:47:14 那一轮里「原已点亮」从 2 变成了 3 —— 那一下
+    // 点赞是成的，所以前一轮报的是一个它没有挣到的失败（业主自己那句话：「估计是回读太快了」）。
+    // 这个夹具就是那五分钟：平台记下了那次点赞，列表这一刻还没反映，`settleLikes()` 才反映出来。
+    server.live.add(BACK_2_THE_MOON.targetId)
+    server.lagLikes = true
+
+    const first = await runRelight()
+
+    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(1)
+    expect(pagesRead()).toEqual([1, 2, 3, 1, 2, 3])
+    // 读两次、等一次，等的还是那 1 秒：这一轮没有为了让平台反映过来而把 sweep 堵在这里。
+    expect(sleptMs()).toHaveLength(1)
+    expect(first).toMatchObject({ outcome: 'blocked', code: 'medal_relight_unconfirmed', failure: 'retry' })
+    expect(itemOf(first, 'Back_2The_Moon')).toMatchObject({
+      outcome: 'blocked',
+      code: 'medal_relight_unconfirmed'
+    })
+    // 这一句里的每一件都是这一轮读到过的东西：点赞发出去了、1 秒后的回读还是熄灭。
+    expect(first.detail).toContain('1 秒后回读仍是熄灭')
+    expect(first.detail).toContain('原已点亮 2')
+    expect(first.detail).not.toContain('失败')
+
+    // 五分钟后的下一轮：平台已经反映，那一枚第一次读就是亮着的 —— 业主看到的「原已点亮 3」。
+    settleLikes()
+    const second = await runRelight()
+
+    // 没有第二次点赞：第一次那一下就把它点亮了，这一轮只是读到了它。
+    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(1)
+    expect(sleptMs()).toHaveLength(1)
+    expect(itemOf(second, 'Back_2The_Moon').outcome).toBe('already')
+    expect(second).toMatchObject({ outcome: 'blocked', code: 'medal_room_offline', failure: 'none' })
+    expect(second.detail).toContain('原已点亮 3')
+    expect(second.detail).not.toContain('失败')
   })
 
   it('回读失败时也不许当成功：这一轮发出的点赞全部记为确认不了', async () => {
@@ -774,6 +852,15 @@ describe('每条记录都被自己的 item 认得出', () => {
 
   it('列表读失败时一致', async () => {
     withRoutes({ [FANS_MEDAL_PANEL_URL]: () => new Response('gateway boom', { status: 502 }) })
+
+    expectItemsToAgree(await runRelight())
+  })
+
+  it('点赞发出、回读还没反映时一致', async () => {
+    // 这个新状态（`blocked` + `medal_relight_unconfirmed`）也要满足那条不变量：记录说 `blocked`，
+    // 它自己的行里就有一行是 `blocked`；否则界面上那一行读起来会像「做成了」。
+    server.live.add(5_012_449)
+    server.countsLikes = false
 
     expectItemsToAgree(await runRelight())
   })

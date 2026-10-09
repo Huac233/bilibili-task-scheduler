@@ -13,7 +13,7 @@ import ActionSettingsPanel from '../src/components/ActionSettingsPanel.vue'
  * facts belong to the task page**, and that the discriminator is `ActionDescriptor.needsTarget` — the
  * same field the scheduler selects a Task's actions by, so no new concept. This file is the half of
  * that decision the page has to *show*: the two reads the owner named, which arrive through
- * **two different channels** — one is a `choice` field's `source`, so it is displayed here *and* fills
+ * **two different channels** — one is a source-backed field's `source`, so it is displayed here *and* fills
  * that field's list in the parameter form, and the other is declared in `shownReads`, so it is
  * displayed and is deliberately **not** tickable.
  *
@@ -40,12 +40,20 @@ import ActionSettingsPanel from '../src/components/ActionSettingsPanel.vue'
  * its field names are fixtures here — only the two source keys are not.
  */
 
-/** The read of the rooms the account follows. One key of the fixed interface, and a field's `source`. */
+/**
+ * The read of the rooms the account follows. One key of the fixed interface, and a field's `source`.
+ *
+ * `kind: 'pick_one'` mirrors the real declaration (`ACTION_OPTION_FIELDS` in
+ * `server/src/actions/action-options.ts: 清仓`) for this file's own reason: what the page displays turns on
+ * which fields *have a source*, and the two source-backed kinds are what that predicate has to cover. A
+ * gate written on `choice` alone read this field as one with no options at all — and took
+ * `douyu.followedRooms` off the row with it, which is the read the owner asked to see.
+ */
 const FOLLOW_FIELD = {
   name: 'pourRoom',
   label: '默认倾泻直播间',
   help: '清仓的时候把快到期的免费道具送到这一间。',
-  kind: 'choice',
+  kind: 'pick_one',
   source: 'douyu.followedRooms'
 }
 
@@ -233,7 +241,7 @@ function pathOf(url: string): string {
 /**
  * The source one name resolves to, through both channels and in the route's own order.
  *
- * A `choice` field is looked up first and a `shownReads` entry second, which is the order
+ * A source-backed field is looked up first and a `shownReads` entry second, which is the order
  * `GET /api/action-settings/options` applies so that a page reaching for a knob's list is never handed
  * the display-only answer for the same name. The two are disjoint by declaration; a name in neither
  * resolves to `''`, which is what the fixture answers with rather than borrowing either read's list.
@@ -256,7 +264,15 @@ function fixtureFor(method: string, url: string): unknown {
   if (route.endsWith('/api/action-settings')) {
     return {
       ok: true,
-      settings: actionsOf().map(action => ({ platform: 'douyu', actionKey: action.key, enabled: true, options: {} }))
+      settings: actionsOf().map(action => ({
+        platform: 'douyu',
+        actionKey: action.key,
+        enabled: true,
+        // 清仓's destination is stored, so its parameter form has a value to seed its control from: the
+        // positive half of 「the field's own list is what the form draws」 is the room's *name* on the
+        // control, and a control with nothing stored shows only its placeholder.
+        options: action.key === CLEAR_OUT.key ? { [FOLLOW_FIELD.name]: FOLLOWED_ITEM.value } : {}
+      }))
     }
   }
   if (route.endsWith('/api/accounts')) {
@@ -515,7 +531,7 @@ describe('the account-level facts a preferences page shows', () => {
     expect(facts).not.toBeNull()
 
     // The two reads the owner named, each under its own heading: what the account follows — a
-    // `choice` field's `source`, so it is displayed *and* fills the form's list — and which rooms it
+    // source-backed field's `source`, so it is displayed *and* fills the form's list — and which rooms it
     // holds a medal in, declared in `shownReads`, so it is displayed and set by nobody. Both are
     // asked for by name, through one route and one registry, which is why the page's order is the
     // fields' reads first and the shown ones after.
@@ -558,13 +574,16 @@ describe('the account-level facts a preferences page shows', () => {
     const form = document.querySelector<HTMLElement>('.param-form')
     expect(form).not.toBeNull()
     const inForm = (form?.textContent ?? '').replace(/\s+/g, ' ')
-    // The field's own list is what the form draws, so the followed room's row is in there…
+    // The field's own list is what the form draws, so the room it holds by name is in there…
     expect(inForm).toContain('电棍的直播间')
     // …and the shown read is nowhere near it. Scoped to the form on purpose: the same room name is on
     // the page legitimately, one block above, so a page-wide absence would assert nothing.
     expect(inForm).not.toContain('小苏的直播间')
-    // One control, for the one field this action declares — a read has none to draw.
-    expect(document.querySelectorAll('.param-form [role="checkbox"]')).toHaveLength(1)
+    // One control, for the one field this action declares — a read has none to draw. It is the control
+    // this field's kind asks for: 「默认倾泻直播间」 holds **one** room, so a checkbox group would be a
+    // second thing wrong with the same screen (it would offer several, and store a list).
+    expect(document.querySelectorAll('.param-form [role="checkbox"]')).toHaveLength(0)
+    expect(document.querySelectorAll('.param-form .choice')).toHaveLength(1)
 
     // And the form asks for its own fields and nothing else: the panel's two asks come first, and the
     // second ask for the followed-rooms list is the form's own, made when it opened. A shown read is
@@ -810,7 +829,7 @@ describe('the account-level facts a preferences page shows', () => {
       const row = rowElement(DOUBLED_READ.label)
 
       // One row for the one read — and it is the declaration the field made, which is also the order the
-      // options route resolves a doubled name in (a `choice` field first, a `shownReads` entry second):
+      // options route resolves a doubled name in (a source-backed field first, a `shownReads` entry second):
       // one name is one read, and the field's is the one the parameter form fills from as well.
       expect(row.querySelectorAll('.fact')).toHaveLength(1)
       expect(factOf(DOUBLED_READ.label, FOLLOW_FIELD.label)).toContain('电棍的直播间')

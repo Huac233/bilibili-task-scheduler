@@ -367,12 +367,19 @@ export type LikeGate =
       /** 这一轮该携带多少次点赞，解析自任务 `title`（「点赞30次」→ 30），不是本地常量。 */
       readonly batchClicks: number
       /**
-       * 还差几轮（`sub_title` 的 `limit - claimed`），给日志和界面看的信息。
+       * 这一读看到的两个原始数：分子是**今日已领取的轮数**，分母是这块牌子的日上限。
        *
-       * **能不能停，要看下一轮重读出来的 `is_done`**：拿这个数在本地倒计时，就是又一次
-       * 本地记账，而实测已经证明本地记账在这套接口下必然出错。
+       * 两个都逐牌子下发，**差值「还差几轮」不在这里算** —— 它是这两个数的一次减法，谁需要谁减
+       * 一次，而不是再多一个可能和它们不一致的家。调用方要说出「计数只走到 6/10」时，必须拿得到
+       * 6 与 10 这两个原数：只报差值的话，「还差 4 轮」看不出它是在 0/10 还是 6/10 上说的，而这两
+       * 件事对读的人完全不同 —— 前者是「还没开始」，后者是「发出去的一半还没被认账」。
+       *
+       * **能不能停，要看下一轮重读出来的 `is_done` 与这两个数**：拿「还差几轮」在本地倒计时，就是
+       * 又一次本地记账，而实测已经证明本地记账在这套接口下必然出错（2026-10-08 那次 `click_time=1`
+       * 被丢弃与「记下但不够 30」，在读接口下不可区分）。
        */
-      readonly remainingRounds: number
+      readonly claimed: number
+      readonly limit: number
       /**
        * `like_info_v3.click_block` 的**观测值**，不是判定的一部分。
        *
@@ -445,7 +452,8 @@ export function likeGate(input: LikeGateInput): LikeGate {
     allowed: true,
     minIntervalMs: Math.max(input.cooldownSeconds * 1000, LikeScheduleGuard.MinIntervalFloorMs),
     batchClicks,
-    remainingRounds: progress.limit - progress.claimed,
+    claimed: progress.claimed,
+    limit: progress.limit,
     // 只带走，不参与上面任何一次判断。
     clickBlock: input.clickBlock
   }

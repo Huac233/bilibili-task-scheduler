@@ -70,7 +70,7 @@ import { namingNote } from './naming-note.js'
  * id and no target, so a per-Room read has no field to arrive through. That is the design's split —
  * 账号级的归这页，目标级的归任务页 — and the discriminator is the same field the scheduler selects a
  * Task's actions by, so it is not a second concept. **Those reads arrive through two channels, and
- * only one of them is ever a parameter**: a `choice` field's source is displayed on the row *and*
+ * only one of them is ever a parameter**: a source-backed field's source is displayed on the row *and*
  * fills that field's list in the form below, while a read the action declares in `shownReads` is
  * displayed and is nothing a person sets — which is why `shownReadsOf` is a union, and why the
  * sentence above the list may not claim that every read under it is a parameter's source.
@@ -428,9 +428,22 @@ function createWantsTarget(platformKey: string, entry: PlatformEntry): boolean {
   return workflowOf(platformKey, entry)?.create?.needsTarget === true
 }
 
-/** The fields of one row whose values are read from a source rather than typed. */
-function choiceFieldsOf(entry: PlatformEntry): readonly ActionOptionField[] {
-  return (entry.descriptor.optionFields ?? []).filter(field => field.kind === 'choice')
+/** A field of one row whose value is read from a source rather than typed, with that source known present. */
+type SourceBackedField = ActionOptionField & { readonly source: string }
+
+/**
+ * The fields of one row whose values are read from a source rather than typed.
+ *
+ * **The predicate is `source`, and it is deliberately not `kind`.** Whether a field's options come from a
+ * live read is what makes it askable at all, and the two kinds that may have a source — `choice`, the set
+ * a person ticks, and `pick_one`, the one they pick — differ in how many values a cell holds and in
+ * nothing else this page cares about. A filter written on one of the two kinds takes the other's read off
+ * the row silently, which is what 「默认倾泻直播间」 met the day it stopped being declared `choice`: its
+ * 「我关注了哪些直播间」 list vanished from the screen while the field went on using it. The type predicate is
+ * what lets `shownReadsOf` map straight to a read, so the same test is not written twice.
+ */
+function sourceFieldsOf(entry: PlatformEntry): readonly SourceBackedField[] {
+  return (entry.descriptor.optionFields ?? []).filter((field): field is SourceBackedField => field.source !== undefined)
 }
 
 /**
@@ -454,8 +467,9 @@ function asShownRead(field: ActionOptionField, source: string): ActionShownRead 
  * which Room it is about. A target-level action's *parameters* stay here with every other action's —
  * the design keeps one home for a value and gives the task page the same store.
  *
- * **Two channels feed the list, and the union is the whole of the rule.** A `choice` field's source
- * is one of them, because a field's read is displayed *and* tickable; `descriptor.shownReads` is the
+ * **Two channels feed the list, and the union is the whole of the rule.** A source-backed field's source
+ * is one of them, because a field's read is displayed *and* used — whichever of the two kinds it is;
+ * `descriptor.shownReads` is the
  * other, which exists for the read no field could carry. The two are mutually exclusive *by
  * declaration* — a read a field already names as its `source` is not repeated in `shownReads` — and
  * that declaration is the one thing here no line of code enforces, which is why the second channel is
@@ -465,9 +479,7 @@ function asShownRead(field: ActionOptionField, source: string): ActionShownRead 
  */
 function shownReadsOf(entry: PlatformEntry): readonly ActionShownRead[] {
   if (entry.descriptor.needsTarget) return []
-  const fromFields = choiceFieldsOf(entry).flatMap(field =>
-    field.source === undefined ? [] : [asShownRead(field, field.source)]
-  )
+  const fromFields = sourceFieldsOf(entry).map(field => asShownRead(field, field.source))
 
   // **A name the fields already declared is dropped, and that is the one line behind the sentence above
   // the list.** The two channels are disjoint *by declaration* — the rule is written in
@@ -477,7 +489,7 @@ function shownReadsOf(entry: PlatformEntry): readonly ActionShownRead[] {
   // them. Concatenating them here would draw one read twice, keyed `fact-${fact.name}` both times, which
   // is the collision `web/tests/nspace-fragment.test.ts` pins for `NSpace`'s literal `key: 1`. The
   // field's declaration wins because it is the one the parameter form also fills from — the same order
-  // the options route resolves a doubled name in, a `choice` field first and a `shownReads` entry second
+  // the options route resolves a doubled name in, a source-backed field first and a `shownReads` entry second
   // — so a violating descriptor degrades to one row instead of two. `web/tests/account-level-facts.test.ts`
   // pins that with a descriptor that breaks the rule on purpose.
   const declared = new Set(fromFields.map(read => read.name))
@@ -1049,7 +1061,7 @@ onUnmounted(() => {
                   `loadAccountReads` writes `noAccountReason(accountsLoaded)` into the answer itself — and
                   each row already says which case it is in, so that sentence belongs to the row.
                   **The two halves of the facts-line are the two channels, and neither may claim the
-                  other's fact**: a `choice` field's source fills the form's list under it, and a
+                  other's fact**: a source-backed field's source fills the form's list under it, and a
                   `shownReads` entry is displayed and never set. What stood here said every read on the
                   list was a parameter's source, which was true exactly while every displayed read was one
                   — the second channel is what made it false, and the two halves are what hold for both

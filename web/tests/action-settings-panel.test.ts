@@ -80,6 +80,46 @@ const INTIMACY_TASKS = {
   optionFields: [GIFT_FIELD]
 }
 
+/**
+ * 清仓's 「默认倾泻直播间」 — the field that means **pick one**, and the reason `kind` grew a fourth member.
+ *
+ * It is a fixture of the *declaration*, so the two halves of the owner's defect are on screen together:
+ * the form builds its control from this `kind` (a checkbox group would offer him several rooms for a
+ * cell that holds one) and writes the shape this `kind` implies (a single value, which is what the
+ * action's own reader gets one room out of).
+ */
+const POUR_FIELD = {
+  name: 'dumpRoomId',
+  label: '默认倾泻直播间',
+  help: '即将过期的免费道具送进这个直播间。',
+  kind: 'pick_one',
+  source: 'douyu.followedRooms'
+}
+
+/** The account-scoped action that declares it, so the field is rendered by the real form. */
+const POUR_ROOMS = {
+  key: 'clearout_props',
+  action: 'reconcile',
+  label: '清仓',
+  description: '把即将过期的免费道具送出去。',
+  costly: false,
+  needsTarget: false,
+  needsLibrary: false,
+  maxMessageLength: 0,
+  defaultIntervalSeconds: 300,
+  minIntervalSeconds: 60,
+  optionFields: [POUR_FIELD]
+}
+
+/**
+ * One room the followed-rooms read returned.
+ *
+ * `value: '12306'` is the room the owner's own row holds under `dumpRoomId`, which is what makes the two
+ * halves of the test below meet: the stored cell is the list the checkbox form wrote, and the read this
+ * list comes from is the one that can name it.
+ */
+const FOLLOWED_ROOM_ITEM = { value: '12306', label: '电棍的直播间', count: null, costsSomething: null }
+
 /** The account-scoped action, so "a Task exists" and "a Task names *this*" are two facts. */
 const SIGN_IN = {
   key: 'sign_in',
@@ -117,7 +157,7 @@ const GROWTH_POOL = {
 const ALL_ACTIONS = [INTIMACY_TASKS, SIGN_IN, FISHING, SEND_DANMAKU]
 
 /**
- * The catalogue this scenario renders — the four by default, and the costly one on request.
+ * The catalogue this scenario renders — the four by default, and an opt-in fifth on request.
  *
  * The return type is inferred rather than annotated, which is deliberate: the fixture has to satisfy two
  * readers that want different halves of a descriptor (`GET /api/platforms` publishes the whole catalogue
@@ -125,7 +165,11 @@ const ALL_ACTIONS = [INTIMACY_TASKS, SIGN_IN, FISHING, SEND_DANMAKU]
  * them touches.
  */
 function actionsOf() {
-  return scenario.costlyAction === true ? [...ALL_ACTIONS, GROWTH_POOL] : ALL_ACTIONS
+  // Two opt-in actions rather than one additive list, because no scenario ever asks for both: each exists
+  // to move a handful of assertions off the four-row page the rest of this file counts.
+  if (scenario.costlyAction === true) return [...ALL_ACTIONS, GROWTH_POOL]
+  if (scenario.pickOneAction === true) return [...ALL_ACTIONS, POUR_ROOMS]
+  return ALL_ACTIONS
 }
 
 const ACCOUNTS = [
@@ -203,6 +247,22 @@ interface Scenario {
    * four-row page is the page they were written against.
    */
   costlyAction?: boolean
+  /**
+   * Whether the pick-one action is in the catalogue this scenario renders.
+   *
+   * Opt-in for `costlyAction`'s reason: it is a fifth row, and every other assertion here counts rows or
+   * walks them. It is the action that declares `POUR_FIELD` — 「默认倾泻直播间」, a field that means *pick
+   * one* — which is the declaration the two cases below are about.
+   */
+  pickOneAction?: boolean
+  /**
+   * What that action's own settings row holds under `dumpRoomId`, as `GET /api/action-settings` answers
+   * it. `undefined` is a row with nothing stored.
+   *
+   * `unknown` rather than `string`, because the shape is the point: this is where the owner's own cell —
+   * a list, written by the checkbox form that used to draw this field — is put on screen verbatim.
+   */
+  pickOneStored?: unknown
   /** The action key the fixture answers as switched off, so a flip has something to do. */
   switchedOff?: string
   /**
@@ -351,7 +411,12 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
         platform: 'douyu',
         actionKey: action.key,
         enabled: action.key !== scenario.switchedOff,
-        options: {}
+        // The one row whose stored options this file varies, and it varies them because the *shape* a
+        // form previously wrote there is what the pick-one case is about.
+        options:
+          action.key === POUR_ROOMS.key && scenario.pickOneStored !== undefined
+            ? { dumpRoomId: scenario.pickOneStored }
+            : {}
       }))
     }
   }
@@ -371,11 +436,17 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
     return { ok: true, tasks: scenario.carried ? [carrierTask(), ACCOUNT_TASK] : [ACCOUNT_TASK] }
   }
   if (route.endsWith('/api/action-settings/options')) {
+    const field = query(url, 'field')
     // One field's read refused rather than answered: a rejection is the event the route has no
     // vocabulary for, so what the form says about it comes from its own `catch` — the half a fixture
     // that always answers a value cannot reach. The message is the sentence the form prints.
-    if (scenario.choiceFails === true && query(url, 'field') === GIFT_FIELD.name) throw new Error(CHOICE_READ_REFUSED)
-    return { ok: true, field: 'giftAllowlist', source: 'douyu.backpack', choice: scenario.choice }
+    if (scenario.choiceFails === true && field === GIFT_FIELD.name) throw new Error(CHOICE_READ_REFUSED)
+    // Per field, because the two fields read two different sources: the page asks one question per name,
+    // and the answer is that name's own read — the echoed `field` is the one that was asked for.
+    if (field === POUR_FIELD.name) {
+      return { ok: true, field, source: POUR_FIELD.source, choice: { kind: 'ok', items: [FOLLOWED_ROOM_ITEM] } }
+    }
+    return { ok: true, field, source: 'douyu.backpack', choice: scenario.choice }
   }
   if (route.endsWith('/api/action-settings/workflow')) {
     if (scenario.workflowFails === true) throw new Error('归属读取失败')
@@ -666,6 +737,20 @@ function buttonsIn(element: HTMLElement): string[] {
  * answer. It is the field container's child that holds no checkbox, which is the shape the template
  * draws — the group *or* the note, never both.
  */
+/**
+ * One field's own block in the open parameter form, found by the label a person reads above it.
+ *
+ * Scoped to the field rather than to the form, because a form draws every field its action declares and
+ * 「no checkbox here」 is a claim about *this* field: 清仓 declares a ticked list beside the pick-one one.
+ */
+function fieldBlockOf(label: string): HTMLElement {
+  const block = [...document.querySelectorAll<HTMLElement>('.param-form .field')].find(
+    candidate => (candidate.querySelector('.n-form-item-label')?.textContent ?? '').trim() === label
+  )
+  if (block === undefined) throw new Error(`no field labelled ${label} in the parameter form`)
+  return block
+}
+
 function choiceNoteOf(): HTMLElement {
   const container = document.querySelector<HTMLElement>('.param-form .choice')
   if (container === null) throw new Error('the parameter form drew no choice field')
@@ -1287,6 +1372,92 @@ describe('an action’s parameters', () => {
     expect(document.querySelectorAll('.param-form')).toHaveLength(1)
     // One row per catalogued action, and the catalogue is the fixture's four.
     expect(document.querySelectorAll('.action-row')).toHaveLength(4)
+  })
+
+  /**
+   * **The owner's own defect, both halves of it, on one screen.**
+   *
+   * He ticked a room in 「默认倾泻直播间」 and the action answered 「还没有选好」. The cause was this field's
+   * declaration: `choice` draws a checkbox group, a checkbox group *writes what it drew*, and the
+   * action's reader wants one room out of that cell — so his row holds a one-element list and the reader
+   * saw nothing. Two things change, and this case is about the pair:
+   *
+   *  - what a "pick one" field draws is not a set of checkboxes, which is the half that stops the next
+   *    person writing the same wrong shape; and
+   *  - what it stores is **one value**, because that is what the code reading the cell asks for.
+   *
+   * The stored cell here is the shape the *old* form wrote (`['12306']`) rather than the shape this one
+   * writes, so the case also pins the other thing he asked for: nothing has to be ticked again.
+   */
+  it('draws a pick-one field as one choice, reads the list the checkbox form wrote, and writes one value', async () => {
+    scenario = {
+      carried: false,
+      finished: 0,
+      choice: { kind: 'ok', items: [GIFT_ITEM] },
+      pickOneAction: true,
+      pickOneStored: ['12306']
+    }
+    await mountPanel()
+    await clickInRow(POUR_ROOMS.label, '设置参数')
+
+    const block = fieldBlockOf(POUR_FIELD.label)
+    // Not a set: no checkbox is offered for a cell that holds one room…
+    expect(block.querySelectorAll('[role="checkbox"]')).toHaveLength(0)
+    // …and what is drawn instead shows **one** value at a time — naive-ui's own select, whose trigger
+    // carries the chosen item's label. This is the assertion that was red before the change: an unknown
+    // kind fell through to the text branch (`.n-input`), so no read was ever asked for and the field sat
+    // on its placeholder over a value that was really there.
+    expect(block.querySelector('.n-select')).not.toBeNull()
+    // And the room he already picked is the room on screen, because the one-element list is read as the
+    // one value it holds. This is the assertion that says he does not have to tick it again.
+    expect(block.textContent).toContain(FOLLOWED_ROOM_ITEM.label)
+
+    await click('保存参数')
+
+    // What leaves this form is one value: the reader in `server/src/platform/douyu/index.ts` reads the
+    // room out of a bare value, and this is the shape it is handed from now on.
+    const write = requests.filter(request => request.method === 'put').at(-1)
+    expect(write?.body).toEqual({
+      platform: 'douyu',
+      actionKey: POUR_ROOMS.key,
+      enabled: true,
+      options: { dumpRoomId: '12306' }
+    })
+  })
+
+  /**
+   * **The cell this form cannot draw, and why a save may not erase it.**
+   *
+   * Two rooms in a pick-one cell is the other shape the old checkbox form could write — the state the
+   * action reports as `many_dump_rooms` rather than acting on. A single-choice control shows one value, so
+   * it shows none of them, and drawing that blank while saying nothing would be the same defect one layer
+   * up: the dropdown's emptiness reads as 「这一格是空的」, which is a claim about a person's own setting
+   * that the cell's own contents contradict. So the form says which state it is in, and — the half that
+   * belongs to `save` — writes that cell back **untouched**, which is the promise the merge already makes
+   * for a field this form cannot render at all. Erasing it would be this form destroying a setting it
+   * never displayed.
+   */
+  it('says a pick-one cell holds more than one value, and writes that cell back untouched', async () => {
+    scenario = {
+      carried: false,
+      finished: 0,
+      choice: { kind: 'ok', items: [GIFT_ITEM] },
+      pickOneAction: true,
+      pickOneStored: ['12306', '12293234']
+    }
+    await mountPanel()
+    await clickInRow(POUR_ROOMS.label, '设置参数')
+
+    const block = fieldBlockOf(POUR_FIELD.label)
+    // The control shows nothing — it cannot show two — so the sentence is what keeps the blank honest.
+    expect(block.textContent).not.toContain(FOLLOWED_ROOM_ITEM.label)
+    expect(block.textContent).toContain('不止一个')
+
+    await click('保存参数')
+
+    const write = requests.filter(request => request.method === 'put').at(-1)
+    const sent = write?.body as { options?: unknown } | undefined
+    expect(sent?.options).toEqual({ dumpRoomId: ['12306', '12293234'] })
   })
 
   it('fills a choice field from the live source, and saves the ticked values', async () => {

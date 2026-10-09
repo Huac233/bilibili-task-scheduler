@@ -1,3 +1,5 @@
+import type { DatabaseSync } from 'node:sqlite'
+
 import { describe, expect } from 'vitest'
 
 import { deleteAccount, upsertAccount } from '../src/repo/accounts.js'
@@ -30,6 +32,11 @@ interface EventsBody {
   nextCursor: number
   latestId: number
   hasMore: boolean
+}
+
+interface RecentBody {
+  ok: boolean
+  events: { id: number; kind: string; title: string }[]
 }
 
 interface TokenBody {
@@ -500,5 +507,160 @@ describe('unbinding an account', () => {
     // The rows those events were about are gone too, which is the cascade they used to outlive.
     const tasksLeft = server.ctx.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE account_id = ?').get(account.id)
     expect(Number(tasksLeft?.['n'])).toBe(0)
+  })
+})
+
+/**
+ * A kind no build here has a name for, spelled the way a future one would be.
+ *
+ * Long and unmistakable on purpose: it travels through an assertion as a marker, and a short one
+ * could be assembled by two adjacent rendered values.
+ */
+const UNKNOWN_KIND = 'task_teleported_into_a_later_build'
+
+/**
+ * Writes an event row whose kind this build has never heard of.
+ *
+ * `appendEvent` types the kind as `EventKind`, so it cannot produce one — but the column is `TEXT`
+ * and a row written by a *newer* build is exactly this shape. It is the only way to reach the bucket
+ * `toKind` reads any unrecognised value as, which is the one case a kind filter cannot express as a
+ * plain list of words.
+ */
+function appendUnknownKind(db: DatabaseSync, userId: number): void {
+  db.prepare(
+    `INSERT INTO events (user_id, kind, severity, title, detail, platform, task_id, account_id, created_at)
+     VALUES (?, ?, 'info', ?, '', '', NULL, NULL, ?)`
+  ).run(userId, UNKNOWN_KIND, `未知 ${UNKNOWN_KIND}`, Date.now())
+}
+
+/**
+ * The kind filter `IntegrationsView` sends, on the endpoint that page reads.
+ *
+ * **The boundary below is the design point.** That page keeps the newest fifty rows, so a filter
+ * applied in the browser would let a hidden kind consume a place in the window: a person who hides
+ * the noisy kinds would look at a short — or empty — feed while the rows he wants sat just behind
+ * them. So the filter is a query argument, and the first case pins that the window is filled with
+ * the kinds that were asked for rather than with the ones that were not.
+ *
+ * **`GET /api/events` is deliberately not that endpoint.** The AstrBot plugin polls it with a
+ * cursor, and a filter there would not merely change what it receives: the cursor would walk past
+ * the kinds it was not shown and `pruneEvents` would then free those rows, i.e. the notification
+ * would be gone for good. The last case pins that it still answers with every kind.
+ */
+describe('the kind filter on GET /api/events/recent', () => {
+  it('fills the page with the kinds it asked for instead of letting hidden ones eat the window', async ({
+    server,
+    session
+  }) => {
+    // 25 rows he kept, then 30 newer rows of a kind he hid: a filter applied to the page's own 50
+    // would see those 30 newer rows and only 20 kept ones, while the same filter asked at the query
+    // finds all 25 of them.
+    for (let i = 0; i < 25; i += 1) {
+      appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.TaskFinished, title: `保留 ${String(i)}` })
+    }
+    for (let i = 0; i < 30; i += 1) {
+      appendEvent(server.ctx.db, {
+        userId: session.userId,
+        kind: EventKind.TaskSendingTrouble,
+        title: `隐藏 ${String(i)}`
+      })
+    }
+
+    const unfiltered = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50',
+      headers: session.auth()
+    })
+    const keptOnTheUnfilteredPage = unfiltered.json<RecentBody>().events.filter(event => event.kind === 'task_finished')
+    expect(keptOnTheUnfilteredPage).toHaveLength(20)
+
+    const filtered = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50&kinds=task_finished',
+      headers: session.auth()
+    })
+    const events = filtered.json<RecentBody>().events
+
+    expect(events).toHaveLength(25)
+    expect(events.length).toBeGreaterThan(keptOnTheUnfilteredPage.length)
+    expect(events.every(event => event.kind === 'task_finished')).toBe(true)
+  })
+
+  it('shows every kind when the request names none', async ({ server, session }) => {
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.TaskStarted, title: '任务开始' })
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.SessionExpired, title: '登录已失效' })
+
+    const response = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50',
+      headers: session.auth()
+    })
+
+    expect(response.json<RecentBody>().events.map(event => event.kind)).toEqual(['session_expired', 'task_started'])
+  })
+
+  it('puts a kind this build cannot name in the bucket the page can hide', async ({ server, session }) => {
+    appendUnknownKind(server.ctx.db, session.userId)
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.TaskFinished, title: '保留' })
+
+    const keptOnly = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50&kinds=task_finished',
+      headers: session.auth()
+    })
+    expect(keptOnly.json<RecentBody>().events.map(event => event.title)).toEqual(['保留'])
+
+    // `other` is a bucket rather than a word — the page labels it 「未知事件」 — so a filter naming it
+    // has to match a row this build has no name for, not only one that stored the word `other`.
+    const bucket = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50&kinds=other',
+      headers: session.auth()
+    })
+    const events = bucket.json<RecentBody>().events
+    expect(events.map(event => event.kind)).toEqual(['other'])
+    expect(events.map(event => event.title)).toEqual([`未知 ${UNKNOWN_KIND}`])
+  })
+
+  it('reads an empty kind list as a request for nothing', async ({ server, session }) => {
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.TaskStarted, title: '有事件' })
+
+    const response = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50&kinds=',
+      headers: session.auth()
+    })
+
+    // 200 rather than a refusal: "none of them" is a legitimate selection — every box unticked — and
+    // it is a different request from naming no parameter at all, which is the case above.
+    expect(response.statusCode).toBe(200)
+    expect(response.json<RecentBody>().events).toEqual([])
+  })
+
+  it('refuses a kind it does not know rather than answering a feed that excludes it', async ({ server, session }) => {
+    const response = await server.app.inject({
+      method: 'GET',
+      url: '/api/events/recent?limit=50&kinds=task_finishd',
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json<{ error: string }>().error).toBe('事件类型无效')
+  })
+
+  it('leaves the cursor endpoint the AstrBot plugin polls unfiltered', async ({ server, session }) => {
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.TaskStarted, title: '任务开始' })
+    appendEvent(server.ctx.db, { userId: session.userId, kind: EventKind.SessionExpired, title: '登录已失效' })
+
+    // The page's own parameter, sent to the plugin's endpoint: it is not part of that route's
+    // schema, and the answer must stay the whole feed. A filter honoured here would walk the cursor
+    // past every hidden kind, and the retention window would then delete them.
+    const response = await server.app.inject({
+      method: 'GET',
+      url: '/api/events?since=0&kinds=task_started',
+      headers: session.auth()
+    })
+
+    expect(response.json<EventsBody>().events.map(event => event.kind)).toEqual(['task_started', 'session_expired'])
   })
 })

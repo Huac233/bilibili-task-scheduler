@@ -35,15 +35,31 @@ export type { ActionOutcomeValue }
  */
 
 /**
- * How a person types one of an action's options.
+ * How a person types one of an action's options — **and, for the two source-backed kinds, what the cell
+ * ends up holding.**
  *
- * Three kinds rather than "string or list", because the form's control is the whole of what a kind
+ * Four kinds rather than "string or list", because the form's control is the whole of what a kind
  * decides — and because none of them is free-form JSON. **A field nobody can type is not ready to
- * be exposed**, so there is deliberately no `json` member: an option whose shape is a document is
- * an option the UI has no business rendering, and adding it here later would be the moment to argue
+ * be exposed**, so there is deliberately no `json` member: an option whose shape is a document is an
+ * option the UI has no business rendering, and adding it here later would be the moment to argue
  * about it rather than to assume it.
+ *
+ * **Two of the four are backed by a live source, and they differ in how many values one cell holds** —
+ * which is the same difference as the control's, so the kind is where it belongs:
+ *
+ *  - `choice` — the ticked set. A checkbox group, and the cell holds a **list** of the source's `value`s,
+ *    an empty list included (「一件都不许送」 is a real answer).
+ *  - `pick_one` — one of them. A single-choice control, and the cell holds **that one value**, not a list
+ *    of one. It exists because the two readings are not interchangeable at either end: a reader that
+ *    wants one value reads `null` out of a list, and a checkbox group tells a person they may take
+ *    several of a thing the action can only be aimed at once.
+ *
+ * The distinction is a **declaration** rather than something each reader unwraps for itself, and that is
+ * the whole argument for the member existing: a form that writes a list into a `pick_one` cell is the
+ * defect this kind was added to prevent, and teaching every reader to accept both shapes would leave the
+ * next field free to write either.
  */
-export type ActionOptionKind = 'text' | 'number' | 'choice'
+export type ActionOptionKind = 'text' | 'number' | 'choice' | 'pick_one'
 
 /**
  * One value a choice-backed field offers.
@@ -61,8 +77,9 @@ export interface ActionOptionChoice {
  * One knob an action reads, as the form needs it.
  *
  * `name` is the key the adapter reads out of `ReconcileContext.options`, so it is the option's whole
- * contract; `label` and `help` are what a person sees. `source` is set exactly when `kind` is
- * `choice`, and names where the choices come from: a Platform's answer to a live read, resolved
+ * contract; `label` and `help` are what a person sees. `source` is set exactly when `kind` is one of the
+ * two source-backed kinds (`choice`, `pick_one`), and names where the choices come from: a Platform's
+ * answer to a live read, resolved
  * through `GET /api/action-settings/options`, which is the one route that turns a source into a
  * list. Nothing in a descriptor may carry the list itself, because a list of what an account
  * currently holds is not a fact a catalogue can know.
@@ -73,7 +90,7 @@ export interface ActionOptionField {
   /** One sentence about the field, or `''` when the label already says everything. */
   readonly help: string
   readonly kind: ActionOptionKind
-  /** The choice source. Present iff `kind` is `choice`. */
+  /** The choice source. Present iff `kind` is `choice` or `pick_one`. */
   readonly source?: string
 }
 
@@ -186,7 +203,8 @@ export interface ActionDescriptor {
    * The sibling of `optionFields` and separate from it on purpose: a field is a decision stored in
    * `action_settings` and a shown read is a fact read from the Platform, so a name in both would be
    * a name whose control has no meaning. See `ActionShownRead` for why the channel exists, and note
-   * that a read a `choice` field already names as its `source` must **not** be repeated here: it is
+   * that a read a `choice` or `pick_one` field already names as its `source` must **not** be repeated
+   * here — either kind's field is displayed through its own source: it is
    * displayed because the field needs it, and declaring it twice would fetch one read as two facts.
    *
    * Absent rather than empty, for `optionFields`' own reason: "this action shows no read other than

@@ -407,17 +407,30 @@ describe('likeGate', () => {
     // 0.35 秒是房间自己声明的（服务端权威），它比本地下限大，所以用它。
     expect(gate.minIntervalMs).toBe(350)
     expect(gate.batchClicks).toBe(30)
-    expect(gate.remainingRounds).toBe(1)
+    // 进度交出去的是服务端自己的两个原数，不是本地算好的差值：「还差 1 轮」这种话在 0/1 与
+    // 9/10 上都成立，而这两件事对读的人完全不是一件事。
+    expect(gate.claimed).toBe(0)
+    expect(gate.limit).toBe(1)
     // 实盘读到的 click_block 是 false。它只是被带出来，不参与判定。
     expect(gate.clickBlock).toBe(false)
   })
 
-  it('level 30 的牌子：上限 10 来自 sub_title，还差 10 轮', () => {
+  it('level 30 的牌子：上限 10 来自 sub_title，进度照原样带出', () => {
     const tasks: readonly MedalTask[] = TASKS_HIGH_LEVEL
     const gate = allowedOf(likeGate(gateInput({ task: findMedalTask(tasks, MedalJumpType.Like) })))
 
-    expect(gate.remainingRounds).toBe(10)
+    expect(gate.claimed).toBe(0)
+    expect(gate.limit).toBe(10)
     expect(gate.batchClicks).toBe(30)
+  })
+
+  it('已经领过的轮数照原样带出，不做减法', () => {
+    // 2026-10-09 20:41 那次读回来的就是这一行：`每日上限 6/10`。句子要靠这两个数说清
+    // 「发出去的已经超过它认账的速度」，所以它们必须是读数本身。
+    const gate = allowedOf(likeGate(gateInput({ task: { ...LIKE_TASK_BEFORE, sub_title: '每日上限 6/10' } })))
+
+    expect(gate.claimed).toBe(6)
+    expect(gate.limit).toBe(10)
   })
 
   it('服务端报的 cooldown 更慢时以服务端为准，本地下限不覆盖它', () => {
@@ -492,7 +505,8 @@ describe('preflightLike', () => {
     const gate = allowedOf(await preflightLike(loggedInHttp(), { roomId: ROOM_ID, anchorId: ANCHOR_ID }))
 
     expect(gate.batchClicks).toBe(30)
-    expect(gate.remainingRounds).toBe(1)
+    expect(gate.claimed).toBe(0)
+    expect(gate.limit).toBe(1)
     expect(gate.minIntervalMs).toBe(350)
     expect(gate.clickBlock).toBe(false)
 

@@ -26,7 +26,7 @@ export function missingReason(choice: ActionChoice | null): string {
 }
 
 /**
- * Why a choice field has no list when there is no account to read it for.
+ * Why a source-backed field has no list when there is no account to read it for.
  *
  * `accountId: null` is two different facts, and only one of them supports a sentence about absence:
  * the account list landed and this Platform has no account bound, or the list did not land and

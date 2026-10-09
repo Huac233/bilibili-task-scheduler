@@ -22,8 +22,9 @@ import {
  * 「读不出来」 rather than a blank that reads as "you follow nobody".
  *
  * **The two keys, and why they are exactly these two.** `apps/web`'s action-settings panel resolves a
- * `choice` field through `GET /api/action-settings/options`, which reads `ActionDescriptor.optionFields[]`
- * and then looks the field's `source` up in `ChoiceSourceRegistry`; the keys are what that lookup is
+ * source-backed field through `GET /api/action-settings/options`, which reads
+ * `ActionDescriptor.optionFields[]` — under either of the two field kinds that may carry one, `choice` and
+ * `pick_one` — and then looks the field's `source` up in `ChoiceSourceRegistry`; the keys are what that lookup is
  * keyed by, so they are an interface rather than a name:
  *
  *  - `douyu.followedRooms` — the rooms the account follows. It is the source of 清仓's 「默认倾泻直播间」:

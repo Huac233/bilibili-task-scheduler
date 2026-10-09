@@ -969,7 +969,7 @@ export async function signActivity(
 /**
  * This family's verdicts, each named where it was actually seen.
  *
- * All four are numbers Douyu reuses elsewhere for other things, so none of them belongs
+ * All five are numbers Douyu reuses elsewhere for other things, so none of them belongs
  * in `errors.ts`'s global table: the classification is attached by the caller that knows
  * which endpoint produced the number, exactly as `FISH_BALL_ALREADY_CLAIMED` is.
  *
@@ -991,10 +991,27 @@ export async function signActivity(
  * only after `withinLocalWindow` has already said the window is open, so a `57005` arriving there
  * says the two clocks disagree rather than that the day is over — which is why the adapter grades it
  * `retry` and never `action_stop` (see `growthPoolRefusal` in the adapter).
+ *
+ * **`57004` is 今天已经打过卡, and it is the same shape of evidence: a contrast, plus the state that
+ * explains it.** On that same evening `clockSignActivity` answered `0` at 19:00:20 and `57004` to the
+ * two runs at 19:45 and 19:50 — both of which were inside 19:00–21:00 by this project's clock, and
+ * both of which first read a latch of `1`
+ * (`{"signStatus":1,"ywTotal":596400,"joinTotal":2982}`, i.e. 已报名 for a round). So the call was
+ * reached on a day whose check-in had already landed, and what the number describes is the check-in
+ * being in place — not the window, not the round, not the session. `msg` was empty at both of those
+ * reads, and there is no capture here carrying a `57004` body at all.
+ *
+ * **What that does not establish, and the name does not claim:** one account, one evening. Nothing
+ * measured says whether the number is about *the day* being spent or only about *this attempt* at
+ * it, and nothing says what it answers outside 19:00–21:00 — a window no run can ask from, because
+ * `growthPoolCheckIn`'s own gate sits above the call. The reading that is safe under both of the
+ * open possibilities is the adapter's: today's card is in place, so the run writes nothing and the
+ * day is settled (see `growthPoolCheckIn`).
  */
 export const GROWTH_POOL_TOKEN_REJECTED = 10001
 export const GROWTH_POOL_CSRF_REJECTED = 152101
 export const GROWTH_POOL_NOT_ENOUGH_FISH_BALLS = 57002
+export const GROWTH_POOL_ALREADY_CLOCKED = 57004
 export const GROWTH_POOL_WINDOW_NOT_OPEN = 57005
 
 /**
@@ -1151,7 +1168,8 @@ export async function joinGrowthPool(
  * the settlement that decides what it paid. A field named here would be the next reader's excuse
  * to report a figure this response cannot carry.
  *
- * `57005` is this endpoint's window-closed answer; see `GROWTH_POOL_WINDOW_NOT_OPEN`.
+ * `57005` is this endpoint's window-closed answer and `57004` its "today's card is already in
+ * place"; see `GROWTH_POOL_WINDOW_NOT_OPEN` and `GROWTH_POOL_ALREADY_CLOCKED`.
  */
 export async function clockGrowthPool(
   token: string,

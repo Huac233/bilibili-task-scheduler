@@ -560,16 +560,56 @@ describe('like_danmaku', () => {
     expect(logs.join('\n')).toContain('medal_not_lit')
   })
 
-  it('服务端接受了却一直不认账时，按上限收手并报 failed', async () => {
-    // 实盘证明过这是真会发生的：`click_time=1` 那次「被丢掉」与「记下但不够 30」在读接口下不可区分。
-    // 上限 10 的牌子于是最多发 10 轮，之后必须停 —— 否则就是一个没有出口的循环。
+  it('计数一直不动时，一轮就收手，并把服务端自己的计数说出来', async () => {
+    // 2026-10-09 20:36 那次就是这个形状：10 轮 300 次被服务端原样收下（`code: 0`），而它自己的
+    // 计数在那次运行里没有跟着往前走。原先的循环把**入口那一次**读到的 `remainingRounds`（10）
+    // 当成本次预算，于是发满 10 轮 —— 收手点是一个冻结在入口的本地数字，不是服务端的计数。
+    // 现在收手点是服务端自己的计数：它没有跟着这一轮的发出往前走，就说明这一轮它还没认账，
+    // 再发下去只是把同一批赞重复投出去。
     withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([highLevelPanel(likeRow(0, false))]) })
 
     const outcome = await runOne(ActionKey.LikeDanmaku)
 
-    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'like_unfinished' })
-    expect(outcome.detail).toContain('服务端接受了这些点赞，但任务仍未标记完成')
-    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(10)
+    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(1)
+    // `blocked` 而不是 `failed`：没有东西坏掉，服务端就是慢，而 `blocked` 正是 runner 不肯当作
+    // 落定的那两个取值之一 —— 当天留着，下一次运行再读。
+    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'retry', code: 'like_unfinished' })
+    // 句子里的两个数都是服务端的，一个都不是本地的账。
+    expect(outcome.detail).toContain('已发出 1 轮共 30 次点赞')
+    expect(outcome.detail).toContain('计数只走到 0/10')
+    expect(outcome.detail).toContain('下一次运行再读一次')
+  })
+
+  it('计数停在 6/10 不再往前走时，发到它跟不上的那一步为止', async () => {
+    // 当晚的两个真实读数：20:36 那次发出 10 轮 300 次；20:41 那次读回来是 6/10（它的预算 4 正是
+    // 10 − 6）。计数走到 6 就停住，正是这个循环该停的地方 —— 同一份面板喂给旧代码，它会发满 10 轮、
+    // 把 300 次里已经发过的那部分再发一遍。
+    withRoutes({
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([highLevelPanel(likeRow(0, false)), highLevelPanel(likeRow(6, false))])
+    })
+
+    const outcome = await runOne(ActionKey.LikeDanmaku)
+
+    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(2)
+    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'retry', code: 'like_unfinished' })
+    expect(outcome.detail).toContain('已发出 2 轮共 60 次点赞')
+    expect(outcome.detail).toContain('计数只走到 6/10')
+  })
+
+  it('计数自己追到上限时以完成收场，而不是报失败', async () => {
+    // 当晚 20:51:43 的读数就是这件事：什么都没发，计数从 9 自己走到 10/10，`is_done` 翻真。
+    // 所以「发出去之后计数才追上来」必须能落在**完成**上 —— 它是那晚真实发生过的结局。
+    // 这一条在改动前后都应当通过：它钉的是新出口没有把原来的完成路径挤掉。
+    withRoutes({
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([highLevelPanel(likeRow(0, false)), highLevelPanel(likeRow(10, true))])
+    })
+
+    const outcome = await runOne(ActionKey.LikeDanmaku)
+
+    expect(requestsTo(LIKE_REPORT_V3_URL)).toHaveLength(1)
+    expect(outcome).toMatchObject({ outcome: 'done', failure: 'none', code: '0' })
+    expect(outcome.detail).toContain('已发出 1 轮共 30 次点赞')
+    expect(outcome.detail).toContain('任务已完成（回读确认）')
   })
 
   it('两个端点的码都照原样带出，服务端自己的话进 detail，csrf 被抹掉', async () => {
@@ -1029,6 +1069,14 @@ describe('每条记录都被自己的 item 认得出', () => {
     await expectItemsToAgree([ActionKey.LikeDanmaku, ActionKey.WatchLive])
   })
 
+  it('点赞因计数没跟上而被搁下时也一致', async () => {
+    // 新出口的 `blocked` 也要过同一条不变量：记录说 blocked，它的 item 必须也说 blocked，
+    // 而且两句 detail 是同一句 —— 否则界面上会出现「记录说被搁下、行说做成了」。
+    withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([highLevelPanel(likeRow(0, false))]) })
+
+    await expectItemsToAgree([ActionKey.LikeDanmaku])
+  })
+
   it('会话已死时两条都一致', async () => {
     withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: () => ({ code: -101, message: '账号未登录' }) })
 
@@ -1084,6 +1132,7 @@ describe('界面读到的字', () => {
     'like_task_done',
     'like_limit_reached',
     'medal_not_lit',
+    'like_unfinished',
     'watch_in_progress',
     'no_buvid',
     'missing_uid',
@@ -1128,6 +1177,11 @@ describe('界面读到的字', () => {
       name: '牌子没点亮',
       enabled: [ActionKey.LikeDanmaku, ActionKey.WatchLive],
       install: (): void => withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: unlitPanel() })
+    },
+    {
+      name: '点赞计数没跟上',
+      enabled: [ActionKey.LikeDanmaku],
+      install: (): void => withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([highLevelPanel(likeRow(0, false))]) })
     },
     {
       name: '观看做完',

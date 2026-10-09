@@ -7,8 +7,8 @@ import type { ActionDescriptor, ActionOptionField, ActionShownRead } from '../pl
  * Two declaration tables, one per channel — `ACTION_OPTION_FIELDS` for the knobs a person sets and
  * `ACTION_SHOWN_READS` for the facts an action only shows — and both are merged onto the adapters'
  * descriptors by `descriptorsWithDeclarations`. The two are separate tables rather than one with a
- * discriminator because they answer two different questions, and a read that a `choice` field
- * already names as its `source` belongs in the first table only.
+ * discriminator because they answer two different questions, and a read that a source-backed field
+ * (either kind) already names as its `source` belongs in the first table only.
  *
  * **Why this is not in `platform/**`, and what would move it there.** `ActionDescriptor` is
  * the Platform's declaration of its own surface, so an option's field list belongs on it, and
@@ -138,8 +138,8 @@ export const ACTION_OPTION_FIELDS: Readonly<Record<string, Readonly<Record<strin
       }
     ],
     /**
-     * 清仓's two knobs — both of them a choice, and **both of them a read of the account rather than a
-     * value the account does not have**.
+     * 清仓's two knobs — one a **pick-one** field and one a **ticked set**, and the difference between them
+     * is what the choice's *meaning* is, not a second mechanism.
      *
      * 「默认倾泻直播间」 是一份**他关注了哪些直播间**的列表（`douyu.followedRooms`）。它必须是一个读了
      * 才知道的东西：这个动作把道具送进一个房间，房间号写错了就是把免费货送给一个陌生主播，而「我关注了
@@ -147,9 +147,16 @@ export const ACTION_OPTION_FIELDS: Readonly<Record<string, Readonly<Record<strin
      * 动作**（`action_settings` 的键是 (人, 平台, 动作)），而这个动作是账号级的：`needsTarget: false`，
      * 收件房间来自这一格，不来自任务的目标。
      *
+     * **它是 `pick_one`，而且这个字段就是加这个类型的原因。** 这个动作只往一个房间倒，所以这一格存的是
+     * **一个值**；它先前声明成 `choice`，表单就按 `choice` 画了勾选组、写了勾选组会写的那种值（一份列表），
+     * 于是读一个值的读法从 `["12306"]` 里只读出 `null`，人挑好了房间却收到「还没有选好」。加一个类型比让每个
+     * 读法都学会拆数组好在哪：**表单写的形状从此由声明决定**，所以下一个「挑一个」的字段照抄这一行就对了，
+     * 而不是照抄一个需要读法兜底的形状。见 `ActionOptionKind`。
+     *
      * 「允许使用的道具」 是**背包读**（`douyu.backpack`，与 亲密度任务 的 `giftAllowlist` 同一个来源、
      * **不是同一份清单**）：花什么是每个动作自己的事，而这两个动作的清单是两个单元格。同一个来源在这里
-     * 是安全的，因为来源只回答「这个账号现在持有什么」，权限是字段自己的。
+     * 是安全的，因为来源只回答「这个账号现在持有什么」，权限是字段自己的。它是一个**集合**（`choice`）：
+     * 勾几件就倒几件，一件不勾就是一件都不倒。
      *
      * **到期前多久倒不是一个字段**，而且这是有意的：它是算出来的常量（24 小时，见 `CLEAROUT_WINDOW_MS`），
      * 因为一个可以填错的窗口不是一个好参数——填短了道具会先过期，填长了等于没有窗口。
@@ -159,7 +166,7 @@ export const ACTION_OPTION_FIELDS: Readonly<Record<string, Readonly<Record<strin
         name: 'dumpRoomId',
         label: '默认倾泻直播间',
         help: '即将过期的免费道具送进这个直播间。列表是你关注过的直播间；挑一个你自己会去看、也愿意把亲密度记在那里的。',
-        kind: 'choice',
+        kind: 'pick_one',
         source: 'douyu.followedRooms'
       },
       {

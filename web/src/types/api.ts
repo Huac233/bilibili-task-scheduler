@@ -36,21 +36,30 @@ export const TaskAction = {
 export type TaskAction = (typeof TaskAction)[keyof typeof TaskAction]
 
 /**
- * How a person types one of an action's options.
+ * How a person types one of an action's options — **and, for the two source-backed kinds, what the cell
+ * ends up holding.**
  *
- * Mirrors `ActionOptionKind` in `server/src/platform/types.ts` field for field. Three kinds, and
+ * Mirrors `ActionOptionKind` in `server/src/platform/types.ts` field for field. Four kinds, and
  * deliberately no `json` member: **a field a person cannot type is not ready to be exposed**, so an
  * option whose value is a document is an option this form refuses to draw rather than one it draws
  * as a free-form text box.
+ *
+ * The two source-backed kinds differ in how many values one cell holds, which is the same difference as
+ * the control's: `choice` is a ticked set (a checkbox group, and the cell holds a list), and `pick_one`
+ * is one of them (a single-choice control, and the cell holds that one value rather than a list of one).
+ * **The kind is what decides the control, and the control is what the form writes** — so a "pick one"
+ * field declared `choice` drew checkboxes and wrote a list, which is a shape the action's own reader
+ * cannot get one room out of. See `ActionOptionForm` for the control each kind builds.
  */
-export type ActionOptionKind = 'text' | 'number' | 'choice'
+export type ActionOptionKind = 'text' | 'number' | 'choice' | 'pick_one'
 
 /**
  * One knobs the action reads, as the form needs it.
  *
  * Mirrors `ActionOptionField`. `name` is the key the action reads out of its options, so it is the
  * whole of the option's contract; `label` and `help` are what a person reads; `source` is set
- * exactly when `kind` is `choice` and names where the choices come from — `actionSettingApi.options`
+ * exactly when `kind` is one of the two source-backed kinds (`choice`, `pick_one`) and names where the
+ * choices come from — `actionSettingApi.options`
  * resolves it, because a list of what an account currently holds is not a fact a catalogue can know.
  */
 export interface ActionOptionField {
@@ -59,7 +68,7 @@ export interface ActionOptionField {
   /** One sentence about the field. May be empty, and `''` is not rendered as a blank line. */
   readonly help: string
   readonly kind: ActionOptionKind
-  /** The choice source's key. Present iff `kind` is `choice`. */
+  /** The choice source's key. Present iff `kind` is `choice` or `pick_one`. */
   readonly source?: string
 }
 
@@ -137,15 +146,15 @@ export interface ActionDescriptor {
    * The account-level reads this action *shows*, which are **not** parameters a person sets.
    *
    * The sibling of `optionFields`, and read by the same page: `ActionSettingsPanel` displays the
-   * sources of its `choice` fields **and** these, in one block, because both are the same kind of
-   * fact — an answer from a live source, asked for by name through `GET
+   * sources of the action's source-backed fields **and** these, in one block, because both are the same
+   * kind of fact — an answer from a live source, asked for by name through `GET
    * /api/action-settings/options` and answered with the same success shape and the same failure
    * sentences. What differs is the second use a field's read has: a field's source also fills that
    * field's list in the form, while a shown read belongs to no control at all.
    *
    * Absent rather than empty, for `optionFields`' own reason: "this action shows no read other than
    * its fields'" and "this action shows nothing" are two readings the page draws differently. A read
-   * a `choice` field already names as its `source` must **not** be repeated here — it is displayed
+   * a field already names as its `source` must **not** be repeated here — it is displayed
    * because the field needs it, and declaring it twice would ask one read as two facts.
    */
   readonly shownReads?: readonly ActionShownRead[]

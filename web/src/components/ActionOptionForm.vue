@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NAlert, NButton, NCheckbox, NCheckboxGroup, NFormItem, NInput, NInputNumber } from 'naive-ui'
+import { NAlert, NButton, NCheckbox, NCheckboxGroup, NFormItem, NInput, NInputNumber, NSelect } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 
 import { describeError } from '../api/client.js'
@@ -19,9 +19,17 @@ import { itemLabel, missingReason, noAccountReason } from './choice-notes.js'
  *
  * **Where this form's knowledge comes from**: `ActionDescriptor.optionFields`, which the Platform
  * declares beside the action itself. Nothing here names a Platform, a field name or a control — a
- * text field is a `NInput`, a number field is a `NInputNumber`, and a `choice` field is a checkbox
- * list whose options are read live from the source the field names. That is the same indirection the
+ * text field is a `NInput`, a number field is a `NInputNumber`, a `choice` field is a checkbox
+ * list whose options are read live from the source the field names, and a `pick_one` field is a
+ * single-choice control over that same kind of read. That is the same indirection the
  * create form already relies on, applied to `options`.
+ *
+ * **The kind decides both the control and the shape written back, and that pairing is the point.** A
+ * checkbox group writes what it draws — a list — and the two kinds hold a different number of values:
+ * `choice` is the set a person ticks, `pick_one` is one of them. Declaring a "pick one" field `choice`
+ * therefore drew the wrong control *and* stored a shape the action's own reader could not get a value out
+ * of, which is two defects with one cause; a form that instead taught every reader to unwrap both shapes
+ * would have left the third field free to repeat it.
  *
  * **There is no free-form JSON box, and its absence is deliberate.** A field whose value a person
  * cannot type — a document, a nested map — is not a field this component draws at all, because a
@@ -67,6 +75,20 @@ const error = ref('')
 const saving = ref(false)
 
 /**
+ * The fields whose stored cell holds **more than one value** — the one state a single-choice control
+ * cannot draw.
+ *
+ * Held rather than derived on demand because it is a fact about what was *stored* when the form opened,
+ * and the controls below overwrite the seeded values as a person types: derived from `values` it would
+ * silently become "not several" the moment anything else was read. `save` is its only other reader, and
+ * what it decides there is whether that cell may be written at all.
+ *
+ * Declared above `values` because `seed` fills it, and `values` is seeded at declaration time — a Vue
+ * `setup` body runs in source order, so a ref read by `seed` has to exist before the ref that calls it.
+ */
+const severalCells = ref<Set<string>>(new Set())
+
+/**
  * The typed values, keyed by field name.
  *
  * Seeded once from `storedOptions` and then owned by the controls. Seeding is **copied** rather than
@@ -83,9 +105,17 @@ const pendingReads = new Set<string>()
 function seed(options: unknown): Record<string, string | number | null | string[]> {
   const stored = flattenOptions(options)
   const seeded: Record<string, string | number | null | string[]> = {}
+  const several = new Set<string>()
   for (const field of props.descriptor.optionFields ?? []) {
-    seeded[field.name] = field.kind === 'choice' ? stringListOf(stored[field.name]) : scalarOf(stored[field.name])
+    const cell = stored[field.name]
+    if (field.kind === 'pick_one') {
+      seeded[field.name] = pickedOneOf(cell)
+      if (Array.isArray(cell) && cell.length > 1) several.add(field.name)
+      continue
+    }
+    seeded[field.name] = field.kind === 'choice' ? stringListOf(cell) : scalarOf(cell)
   }
+  severalCells.value = several
   return seeded
 }
 
@@ -96,6 +126,29 @@ function stringListOf(value: unknown): string[] {
   return entries.filter((entry): entry is string => typeof entry === 'string')
 }
 
+/**
+ * A stored value as a pick-one field holds it: **the one value it means, however it was written**.
+ *
+ * Two shapes, and the second one is a repair rather than a contract. A checkbox group writes what it
+ * draws, and this field was declared `choice` until it was declared `pick_one` — so the row already in the
+ * owner's database holds a one-element list (`{"dumpRoomId":["12306"],…}`), and a control that read only a
+ * bare value would show him an empty box over a room he had picked, which is the same defect arriving on
+ * the form instead of in the action log. Anything else — nothing stored, an empty list, an empty string,
+ * or a list of two or more — is nothing this control can show, and the two readings behind that blank are
+ * told apart where they matter: `severalCells` for the save, and the action's own report for the run.
+ *
+ * **`server/src/platform/douyu/index.ts`'s `dumpRoomIn` tolerates the same one-element list**, and the
+ * two implementations are deliberate: the packages share no code, and the rule is one row rather than one
+ * function — the shape the old form wrote, read back by both halves that have to agree about it.
+ */
+function pickedOneOf(value: unknown): string | null {
+  const entries: readonly unknown[] = Array.isArray(value) ? value : [value]
+  if (entries.length !== 1) return null
+  const [only] = entries
+  if (typeof only === 'number') return String(only)
+  return typeof only === 'string' && only !== '' ? only : null
+}
+
 /** A stored value as a text or number field holds it. Anything else reads as untouched. */
 function scalarOf(value: unknown): string | number | null {
   return typeof value === 'string' || typeof value === 'number' ? value : null
@@ -104,20 +157,30 @@ function scalarOf(value: unknown): string | number | null {
 const fields = computed<readonly ActionOptionField[]>(() => props.descriptor.optionFields ?? [])
 
 /**
- * Whether this action declares a list at all.
+ * Whether this action declares a ticked list at all.
  *
  * The note below is about what a list does and what it does not, so it is drawn only where a list
  * is. An action whose only option is a number — 「钓几次」 — has no list for the sentence to be
  * about, and drawing it there is how one Platform's private fact ended up on another action's form.
+ *
+ * **A `pick_one` field is not that list, and the two are told apart by `kind` for exactly this reason.**
+ * The note is about a *set* — 「这份清单决定这个动作可以动哪些」 — while a pick-one field names one destination,
+ * which decides *where* an action goes rather than *which* things it may touch. The field's own `help`
+ * says what its values mean, so an action declaring only a destination loses nothing by this gate.
  */
 const hasChoiceField = computed<boolean>(() => fields.value.some(field => field.kind === 'choice'))
 
 /**
- * Reads every choice-backed field once.
+ * Reads every source-backed field once.
  *
- * A form opened with no account bound still renders — and each choice field says why it has no list
+ * A form opened with no account bound still renders — and each such field says why it has no list
  * rather than drawing an empty one, which is the reading this whole path exists to avoid: an empty
  * checkbox list and a failed read look identical on screen and mean opposite things.
+ *
+ * **The gate is `source`, not `kind`.** Which control a field draws (and therefore how many values it
+ * stores) is what `kind` decides, while *whether the options come from a live read at all* is what the
+ * source says — so a gate naming one kind would leave a `pick_one` field drawn as a control no read ever
+ * fills, which is what 「默认倾泻直播间」 met the moment it stopped being declared `choice`.
  *
  * **`accountId: null` is two facts, and the sentence divides them.** The panel hands one value for
  * "this Platform has no account bound" and for "the account list did not arrive", and 「还没有绑定账号」 is
@@ -128,7 +191,7 @@ const hasChoiceField = computed<boolean>(() => fields.value.some(field => field.
  */
 async function loadChoices(): Promise<void> {
   for (const field of fields.value) {
-    if (field.kind !== 'choice' || field.source === undefined) continue
+    if (field.source === undefined) continue
     if (field.name in choices.value || pendingReads.has(field.name)) continue
 
     if (props.accountId === null) {
@@ -191,6 +254,43 @@ function choiceNoteClass(field: ActionOptionField): string {
 }
 
 /**
+ * A single-choice field's two readings, and what each is drawn from.
+ *
+ * `pickedOf` is what the control shows — the one stored value, or nothing — and `optionsOf` is the live
+ * read in the shape `NSelect` wants, worded by the same `itemLabel` the checkbox group's rows use, so the
+ * two controls cannot describe one item differently. `heldSeveral` is the third reading: the cell holds
+ * more than the control can draw, which is a fact about the *cell* rather than about the control, so it is
+ * drawn as a sentence beside the control instead.
+ */
+function pickedOf(field: ActionOptionField): string | null {
+  const value = values.value[field.name]
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+function setPicked(field: ActionOptionField, next: string | number | null): void {
+  // The group's own narrowing, for the group's own reason: every row is keyed by the source's `value`,
+  // which is a string, so nothing else may reach the stored cell.
+  values.value[field.name] = typeof next === 'string' ? next : null
+}
+
+/**
+ * The live read in the shape `NSelect` takes: one row per item, worded by the same `itemLabel` the
+ * checkbox group's rows use, so the two controls cannot describe one item two ways.
+ *
+ * The array is mutable because the widget's own prop type is — `SelectMixedOption[]` — and the *fields* are
+ * readonly, which is the half this form can make true: nothing here mutates a row, and the widget only
+ * reads them.
+ */
+function selectOptionsOf(field: ActionOptionField): { readonly label: string; readonly value: string }[] {
+  return itemsOf(field).map(item => ({ label: itemLabel(item), value: item.value }))
+}
+
+/** Whether the cell one field was seeded from holds more than its control can draw. */
+function heldSeveral(field: ActionOptionField): boolean {
+  return severalCells.value.has(field.name)
+}
+
+/**
  * One item's line, and what to say where a list has none — both from `./choice-notes.js`.
  *
  * They are imported rather than written here because the preferences page draws the same two
@@ -245,6 +345,13 @@ function textValueOf(field: ActionOptionField): string {
  * an absent list and an empty one the same way, so a person who cleared the list means exactly what
  * the cleared list says.
  *
+ * **A pick-one field writes one value, and its `undefined` is a deletion rather than an empty cell.**
+ * That cell means a destination, so "no destination" is the absence of the key — the state the action
+ * reads as 「还没有选好」. The one case this does not write is `heldSeveral`: a cell holding two values is
+ * one this control cannot draw, and a save is not entitled to erase a setting it never showed. That is the
+ * same promise as the paragraph above, one state further in — the difference being that a field this form
+ * cannot *render* is skipped by the loop, while this one is declared and has to be written back on purpose.
+ *
  * **The write goes through the store, not straight at the API.** The store caches the row the server
  * answers with, and this form re-seeds from that cache every time it is opened — it is mounted inside
  * a `v-if`, so closing it destroys the instance. A save that wrote past the store left the server
@@ -257,7 +364,10 @@ async function save(): Promise<void> {
   for (const field of fields.value) {
     const value = values.value[field.name]
     if (field.kind === 'choice') merged[field.name] = Array.isArray(value) ? value : []
-    else merged[field.name] = value === null ? undefined : value
+    else if (field.kind === 'pick_one') {
+      if (typeof value === 'string' && value !== '') merged[field.name] = value
+      else if (!heldSeveral(field)) merged[field.name] = undefined
+    } else merged[field.name] = value === null ? undefined : value
   }
 
   saving.value = true
@@ -308,6 +418,51 @@ async function save(): Promise<void> {
           -->
           <div v-else :class="choiceNoteClass(field)">
             {{ missingReason(choiceOf(field)) }}
+          </div>
+        </div>
+
+        <div v-else-if="field.kind === 'pick_one'" class="choice">
+          <!--
+            **One of them, and not a set.** The field's meaning is "pick one", so the control offers one at
+            a time; a checkbox group here would tell a person they may take several of a thing the action is
+            aimed at once — and, because a control writes what it draws, it would store a list the action's
+            own reader can get no value out of.
+
+            `clearable` is the "choose none" answer, which is a real state: it stores no key at all, and the
+            action reads that as 「还没有选好」. It is a select rather than a radio column because the read
+            behind it is a person's **follow list**, which can be long, and `filterable` is what makes a long
+            one searchable; the trigger shows the chosen room's own name, never the value it stores.
+          -->
+          <NSelect
+            v-if="itemsOf(field).length > 0"
+            :value="pickedOf(field)"
+            :options="selectOptionsOf(field)"
+            clearable
+            filterable
+            placeholder="从这份清单里挑一个"
+            style="width: 320px"
+            @update:value="(next: string | number | null) => setPicked(field, next)"
+          />
+
+          <!--
+            No list, and the same three readings the checkbox group's fallback divides: a read in flight,
+            a read that failed, and a read that answered nothing.
+          -->
+          <div v-else :class="choiceNoteClass(field)">
+            {{ missingReason(choiceOf(field)) }}
+          </div>
+
+          <!--
+            What the control cannot draw, said rather than left as a blank.
+
+            A cell holding two rooms is the other shape the field's old declaration could write, and a
+            single-choice control can only show one — so it shows none, and 「空着」 would be this form
+            asserting something about a person's own setting that the cell's contents contradict. The
+            sentence is read from `heldSeveral`, which is a fact about the stored cell, and it names the one
+            move that clears the state: choosing a room from the list replaces it.
+          -->
+          <div v-if="heldSeveral(field)" class="note-several">
+            这一格里存着不止一个直播间，而这里一次只能挑一个，所以它看起来是空的。从上面这份清单里挑一个，这一格就会被换成你挑的那一个。
           </div>
         </div>
 
@@ -373,6 +528,11 @@ async function save(): Promise<void> {
   flex-direction: column;
 }
 
+/*
+ * One source-backed field's block: the control, or the sentence that says why there is none, and — under a
+ * single-choice control — the sentence about a cell it cannot draw. Both kinds share the name because the
+ * layout is the same one; which of them a field is, is the field's own `kind`.
+ */
 .choice {
   display: flex;
   flex-direction: column;
@@ -385,7 +545,7 @@ async function save(): Promise<void> {
 }
 
 /*
- * The three colours this form draws are the app palette's, read by name rather than written here:
+ * The four colours this form draws are the app palette's, read by name rather than written here:
  * `App.vue` publishes the seven roles from the live theme, and the form is mounted both inside the
  * panel — which has a palette to inherit from either way — and from `TaskDetailView.vue`. The greys
  * that were `#888` are a step darker now, which is what taking the role rather than a literal means:
@@ -410,6 +570,17 @@ async function save(): Promise<void> {
 
 /* A read that succeeded on an empty source: an answer, not a failure, so it is not coloured as one. */
 .note-empty {
+  color: var(--row-quiet);
+  font-size: 13px;
+}
+
+/*
+ * And the fourth reading, which is about the *cell* rather than about the read: a single-choice field's
+ * stored value holds more than its control can draw. Quiet like the two above it, because nothing has gone
+ * wrong anywhere — and a name of its own, for those two names' own reason: three different facts drawn as
+ * one class is how a test asserting 「this is the wait」 starts passing over an unshowable setting.
+ */
+.note-several {
   color: var(--row-quiet);
   font-size: 13px;
 }

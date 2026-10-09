@@ -159,7 +159,7 @@ export const actionSettingApi = {
   },
 
   /**
-   * The choices for one choice-backed field, read live.
+   * The choices for one source-backed field, read live.
    *
    * **Failure is a value, not a throw**, because the route answers a refusal and a contract change
    * as `unavailable` with a sentence rather than a status code: a form that showed an error toast
@@ -405,8 +405,20 @@ export const eventApi = {
     return data
   },
 
-  async recent(limit = 50): Promise<SystemEvent[]> {
-    const { data } = await http.get<{ ok: boolean; events: SystemEvent[] }>(`/api/events/recent?limit=${String(limit)}`)
+  /**
+   * The newest events of the kinds asked for, for the in-app feed.
+   *
+   * `kinds` is required rather than optional, because "no opinion" is not a state this caller has:
+   * the page's filter always has a selection, and **the selection is what decides which kinds come
+   * back** — the server cannot know it, which is why it travels as a parameter rather than being
+   * stored on the account. The two spellings of nothing are read apart on the wire: an empty list
+   * here is a caller asking for none of them, and omitting the parameter is a caller with no filter
+   * at all (which is what a consumer written before this parameter existed sends).
+   */
+  async recent(kinds: readonly string[], limit = 50): Promise<SystemEvent[]> {
+    const { data } = await http.get<{ ok: boolean; events: SystemEvent[] }>(
+      `/api/events/recent?limit=${String(limit)}&kinds=${kinds.join(',')}`
+    )
     return data.events
   }
 }

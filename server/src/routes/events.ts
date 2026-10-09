@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
 import { countTokens, createApiToken, listApiTokens, MAX_TOKENS_PER_USER, revokeApiToken } from '../repo/api-tokens.js'
-import { latestEventId, listEventsSince, listRecentEvents } from '../repo/events.js'
+import { EventKind, latestEventId, listEventsSince, listRecentEvents } from '../repo/events.js'
 import { type AppContext, requireUser } from './context.js'
 import { bodyOrEmpty, idParam, queryInt } from './validation.js'
 
@@ -41,7 +41,34 @@ const listEventsQuery = z.object({
   limit: queryInt({ fallback: DEFAULT_EVENT_LIMIT, min: 1, max: MAX_EVENT_LIMIT })
 })
 
-const recentEventsQuery = z.object({ limit: queryInt({ fallback: 50 }) })
+/**
+ * The kinds a caller wants, as the page's filter sends them: one comma separated value.
+ *
+ * Two spellings arrive here and only one is ours — `IntegrationsView` joins its ticked kinds with
+ * commas, and Fastify hands *repeated* `kinds=` parameters through as an array, which is what
+ * somebody probing by hand writes. Both become the same list.
+ *
+ * **Absent is "no filter" and present-but-empty is "none of them"**, and they must stay different
+ * requests. Absent is what a caller with no opinion sends, and must keep seeing the whole feed;
+ * `?kinds=` is an owner who unticked every box, and answering that with everything would show him
+ * the noise he just hid. `queryInt` reads an empty value as absent for the opposite reason — a
+ * number's zero and its absence are the same wire value, and here they are not.
+ *
+ * An unknown name is refused rather than dropped: a dropped one answers with a feed that quietly
+ * excludes what was asked for, which reads as "nothing happened" rather than as a bad request.
+ */
+function splitKinds(value: unknown): unknown {
+  if (value === undefined) return undefined
+  return (Array.isArray(value) ? value : [value])
+    .filter((part): part is string => typeof part === 'string')
+    .flatMap(part => part.split(','))
+    .map(part => part.trim())
+    .filter(part => part !== '')
+}
+
+const kindsQuery = z.preprocess(splitKinds, z.array(z.enum(EventKind, { error: '事件类型无效' }))).optional()
+
+const recentEventsQuery = z.object({ limit: queryInt({ fallback: 50 }), kinds: kindsQuery })
 
 export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void {
   /**
@@ -72,7 +99,16 @@ export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void
     }
   )
 
-  /** Newest-first view for the in-app activity panel. */
+  /**
+   * Newest-first view for the in-app activity panel, and the only route the page's own kind filter
+   * touches.
+   *
+   * **The filter is not on `GET /api/events`, and that is a decision rather than an omission.** The
+   * AstrBot plugin polls that route with a cursor, so narrowing it would not merely change what the
+   * plugin receives: the cursor would walk past the kinds it was not shown, and the retention window
+   * would then delete them — a lost notification, for a filter that was meant to tidy a page. The
+   * choice therefore belongs to the caller that made it, and travels as `kinds` on this request.
+   */
   app.get<{ Querystring: z.infer<typeof recentEventsQuery> }>(
     '/api/events/recent',
     { schema: { querystring: recentEventsQuery } },
@@ -80,7 +116,9 @@ export function registerEventRoutes(app: FastifyInstance, ctx: AppContext): void
       const user = requireUser(request, reply, ctx)
       if (user === null) return undefined
 
-      return { ok: true, events: listRecentEvents(ctx.db, user.id, request.query.limit) }
+      const { limit, kinds } = request.query
+
+      return { ok: true, events: listRecentEvents(ctx.db, user.id, limit, kinds) }
     }
   )
 

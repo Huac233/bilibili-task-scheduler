@@ -71,6 +71,7 @@ import {
   type FishingState,
   fetchCsrfCookie,
   type GiftCharge,
+  GROWTH_POOL_ALREADY_CLOCKED,
   GROWTH_POOL_CSRF_REJECTED,
   GROWTH_POOL_NOT_ENOUGH_FISH_BALLS,
   GROWTH_POOL_TOKEN_REJECTED,
@@ -521,7 +522,11 @@ const ACTIONS: readonly ActionDescriptor[] = [
  *
  * 清仓's are the same idea again, for an action whose two facts come from four different reads. `no_dump_room`
  * and `no_prop_allowlist` are its two person-fixable settings states, and they are two because the next
- * move differs: name a room, or write a list. `no_badges` is shared with 粉丝家园签到 — the badge wall
+ * move differs: name a room, or write a list. **`many_dump_rooms` is the third settings state and it is not
+ * one of those two**: the destination cell holds more than one room — the shape the checkbox form wrote
+ * while the field was declared `choice` — so the recipient is ambiguous and the next move (keep one) is
+ * neither of the other two states' moves. Which room was meant is not in the data and a gift cannot be
+ * un-sent, so the run stops before it reads anything at all. `no_badges` is shared with 粉丝家园签到 — the badge wall
  * listing nothing is one fact, and 清仓 reads it fail-closed rather than as "nothing to renew", because a wall
  * this build failed to read a single row out of *is* an empty wall, and with no medal known there is no
  * reservation to keep anything back for. `no_gift_held` is shared with
@@ -542,6 +547,7 @@ const LocalCode = {
   ExpiryUnknown: 'expiry_unknown',
   GiftsSent: 'gifts_sent',
   GiftShort: 'gift_short',
+  ManyDumpRooms: 'many_dump_rooms',
   NoBadges: 'no_badges',
   NoBait: 'no_bait',
   NoCharacter: 'no_character',
@@ -2431,17 +2437,60 @@ function giftAllowlistIn(options: unknown): readonly string[] {
 }
 
 /**
- * The room 「默认倾泻直播间」 names, or `null` when nothing usable is stored under it.
+ * What the 「默认倾泻直播间」 cell says, once read.
+ *
+ * **Three readings rather than a `number | null`, because the caller owes a person a true sentence about
+ * each of them.** `unset` and `several` used to be one value — `null` — and one sentence, and that
+ * sentence is 「还没有选好」: it is false over a cell holding two rooms, and a blocked report claiming
+ * something about a person's own setting is worse than a blocked report with no words at all. So the
+ * readings travel out of the reader and the caller words each one.
+ */
+type DumpPick =
+  | { readonly kind: 'unset' }
+  | { readonly kind: 'one'; readonly roomId: number }
+  | { readonly kind: 'several' }
+
+/**
+ * The room 「默认倾泻直播间」 names, or why this build will not send into one.
  *
  * A room *number*, checked by the same `roomIdOf` every other Douyu target goes through — the field's
  * choices come from the follow list, whose ids are room numbers, so anything else in this cell is either
  * a stale value or a hand-written one and neither may become a `roomId` of a gift POST.
+ *
+ * **It reads two shapes, and tolerating the second is a repair rather than a contract.** The field was
+ * declared `choice` until this change, so the form drew it as a checkbox group and wrote what a checkbox
+ * group writes: the owner's own row holds `{"dumpRoomId":["12306"],…}`. A reader that took a single value
+ * out of that cell answered `null`, and the action then told him 「还没有选好」 — to a person who had picked
+ * a room. So a one-element list is read as the one value it holds, and the shape is **never written back**:
+ * `ActionOptionKind.pick_one` is what the form writes now, so a list can only be a row the old form wrote.
+ * What the cell *means* — pick one — decides the rest, and the boundaries are:
+ *
+ *  - **an absent key, `''` or `[]`** → `unset`: nobody has answered this cell;
+ *  - **one entry** — a bare string or number, or a one-element list of either — → that room, or `unset`
+ *    when it is not a room number (a stale or hand-written value, which the reader never guesses at);
+ *  - **two or more entries** → `several`, and the caller reports it rather than choosing between them.
+ *    Which room was meant is not in the data, and a gift is public and cannot be un-sent — see
+ *    `reconcileClearout` for the sentence that says so.
  */
-function dumpRoomIn(options: unknown): number | null {
-  if (typeof options !== 'object' || options === null) return null
+function dumpRoomIn(options: unknown): DumpPick {
+  if (typeof options !== 'object' || options === null) return { kind: 'unset' }
   const declared: unknown = (options as Record<string, unknown>)['dumpRoomId']
+
+  if (Array.isArray(declared)) {
+    const entries: readonly unknown[] = declared
+    if (entries.length > 1) return { kind: 'several' }
+    return roomIn(entries[0])
+  }
+
+  return roomIn(declared)
+}
+
+/** One entry of the cell as a room number, or `unset` — the one place this cell's text becomes an id. */
+function roomIn(declared: unknown): DumpPick {
   const text = typeof declared === 'number' ? String(declared) : typeof declared === 'string' ? declared.trim() : ''
-  return text === '' ? null : roomIdOf(text)
+  if (text === '') return { kind: 'unset' }
+  const roomId = roomIdOf(text)
+  return roomId === null ? { kind: 'unset' } : { kind: 'one', roomId }
 }
 
 /* ------------------------------------------------------------------ *
@@ -3303,10 +3352,11 @@ async function reconcileClearout(
   }
 
   const options = context.options[key]
-  const dumpRoom = dumpRoomIn(options)
-  if (dumpRoom === null) {
-    // Two readings of one empty cell — nothing stored, and something stored that is not a room number — and
-    // both end the same way: this action has nowhere to send to, so it sends nothing.
+  const pick = dumpRoomIn(options)
+  if (pick.kind === 'unset') {
+    // An absent cell, an empty one and a value that is not a room number: all three end the same way —
+    // this action has nowhere to send to, so it sends nothing — and 「还没有选好」 is true of every one of
+    // them, because none of them is a destination.
     return accountOutcome(
       key,
       'blocked',
@@ -3315,6 +3365,23 @@ async function reconcileClearout(
       'action_stop'
     )
   }
+
+  if (pick.kind === 'several') {
+    // **The reading this build refuses to guess at.** The cell holds more than one room — the shape the
+    // checkbox form wrote before this field was declared `pick_one` — and the sentence may not be the one
+    // above: he did pick, he picked twice, so 「还没有选好」 would be telling a person to do what he has
+    // already done. Choosing between them is no better: which room was meant is not in the data, and a
+    // gift is public and cannot be un-sent.
+    return accountOutcome(
+      key,
+      'blocked',
+      '未倒：「默认倾泻直播间」这一格存了不止一个直播间，这一版不知道该往哪一个倒（在偏好设置里只留一个，改完这个动作会自己继续）',
+      LocalCode.ManyDumpRooms,
+      'action_stop'
+    )
+  }
+
+  const dumpRoom = pick.roomId
 
   const allowlist = idListIn(options, 'propAllowlist')
   if (allowlist.length === 0) {
@@ -4546,7 +4613,9 @@ const GROWTH_POOL_JOINED = 1
  *
  * **One run does one half, and 「打完卡瓜分完鱼丸后又报名一次」 is therefore two runs.** The latch
  * is read once, at the top, and one branch is taken from it; neither half re-reads the latch
- * afterwards, and each returns `done` — which `runner.ts` counts as settled for the platform-day.
+ * afterwards, and each returns a settled outcome — `done`, or `already` when the half was in place
+ * before the run looked (`57004` on the check-in, and see `growthPoolCheckIn`) — which `runner.ts`
+ * counts as settled for the platform-day.
  * So the re-join lands on a later run, which is where the new round wants it anyway: a join opens
  * the *next* day's 19:00–21:00 window. That reading is confirmed rather than assumed, and the shape
  * it confirms is the one already here: `growthPoolSignUp` and `growthPoolCheckIn` are single-purpose
@@ -4648,6 +4717,22 @@ function poolClauseOf(join: GrowthPoolJoin): string {
  * this project's clock: the two clocks disagree, and the grade that follows from that is
  * `growthPoolRefusal`'s (retry, never a parked day).
  *
+ * **The call has two verdicts that mean the card is in place, and they are told apart because they
+ * are different facts about this run.** `0` is "written now", which is the day's `done`; `57004` is
+ * "it was already there when this run asked", which is the day's `already` — the 19:00:20 check-in
+ * of 2026-10-09 against the two runs at 19:45 and 19:50 (see `GROWTH_POOL_ALREADY_CLOCKED`). The
+ * second one is why this half no longer reports 「打卡失败」 for a day that was successfully checked
+ * in: the sentence it shows is the state the code read, and its grading is what lets `runner.ts`'s
+ * `settledToday` stop asking for the rest of the day instead of repeating that line every sweep.
+ *
+ * **The two verdicts that mean "not this run" sit next to each other here and must not be merged**:
+ * this gate's `blocked` + `window_not_open` + `failure: 'none'` is *现在不能打*, and the receipt's
+ * `already` + `57004` below is *今天已经打过了*. The first is deliberately **not settled** — the
+ * window it waits for opens later the same day, so the sweep has to come back inside 19:00–21:00 —
+ * and `failure: 'none'` keeps it off the 动作受阻 feed, because a window that is not open yet is this
+ * action working as designed. The second is settled, because nothing else can happen today. Neither
+ * reads as 「失败」, and that is the point: a failure is one of the things neither of them is.
+ *
  * **Neither outcome claims an amount**, and the activity's rules say why that is the only
  * honest report: 「每日瓜分鱼丸数额于当日 21:00 后开始结算，22:00 前自动发放至个人账户」， so at
  * the instant of the check-in the figure does not exist yet. The clock reply's `data` carries the
@@ -4668,7 +4753,33 @@ async function growthPoolCheckIn(key: string, token: string, dyCookie: string, n
   const clocked = await callGraded('打卡', () => clockGrowthPool(token, dyCookie), token, dyCookie)
   if (!clocked.ok) return transportFailure(key, clocked)
   const receipt = clocked.reply
-  if (!receipt.ok) return growthPoolRefusal(key, '打卡失败', receipt)
+  if (!receipt.ok) {
+    // **The day's card is already in place, so this is not a failure and it does not travel through
+    // `growthPoolRefusal`** — every branch of that function describes a half that did not happen.
+    //
+    // It is graded *here* rather than in that table for the reason this file's own `-1` /
+    // `FISH_BALL_ALREADY_CLAIMED` note gives: such a number means this only where the endpoint that
+    // sent it is known, and the one endpoint it was measured on is this call. Nothing has ever
+    // answered `57004` to `joinSignActivity`, so a sentence about 打卡 cannot be printed for 报名 —
+    // which is what putting the branch behind this call site makes unrepresentable rather than
+    // merely unlikely. See `GROWTH_POOL_ALREADY_CLOCKED` for what the number's evidence does and
+    // does not establish.
+    if (receipt.code === GROWTH_POOL_ALREADY_CLOCKED) {
+      // `already` is this codebase's own word for exactly this state — `reconcileClientSign`,
+      // `reconcileActivitySign` and `reconcileFishBall` all answer it for a day whose work was
+      // already done when the run looked — and `action_stop` rides with it there for the same
+      // reason it does here: there is nothing left to attempt today.
+      //
+      // **That grade is also what stops the false line, and it is worth naming because the old path
+      // was the opposite.** `57004` classified through `classifyError`'s unknown-code default, i.e.
+      // `retry`, so the evening's runs reported 「打卡失败」 every sweep while the account was
+      // checked in. `already` is one of the three settled values `runner.ts`'s `settledToday` reads,
+      // so the sweep stops asking about this action until the Platform's day rolls over — which is
+      // the whole point, since the only outstanding work left is tomorrow's window.
+      return accountOutcome(key, 'already', '已打卡', String(GROWTH_POOL_ALREADY_CLOCKED), 'action_stop')
+    }
+    return growthPoolRefusal(key, '打卡失败', receipt)
+  }
 
   return accountOutcome(
     key,
@@ -4684,7 +4795,10 @@ async function growthPoolCheckIn(key: string, token: string, dyCookie: string, n
  *
  * Four of its codes do not mean what a global table would say, so the mapping lives here,
  * beside the endpoints that produce them — the same reasoning `FISH_BALL_ALREADY_CLAIMED`
- * is built on:
+ * is built on. **The family's fifth code is deliberately not here**: `57004` is not a refusal —
+ * the day's card is already in place — and every branch below is a sentence about a half that did
+ * not happen. `growthPoolCheckIn` grades it at the call that measured it, which is also what keeps
+ * a 打卡 sentence off the 报名 half.
  *
  *  - `10001` is **account-level**. The service answers it for a body carrying no `token`,
  *    and this adapter always sends one, so receiving it means the session presented was not

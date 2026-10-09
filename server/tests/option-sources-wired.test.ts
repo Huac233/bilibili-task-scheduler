@@ -16,7 +16,7 @@ import { test as it } from './fixtures.js'
  * it.
  *
  * **The second walk is the newer half, and it is the same property.** `shownReads` is the channel for
- * a read no `choice` field names as its source — the shape whose absence made `douyu.medalRooms`
+ * a read no source-backed field names as its source — the shape whose absence made `douyu.medalRooms`
  * registered and invisible — so a shown read whose source this build never wired is a read that
  * reaches the page as 「这一版没有接上…」 *and* has no field channel to have been noticed through. Both
  * declaration tables are walked here because production's wiring is what is under test, and neither
@@ -66,7 +66,11 @@ describe('the choice sources a catalogue declares', () => {
         const declared = [
           ...fieldsOf(platform.key, action.key).map(field => ({
             what: field.name,
-            source: field.kind === 'choice' ? field.source : undefined
+            // Both source-backed kinds, walked by the one property that makes a field askable at all: a
+            // typed field has no source and is skipped by the filter below, and a filter on `kind` would
+            // have to name both members — which is how a `pick_one` field's source goes unwalked the day
+            // one is added.
+            source: field.source
           })),
           ...shownReadsOf(platform.key, action.key).map(read => ({ what: read.name, source: read.source }))
         ]

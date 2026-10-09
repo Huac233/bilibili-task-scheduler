@@ -117,6 +117,19 @@ function receiptOf(rows: readonly Row[]): string {
 /** The two medal rooms the captured page lists. */
 const ROOM_A = '12293234'
 const ROOM_B = '12306'
+
+/**
+ * The owner's own stored row, **verbatim out of his database** — the one fixture this field's shape is
+ * judged by.
+ *
+ * A string rather than an object literal, because the shape *is* the evidence: the field was declared
+ * `choice`, the form drew it as a checkbox group, and a checkbox group writes what it draws, so the cell
+ * holds a one-element list where the field means "pick one". A test that wrote `['12306']` by hand would
+ * be asserting the same thing, and a reader that only ever met hand-built rows could not tell which of
+ * the two shapes the form actually produced. `JSON.parse` of this text is exactly what the action is
+ * handed at the seam.
+ */
+const STORED_OWNER_ROW = '{"dumpRoomId":["12306"],"propAllowlist":["23","268","3410"]}'
 /** A room id out of Douyu's own front-end bundle: no medal here, so it can only be a destination. */
 const ROOM_NO_MEDAL = '74960'
 
@@ -299,6 +312,51 @@ describe('清仓 — the settings a person must supply', () => {
     // A cell that is not a room number is the same state as an empty one, and never a `roomId` for a POST.
     const bogus = await run({ storedOptions: { dumpRoomId: 'not-a-room', propAllowlist: ['268'] } })
     expect(bogus).toMatchObject({ outcome: 'blocked', code: 'no_dump_room', failure: 'action_stop' })
+    expect(requests).toEqual([])
+  })
+
+  it('aims at the room the owner really stored, which the checkbox form wrote as a one-element list', async () => {
+    // **The owner's own failure, as evidence rather than as a description.** His row is the constant above;
+    // the reader used to take a *single* value out of that cell, so a one-element list answered `null` and
+    // the action reported `no_dump_room` — 「未倒：还没有选好「默认倾泻直播间」」 — to a person who had ticked a room.
+    // What is asserted is the destination the POST carries, and it is asserted on the captured body byte
+    // for byte: `12306` is that capture's own `roomId`, so a run aimed anywhere else fails this line.
+    const outcome = await run({ storedOptions: JSON.parse(STORED_OWNER_ROW) as Record<string, unknown> })
+
+    expect(outcome).not.toMatchObject({ code: 'no_dump_room' })
+    expect(outcome.detail).not.toContain('还没有选好')
+    const sent = requestsTo(DONATE_PATH)
+    expect(sent).toHaveLength(10)
+    for (const call of sent) expect(call.body).toBe(BODY_DONATE_REQUEST)
+    // Only `268` of the three ids he ticked is in the captured backpack, which is why the walk sends that
+    // one and nothing else: the other two are ids of items this account does not hold.
+    expect(new Set(sentPropIds())).toEqual(new Set(['268']))
+    expect(outcome.items[0]?.detail).toContain('已送 10 件「粉丝荧光棒」给电棍')
+  })
+
+  it('pins the pick-one cell at zero, one and many', async () => {
+    // **Three readings, three sentences**, because the state the cell is in decides what is true of it —
+    // and only the middle one is a send. An empty list is the same state as an absent key: nobody has
+    // answered this cell, and the sentence that says so stays the one it always was.
+    const none = await run({ storedOptions: { dumpRoomId: [], propAllowlist: ['268'] } })
+    expect(none).toMatchObject({ outcome: 'blocked', code: 'no_dump_room', failure: 'action_stop' })
+    expect(none.detail).toContain('还没有选好')
+    expect(requests).toEqual([])
+
+    // One entry is a room, whichever of the two shapes the one value arrived in.
+    const one = await run({ storedOptions: { dumpRoomId: [ROOM_B], propAllowlist: ['268'] } })
+    expect(requestsTo(DONATE_PATH)[0]?.body).toBe(BODY_DONATE_REQUEST)
+    expect(one.detail).not.toContain('还没有选好')
+
+    // **Many is the ambiguous one, and this build refuses it rather than picking.** Which room a person
+    // meant is not in the data — and a gift is public and cannot be un-sent — so a two-entry cell is
+    // reported as itself, in a sentence that also may not say 「还没有选好」: he did pick, he picked twice.
+    requests.length = 0
+    const many = await run({ storedOptions: { dumpRoomId: [ROOM_B, ROOM_NO_MEDAL], propAllowlist: ['268'] } })
+    expect(many).toMatchObject({ outcome: 'blocked', code: 'many_dump_rooms', failure: 'action_stop' })
+    expect(many.detail).toContain('不止一个')
+    expect(many.detail).not.toContain('还没有选好')
+    // Nothing was read and nothing was sent: the destination is decided before any request goes out.
     expect(requests).toEqual([])
   })
 

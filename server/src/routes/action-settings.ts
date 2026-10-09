@@ -381,14 +381,16 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
    * list means "this account holds nothing", which is a claim only the account's own answer can
    * make.
    *
-   * **One route for both channels, and that is the mechanism rather than a shortcut.** A read a
-   * `choice` field names as its `source` is displayed and used as the field's own list; a read no
+   * **One route for both channels, and that is the mechanism rather than a shortcut.** A read a field
+   * names as its `source` — under either of the two source-backed kinds — is displayed and used as the
+   * field's own list; a read no
    * field names is displayed alone, and `ActionDescriptor.shownReads` is where it is declared. Both
    * are asked for here, by name, and answered identically — so a page has one fetch path, one
    * success shape and one set of failure sentences for the reads it shows.
    *
-   * Three refusals and no fourth: an unknown name (neither a field nor a shown read), a field that
-   * is not choice-backed, and an account that is not the caller's. Each is a request this build has
+   * Three refusals and no fourth: an unknown name (neither a field nor a shown read), a field **no source
+   * backs** (`choice` and `pick_one` are the two kinds read from one, and a typed field has no list to
+   * answer with), and an account that is not the caller's. Each is a request this build has
    * no answer for, and answering anyway — with `[]`, or with the caller's own stored options —
    * would be the form showing a person something no read produced. **The second channel adds names
    * to the first lookup and does not loosen it**: a name this action does not declare is still a
@@ -406,12 +408,12 @@ export function registerActionSettingRoutes(app: FastifyInstance, ctx: AppContex
       if (platform === null) return reply.code(400).send({ ok: false, error: `未知平台：${query.platform}` })
 
       const field = fieldOf(platform.key, query.actionKey, query.field)
-      if (field !== null && (field.kind !== 'choice' || field.source === undefined)) {
+      if (field !== null && field.source === undefined) {
         return reply.code(400).send({ ok: false, error: `选项「${field.label}」是自己填写的，没有可选项列表` })
       }
 
-      // The second declaration channel: a read the action *shows*, which no `choice` field names as
-      // its `source`. It is asked for by its own `name` and answered in exactly the terms a field's
+      // The second declaration channel: a read the action *shows*, which no source-backed field names
+      // as its `source`. It is asked for by its own `name` and answered in exactly the terms a field's
       // list is — one route, one registry, one vocabulary — because the page that displays it is the
       // same page that displays a field's read, and a second fetch path would be a second set of
       // failure sentences. Looked up only when no field matched, since the two channels are disjoint

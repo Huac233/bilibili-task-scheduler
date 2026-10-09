@@ -457,12 +457,18 @@ describe('the display-only read channel', () => {
     const action = await clearoutDescriptor(server, session.auth())
 
     // The page's own rule, which is why this is asserted here rather than left to the web half to
-    // discover: it displays the sources of the action's `choice` fields (a field's read is shown
-    // *and* used), then the declared shown reads. 清仓's 「默认倾泻直播间」 is the first kind and
+    // discover: it displays the source of every field whose values come from a live read (a field's read
+    // is shown *and* used), then the declared shown reads. 清仓's 「默认倾泻直播间」 is the first kind and
     // 「有牌的直播间」 is the second, so both of the owner's reads reach the page — one read
     // with two uses, and one with a single use, through one mechanism.
+    //
+    // **The predicate is `source`, not `kind`.** A source-backed field is one the options route can be
+    // asked about, and that is a property of the source: the two kinds a field may have it under are
+    // `choice` (a ticked set) and `pick_one` (one of them), and a page that filtered on one of the two
+    // would silently drop the other's read — which is exactly what 「默认倾泻直播间」 would have met the day
+    // it was declared `pick_one`, taking `douyu.followedRooms` off the page with it.
     const sources = [
-      ...(action.optionFields ?? []).filter(field => field.kind === 'choice').map(field => field.source),
+      ...(action.optionFields ?? []).filter(field => field.source !== undefined).map(field => field.source),
       ...(action.shownReads ?? []).map(read => read.source)
     ]
 
@@ -470,6 +476,14 @@ describe('the display-only read channel', () => {
     expect(sources).toContain(MEDAL_ROOMS_SOURCE)
     // The same source twice would be one read displayed as two facts.
     expect(new Set(sources).size).toBe(sources.length)
+
+    // And the two fields that source backs are declared as the two different things they are: 清仓 pours
+    // into one room and may send several kinds of prop, so one cell holds a value and the other a list.
+    // The kinds are what the form builds its controls from — and what it therefore *writes* — so the wire
+    // is where this is pinned rather than the form's own behaviour alone.
+    const kinds = new Map((action.optionFields ?? []).map(field => [field.name, field.kind]))
+    expect(kinds.get('dumpRoomId')).toBe('pick_one')
+    expect(kinds.get('propAllowlist')).toBe('choice')
   })
 
   it('answers through the same route and the same registry as a field does', async ({ server, session }) => {

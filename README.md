@@ -153,12 +153,14 @@ curl -H "Authorization: Bearer bts_xxx" \
 |---|---|
 | `GET /api/platforms` | 列出平台、每个平台的动作目录和动作说明；界面据此渲染，不写死平台 |
 | `GET /api/events?since=&limit=` | 增量拉取 |
-| `GET /api/events/recent?limit=` | 最近事件，倒序，供展示用 |
+| `GET /api/events/recent?limit=&kinds=` | 最近事件，倒序；`kinds` 逗号分隔，只要这些种类，缺省为全部 |
 | `GET /api/tokens` | 列出令牌（不含明文） |
 | `POST /api/tokens` | 创建，明文只返回一次 |
 | `DELETE /api/tokens/:id` | 吊销，立即生效 |
 
 AstrBot 通知插件是 `astrbot_plugin_bilibili_notify`：装在 AstrBot 的 `data/plugins/` 下，订阅的就是这里的 `GET /api/events`，平台名取自 `GET /api/platforms`。
+
+「外部集成」页上的事件流可以只显示你勾选的种类，**那只影响这一页**：`kinds` 只加在 `GET /api/events/recent` 上，而插件读的是 `GET /api/events`，它的游标与投递不受影响。
 
 ## 开发
 
