@@ -422,6 +422,27 @@ export interface RefreshResult {
   readonly credentials?: string
 }
 
+/**
+ * One piece of work a sweep still wants, named the only way every caller can name it.
+ *
+ * **The pair is the seam's own, and `actionKey` is the Task's own column.** `probe` and `send` already
+ * speak in `(account, targetKey)`, and `actionKey` is the key a Task's row carries and the catalogue
+ * spells its descriptor from — so nothing here is a key format, and the caller invents none: how a
+ * Platform names the work it holds, and whether it holds any, stays on the Platform's side.
+ *
+ * **`actionKey` is carried rather than left for the Platform to infer, and one case is what it buys.**
+ * A Task names exactly one Action, and that Action is what owns whatever outlives a run — so a person
+ * who switches 观看直播 off while a 发送弹幕 Task stands on the same room has said the room's viewing
+ * loop is not wanted, even though the pair is still named by a Task. A pair alone would keep that loop
+ * beating: the Platform would see work it still wants, and the switch that would run it is closed.
+ */
+export interface ResidentWorkRef {
+  readonly accountId: number
+  /** The Task's own target; empty for an account-scoped Action. Never rendered. */
+  readonly targetKey: string
+  readonly actionKey: string
+}
+
 export interface Platform {
   /** `bilibili` | `douyu`. Stored on accounts and tasks; never shown raw in the UI. */
   readonly key: string
@@ -483,6 +504,42 @@ export interface Platform {
    * new adapter author copying one that does inherits the defect.
    */
   reconcile(context: ReconcileContext): Promise<ActionOutcome[]>
+
+  /**
+   * This sweep's answer to "which of my work is still wanted" — told to the Platform, which retires
+   * whatever of its own work is not in the list.
+   *
+   * **Why the member exists.** Some Platforms hold work that outlives the sweep which started it, and
+   * Bilibili's resident viewing loop is the one this build has. Such work used to be stopped only from
+   * inside the run that started it, so a Task that was paused, deleted, or had its Action switched off
+   * left its loop beating to its own lifetime ceiling with no later sweep able to restart it — the gap
+   * `bilibili/watch-loop.ts` records where a loop's lifetime is bounded rather than supervised. The
+   * Task list is the sweep's, so the sweep is what knows which of that work is still wanted, and
+   * `scheduler/runner.ts` hands the answer over after every pass.
+   *
+   * **The argument is the whole of what is wanted — never a list of things to stop, and it is
+   * exhaustive.** "Retire everything of yours that is not in here" is a statement a Platform can act on
+   * from its own bookkeeping, while "stop these" would ask the caller to enumerate work it cannot see:
+   * only the Platform knows what it has running. The empty list is therefore a real instruction rather
+   * than a missing one — a sweep whose Tasks want nothing resident retires all of it.
+   *
+   * **A caller hands over a set it actually read.** The call ends work, so an unreadable Task list must
+   * never arrive here as an empty one: "I want nothing" and "I could not read what I want" would be one
+   * instruction, and the second would end work that is still wanted. The direction that mistake fails in
+   * is what chooses it — work left running costs at most its own ceiling (Bilibili's
+   * `WATCH_LOOP_CEILING_MS`), while wanted work retired costs that day's Task with nothing to restart
+   * it.
+   *
+   * **Required, and `douyu/index.ts` implements it as an explicit no-op.** A Platform that holds no such
+   * work has nothing to retire, but "holds none" and "forgot to answer" must not read alike: the member
+   * is on every adapter, and the one with nothing to do says so where a reader will find it rather than
+   * inheriting silence from a member it never declared.
+   *
+   * **Synchronous, because nothing here is a network call and nothing waits for work to end.** Stopping
+   * resident work is a request, not a completion — Bilibili's `WatchLoops.discard` states that — so the
+   * member answers once the Platform has been told.
+   */
+  retainResidentWork(wanted: readonly ResidentWorkRef[]): void
 
   /**
    * Credential upkeep, when the Platform can do it without a person.

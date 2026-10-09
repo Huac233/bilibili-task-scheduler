@@ -458,9 +458,13 @@ export class WatchLoop {
  * The device uuid is remembered per key until `stopAll`. A loop that ends and starts again (at its ceiling, after a
  * give-up, or after the sweep restarts it) re-enters as the same device. Only a process restart mints a new one.
  *
- * **Known gap.** Nothing here hears that a task was paused, deleted, or had its action switched off. The sweep ends
- * a loop early by calling `discard`, and a paused task has no sweep to do that. Such a loop keeps beating until the
- * ceiling ends it, which is at most `WATCH_LOOP_CEILING_MS` after it started, and no sweep restarts it.
+ * **Who ends a loop a sweep no longer wants.** `discard` is still the only way one is stopped, and this class still
+ * hears nothing about a task being paused, deleted, or having its action switched off — but a sweep no longer
+ * leaves such a loop to its ceiling. Every pass works out which resident work is still wanted and hands that answer
+ * to the Platform (`Platform.retainResidentWork`), and `platform/bilibili/index.ts` calls `discard` for every loop
+ * its Tasks no longer name. The delay is bounded by one pass: the set comes from the sweep's own snapshot of the
+ * Task list, so a pause written while a pass is running is seen by the next one, and it is that next pass which
+ * retires the loop. A loop nothing replaces still ends at the ceiling, exactly as before.
  */
 export class WatchLoops {
   private readonly loops = new Map<string, WatchLoop>()

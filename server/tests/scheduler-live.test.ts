@@ -429,7 +429,11 @@ registerPlatform({
   // Declared, so that "the sweep asked this Platform and got nothing to do" is a case this
   // file can state. The real adapters' answers are their own business; what the *scheduler*
   // does with one is asserted below.
-  refresh: async () => await stub.refreshPlan()
+  refresh: async () => await stub.refreshPlan(),
+  // The scheduler hands each Platform the work a pass still wants, after the pass (`platform/types.ts`).
+  // This stub starts nothing that outlives a sweep, so there is nothing for it to retire; the handover
+  // itself is pinned where a resident loop really exists, in `watch-retire.test.ts`.
+  retainResidentWork: () => {}
 })
 
 const HOUR = 60 * 60 * 1000

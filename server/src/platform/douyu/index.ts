@@ -25,6 +25,7 @@ import {
   type ProbeResult,
   type ReconcileContext,
   type RefreshResult,
+  type ResidentWorkRef,
   type SendOutcome,
   type TargetInfo
 } from '../types.js'
@@ -5309,6 +5310,22 @@ function codeText(code: number | null): string {
   return code === null ? LocalCode.NoVerdict : String(code)
 }
 
+/**
+ * Douyu holds no work that outlives the sweep which started it, so there is nothing here to retire.
+ *
+ * **An explicit no-op rather than an omitted member, and the two are not the same statement.** Every
+ * action this Platform serves is one exchange inside the run that asked for it: the danmaku path opens
+ * its socket, sends, reads the acknowledgement and closes it again inside `socket.ts`'s whole-exchange
+ * budget, and everything else here is a request and its answer. Nothing therefore survives the pass
+ * that started it, and the seam's `(account, target, action)` triples name nothing this module is
+ * holding. `platform/types.ts` states why the member is required of every adapter; this is Douyu's
+ * answer to it, written down so that "there is nothing to retire" cannot be mistaken for "nobody
+ * implemented this".
+ */
+function retainResidentWork(_wanted: readonly ResidentWorkRef[]): void {
+  // Deliberately empty: see above.
+}
+
 export const douyuPlatform: Platform = {
   /** The exact string the `accounts` and `tasks` rows carry; see `db/migrations.ts`. */
   key: 'douyu',
@@ -5319,5 +5336,6 @@ export const douyuPlatform: Platform = {
   probe,
   send,
   reconcile,
+  retainResidentWork,
   refresh
 }

@@ -4,7 +4,7 @@ import { transaction } from '../db/tx.js'
 import { platformAccountOf } from '../platform/account.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
 import { dayKeyOf, startOfPlatformDay } from '../platform/time.js'
-import type { ActionOutcome, FailureKind, Platform, PlatformAccount } from '../platform/types.js'
+import type { ActionOutcome, FailureKind, Platform, PlatformAccount, ResidentWorkRef } from '../platform/types.js'
 import { type Account, getAccountById, listAccountsByPlatform, updateAccountCredentials } from '../repo/accounts.js'
 import { appendActionLog, hasActionLogWithCodeSince, settledActionKeysSince } from '../repo/action-logs.js'
 import { actionOptions, getActionSetting } from '../repo/action-settings.js'
@@ -103,9 +103,13 @@ const EVENT_SUPPRESS_MS = 30 * 60 * 1000
 const REFRESH_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
 /**
- * Work a Platform starts that outlives the sweep which started it: a resident viewing loop, for one. A sweep cannot
- * end such work, because the sweep is over by the time the work is still running, so `Scheduler.stop()` asks for it
- * to end through these hooks instead.
+ * Work a Platform starts that outlives the sweep which started it: a resident viewing loop, for one.
+ *
+ * **A running sweep does end such work** — once nothing wants it any more, `retainResidentWork` tells the Platform
+ * so after every pass, which is how a Task that was paused, deleted or switched off stops its loop. What is left
+ * for these hooks is the one ending no later sweep can make: the process is going away, so the sweep that could
+ * have retired this work is never going to run. `Scheduler.stop()` asks for it to end, after the sweep in flight
+ * has finished — the sweep is the only thing that starts such work, and by then it cannot start any more.
  */
 const stopHooks = new Set<() => Promise<void>>()
 
@@ -245,6 +249,11 @@ export class Scheduler {
       const tasks = listSchedulableTasks(this.deps.db)
       report.scanned = tasks.length
 
+      // What this sweep still wants, read from the same rows it is about to work on and read **before** any
+      // of them runs: the pass is what turns a Task into an `action_logs` row, and no outcome it can reach
+      // changes whether the resident work behind the Task is wanted.
+      const wanted = this.wantedResidentWork(tasks)
+
       for (const task of tasks) {
         try {
           const outcome = await this.processTask(task, now)
@@ -259,6 +268,9 @@ export class Scheduler {
           this.log(`task ${String(task.id)} sweep error: ${message}`)
         }
       }
+
+      // Handed over once the pass is over, and reached only with a set that was read in full: see the method.
+      this.retainResidentWork(wanted)
     } finally {
       // Both facts turn over here and nowhere else: no sweep is running, and no sweep is going to
       // touch the database. A `stop()` waiting on the mark resumes after this.
@@ -268,6 +280,54 @@ export class Scheduler {
     }
 
     return report
+  }
+
+  /**
+   * The resident work this sweep still wants, grouped by the Platform whose Tasks named it.
+   *
+   * **A read, and the whole of what `retainResidentWork` is allowed to act on** — which is why it is a
+   * method that answers with a value instead of a filter inside the call it feeds: nothing between the
+   * answer and the write can move it, and a read that threw ends the pass before the write happens.
+   *
+   * The rows are the sweep's own snapshot, and the switch is `getActionSetting`: the same single-row
+   * read, for the same Task, that `runReconcile` makes. Absent means off, spelled `=== true` exactly as
+   * both executors spell it. A Task whose Action is switched off wants nothing, and that is a state
+   * this path exists to end: such a row is still swept — the switch is read during the pass and its
+   * Action is reported parked — so until now the work that Action started kept running behind it.
+   */
+  private wantedResidentWork(tasks: readonly Task[]): Map<string, ResidentWorkRef[]> {
+    const byPlatform = new Map<string, ResidentWorkRef[]>()
+    for (const task of tasks) {
+      if (getActionSetting(this.deps.db, task.userId, task.platform, task.actionKey)?.enabled !== true) continue
+      const wanted = byPlatform.get(task.platform) ?? []
+      wanted.push({ accountId: task.accountId, targetKey: task.targetKey, actionKey: task.actionKey })
+      byPlatform.set(task.platform, wanted)
+    }
+    return byPlatform
+  }
+
+  /**
+   * Tells every registered Platform which of its resident work is still wanted; it retires the rest.
+   *
+   * **Every Platform is asked, an empty answer included, because the list is exhaustive rather than a
+   * set of requests.** A Platform whose Tasks were all paused, deleted or switched off has resident work
+   * to end and is exactly the case this exists for — visiting only the Platforms that have entries would
+   * leave those loops beating to their own lifetime ceiling, which is the gap the member closes.
+   *
+   * **Nothing on the way here is caught, on purpose.** This call ends work, so a Task list that could not
+   * be read must never arrive as an empty one: "this sweep wants nothing" and "this sweep could not read
+   * what it wants" would be one instruction, and the second would end work that is still wanted. A
+   * failure therefore ends the pass before these calls, and the asymmetry is what picks that direction —
+   * work left running costs at most its own ceiling (`WATCH_LOOP_CEILING_MS` on the adapter that has
+   * one), while wanted work retired costs that day's Task with no later sweep to restart it.
+   *
+   * Platforms come from the registry this file already holds, for the reason its header gives: the
+   * scheduler imports no adapter, and this is the door `maybeRefreshAccounts` and `processTask` use.
+   */
+  private retainResidentWork(wanted: ReadonlyMap<string, readonly ResidentWorkRef[]>): void {
+    for (const platform of allPlatforms()) {
+      platform.retainResidentWork(wanted.get(platform.key) ?? [])
+    }
   }
 
   // ------------------------------------------------------------------ //

@@ -83,7 +83,9 @@ registerPlatform({
   },
   probe: async () => ({ ok: true, liveStatus: 0, title: '', code: '0', detail: '', failure: 'none' }),
   send: async () => ({ ok: true, code: '0', detail: '', failure: 'none' }),
-  reconcile: async () => []
+  reconcile: async () => [],
+  // Required of every adapter (`platform/types.ts`), and this stub starts nothing that outlives a sweep.
+  retainResidentWork: () => {}
 })
 
 const SECRET_COOKIE = 'SESSDATA-must-not-leak'

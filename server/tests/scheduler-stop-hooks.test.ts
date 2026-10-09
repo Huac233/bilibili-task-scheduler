@@ -53,6 +53,9 @@ const stubPlatform: Platform = {
     throw new Error('这个文件不走这条路：send')
   },
   reconcile: () => Promise.resolve([]),
+  // Required of every adapter (`platform/types.ts`). This stub starts nothing that outlives a sweep, and the
+  // stop hooks below are what this file is about: they end work no later sweep will be there to retire.
+  retainResidentWork: () => {},
   refresh: async (): Promise<RefreshResult> => {
     renewals += 1
     await gate

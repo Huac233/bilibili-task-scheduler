@@ -502,6 +502,30 @@ describe('the action catalogue', () => {
 })
 
 /* ------------------------------------------------------------------ *
+ * The work a sweep no longer wants
+ * ------------------------------------------------------------------ */
+
+describe('the work a sweep no longer wants', () => {
+  it('answers with nothing, because nothing here outlives a sweep', () => {
+    // `retainResidentWork` is required of every adapter (`platform/types.ts`): a sweep hands over the work it
+    // still wants and the Platform retires the rest, because Bilibili's viewing loop is still beating after the
+    // Task that started it is paused or deleted. Douyu has no such work — every action here finishes inside the
+    // run that asked for it — so its answer is "I am holding none of that", and what this pins is that the
+    // answer really does nothing: no session built, no read, no socket. A no-op with a side effect would be
+    // worse than none at all here, because the scheduler calls this after **every** pass.
+    const result = douyuPlatform.retainResidentWork([
+      { accountId: 7, targetKey: '12306', actionKey: ActionKey.SendDanmaku },
+      { accountId: 7, targetKey: '12306', actionKey: ActionKey.IntimacyTasks }
+    ])
+
+    expect(result).toBeUndefined()
+    expect(sendDanmakuMock).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(fetchCsrfCookieMock).not.toHaveBeenCalled()
+  })
+})
+
+/* ------------------------------------------------------------------ *
  * The credential blob
  * ------------------------------------------------------------------ */
 

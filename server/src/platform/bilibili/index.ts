@@ -56,6 +56,7 @@ import {
   type ProbeResult,
   type ReconcileContext,
   type RefreshResult,
+  type ResidentWorkRef,
   type SendOutcome,
   type TargetInfo
 } from '../types.js'
@@ -956,7 +957,8 @@ async function reconcileLikeDanmaku(context: ReconcileContext, http: BiliHttp | 
 }
 
 /**
- * 观看直播 (watch_live)：**每个账号、每个直播间一个常驻循环。这个 sweep 只负责启动它、读它、报告它。**
+ * 观看直播 (watch_live)：**每个账号、每个直播间一个常驻循环。这个动作只负责启动它、读它、报告它；把不再想要的循环收掉是这一轮
+ * sweep 结束后的另一步（`retainResidentWork`，下面那段写的就是它）。**
  *
  * **循环跑在 sweep 之外，这是这段注释要记下的决定。** `runner.ts` 用 `ticking` 守卫让任务一个接一个地跑，sweep 里的
  * 任何一个 `await` 都会把后面的任务挡住。如果这个动作在 sweep 里持有观看会话，别的任务就要等到会话结束，而这个任务要攒的
@@ -975,6 +977,10 @@ async function reconcileLikeDanmaku(context: ReconcileContext, http: BiliHttp | 
  *   6. 循环在跑：报 `watch_in_progress`，说出它已有几拍被服务端接受；
  *   7. 上一段循环以 `gave_up` 结束：报 `failed` 并说出理由，这一轮不另开，下一轮再开；以 `account_stop` 结束：报账号级失败；
  *   8. 其余情况（没有循环，或上一段到了生命周期上限）：区域与 buvid 都齐，就启动一个，报 `watch_in_progress`，这一轮不等它。
+ *
+ * **不再想要的循环由 runner 在 sweep 走完之后统一收掉，不在这个函数里。** 这里做的仍然只是启动、读、报告；每轮 sweep 过完全部任务
+ * 之后，runner 把「还想要」的集合交给平台（`retainResidentWork`），平台把没被点到的循环 `discard` 掉。于是任务被暂停、被删掉、开关
+ * 关掉时，它的循环活不过下一轮 sweep —— 上面那三个状态里的 `discard` 也还是唯一的停法，变的只是「谁会去调它」。
  *
  * **`blocked`，不是 `done`；`watch_in_progress`，不是 `failed`。** 循环在跑、面板没完成，这一天就没有落定。`blocked` 正是
  * `runner.ts` 不肯当作落定的那两个取值之一，所以下一轮 sweep 会接着看。`failure` 是 `none`，`runner.ts` 不为它发动作受阻事件。
@@ -1134,6 +1140,10 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
     buvid,
     log: context.log
   })
+  // Recorded here and nowhere else, because this is the one place both names for the loop are in hand: the
+  // pair a sweep speaks (account + the target it pasted) and the key the registry knows (account + the real
+  // room id). `retainResidentWork` is the only reader, and it needs the pair to recognise what was wanted.
+  watchLoopKeyByPair.set(watchPairKeyOf(context.account.id, targetKey), loopKey)
   return roomOutcome(key, targetKey, 'blocked', startDetail(previous, loop.beats), LocalCode.WatchInProgress, 'none')
 }
 
@@ -1165,14 +1175,69 @@ function watchLoopKeyOf(accountId: number, roomId: number): string {
   return `${String(accountId)}/${String(roomId)}`
 }
 
+/**
+ * Which loop key this process started, by the (account, target) pair a sweep can name.
+ *
+ * **Why this file has to remember anything, and why the pair is the name.** `WatchLoops` answers per
+ * key — `start`, `running`, `retire`, `discard`, `stopAll` — and deliberately does not enumerate, so a
+ * caller that must stop every loop a sweep no longer wants cannot ask it what is running. The loop key
+ * is not derivable from the pair either: it is the **real** room id the room read returned, while a
+ * Task's target may be the short number that resolves to it. Both halves are in hand exactly once,
+ * where the loop is started, so that is where the mapping is recorded.
+ *
+ * An entry lives until the sweep stops naming the pair, or the process stops — the lifetime
+ * `WatchLoops` gives the device uuid beside it. A stale one costs nothing: `discard` on a key with no
+ * loop is a no-op.
+ */
+const watchLoopKeyByPair = new Map<string, string>()
+
+/** The pair's name in `watchLoopKeyByPair`: the same `accountId/target` shape, before the real room id is known. */
+function watchPairKeyOf(accountId: number, targetKey: string): string {
+  return `${String(accountId)}/${targetKey.trim()}`
+}
+
+/**
+ * What a sweep still wants, told here so the loops it does not name are stopped (`platform/types.ts`
+ * has the seam's own reason for the member).
+ *
+ * **The set is read off this file's own record rather than off the registry**, because `WatchLoops` answers per
+ * key and does not enumerate — `watchLoopKeyByPair` above is where that is written down. Everything remembered and
+ * not named here is stopped with `discard`, which stays the one way a loop is stopped, and forgotten at the same
+ * moment: the only thing that asks about that pair again is a later sweep, and it asks with the set it holds.
+ *
+ * **`actionKey` is why the seam hands it over.** Only 观看直播 holds a loop on this Platform — 点赞 and
+ * 点亮粉丝牌 finish inside the run that started them — so a pair named by any other Action licenses
+ * nothing here, and the loop for it is retired like any other the sweep no longer wants.
+ */
+function retainResidentWork(wanted: readonly ResidentWorkRef[]): void {
+  const keep = new Set<string>()
+  for (const ref of wanted) {
+    if (ref.actionKey !== ActionKey.WatchLive) continue
+    keep.add(watchPairKeyOf(ref.accountId, ref.targetKey))
+  }
+
+  // Copied out before anything is discarded: deleting from a Map while walking it is defined but reads as an
+  // accident, and this list is what the loop below is *about*.
+  const unwanted = [...watchLoopKeyByPair].filter(([pair]) => !keep.has(pair))
+  for (const [pair, loopKey] of unwanted) {
+    watchLoopKeyByPair.delete(pair)
+    watchLoops.discard(loopKey)
+  }
+}
+
 /** The one registry of watch loops this process runs. */
 const watchLoops = new WatchLoops()
 
 /**
  * Ends every watch loop this process runs, and waits until each has ended. The scheduler calls it when it stops
  * (`onSchedulerStop`, below); the tests call it between cases.
+ *
+ * `watchLoopKeyByPair` is cleared with them because it names exactly the loops `stopAll` forgets: keeping an entry
+ * would be remembering a key from a life that is over, and the sweep that follows (`retainResidentWork`) acts on
+ * whatever this map says.
  */
 export function stopWatchLoops(): Promise<void> {
+  watchLoopKeyByPair.clear()
   return watchLoops.stopAll()
 }
 
@@ -2409,5 +2474,6 @@ export const bilibiliPlatform: Platform = {
   probe,
   send,
   reconcile,
+  retainResidentWork,
   refresh
 }
