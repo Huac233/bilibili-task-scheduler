@@ -340,7 +340,18 @@ export interface TargetInfo {
   readonly titleNote: string
   readonly anchorId: string
   readonly anchorName: string
-  /** The Platform's own liveness value; only meaningful for live-room targets. */
+  /**
+   * The streamer's liveness as the scheduler will judge it: `LIVE_STATUS_LIVE` or `LIVE_STATUS_OFFLINE`,
+   * the same two constants `ProbeResult.liveStatus` carries, so the picker and a task cannot disagree
+   * about one room.
+   *
+   * **A normalised verdict, not the Platform's raw code.** A 轮播 (a re-broadcast) is `LIVE_STATUS_OFFLINE`
+   * here, because a task never acts on one. What this no longer carries: the raw code (Douyu's
+   * `show_status` and `videoLoop`, Bilibili's `live_status`), and with it the difference between 轮播 and
+   * 未开播. A read that cannot establish the verdict has no value here at all: `resolveTarget` throws a
+   * `TargetRefusal` (`PlatformUnanswered`) rather than return a target, as `probe` answers `ok: false`
+   * rather than a liveness nothing established.
+   */
   readonly liveStatus: number
 }
 
@@ -354,8 +365,8 @@ export interface TargetInfo {
  * constant per state is enough because the adapter has already done the translating by
  * the time the result is written.
  *
- * `scheduler/logic.ts` still carries its own `LIVE_STATUS_LIVE`; it should import this
- * name instead.
+ * `scheduler/logic.ts` imports this name for its liveness test; `TargetInfo.liveStatus`
+ * uses the same two values.
  */
 export const LIVE_STATUS_LIVE = 1
 

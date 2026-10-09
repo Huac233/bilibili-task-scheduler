@@ -126,7 +126,7 @@ export const AD_FISH_BALL_POS_CODE = '1064246'
 export const OPFOY_SIGN_ALIAS = '20250521OPFOY_qd2'
 
 /**
- * 鱼吧's own "already signed" answer on the PC endpoint.
+ * 鱼吧's own "already signed" answer on the PC endpoint, measured once on 2026-10-10 (see `signGroupPc`).
  *
  * Named here rather than in `errors.ts` because nothing else classifies it: the global
  * table covers the codes that are compared *and* graded, and this one is only the
@@ -650,8 +650,11 @@ export async function claimFishBall(
  * `z.coerce.string()` answers `'null'` for a `null` id, and a group that cannot exist
  * would then be signed as though it did. `is_signed` is the service's claim and is
  * **not** a gate: §2.4 measured groups reported as `is_signed: 0` that answered
- * "今天已经签到过了" when signed. Sign first; "already signed" is then read from the sign's
- * own answer (see `signGroupAndroid` and `signGroupPc`), never from this flag.
+ * "今天已经签到过了" when signed, and 2026-10-10 measured it again in the harder direction — board
+ * 11254805 read `is_signed: 0` in every read that bracketed a sign which landed on it (the PC twin's
+ * `200` carrying `addLevelScore` 3), so a `0` here is not even "not yet". Sign first; "already signed"
+ * is then read from the sign's own answer (see `signGroupAndroid` and `signGroupPc`), never from this
+ * flag.
  */
 export const yubaGroupSchema = z.object({
   group_id: z.union([z.number(), z.string()]).pipe(z.coerce.string()),
@@ -713,28 +716,47 @@ export interface YubaSignOutcome {
   /**
    * Whether the PC twin answered its already-signed verdict, `status_code: 1001`, and nothing else.
    *
-   * `true` only for that verdict. A `200` is always `false`: the PC twin's success envelope is read
-   * as a sign that was performed, with `addLevelScore` (or `0` when it is absent). No PC body has been
-   * captured for this file, so whether a `200` can ever mean "already" is unmeasured, and this file
-   * does not claim it can not.
+   * `true` only for that verdict, which was measured once (see `signGroupPc`). A `200` is always
+   * `false` here, with `addLevelScore` (or `0` when it is absent) as its score. That `200` branch has
+   * now been measured once as well — 2026-10-10, board 11254805, where it carried `addLevelScore` 3
+   * and was what signed a board `fastSign` had just left open — so on the one sample there is, a
+   * `200` is a sign performed rather than the already verdict. Whether a `200` can answer for a board
+   * whose sign is already in stays unmeasured: nothing has ever seen one, and nothing here claims it
+   * cannot.
    */
   readonly alreadySigned: boolean
 }
 
 /**
- * `POST mapi-yuba/wb/v3/fastSign` — the level score the envelope carries, and nothing more.
+ * `POST mapi-yuba/wb/v3/fastSign` — the level score the envelope carries, and a `0` that is measured
+ * to mean **this call placed no sign**.
  *
- * `data` is `levelScore`, and **`0` is not a verdict.** Measured 2026-10-10 on the owner's
- * account: `fastSign` answered `{"data":0,"message":"","status_code":200}` for group 7366311
- * (twice, the second call a repeat) and for group 6672975 (once). Nothing measured here tells
- * that `0` apart from "already signed" versus "nothing was signed". Only the new-sign side has
- * an answer on record: the 2026-10-09 run in `action_logs` (id 34, a bot row, not a capture here)
- * recorded group 历史 at `data` 24 with `status_code` 200, and that positive score is the one
- * reading this file treats as a sign that happened.
+ * `data` is `levelScore`, and the `0` is no longer an open question. 2026-10-10, board 11254805
+ * (「Drop」, followed that morning): this call answered `{"data":0,"status_code":200}`, and 0.2 s later
+ * the PC twin **signed that same board** and reported the `3` level points it added (see
+ * `signGroupPc`). So the `0` left the day open — the board was unsigned when this call answered — and
+ * the day's signature could only come from the twin. The reading this file used to carry, a `0` as
+ * 已签, is refuted by that same sequence: a board whose sign is already in has nothing for the twin to
+ * sign, and the twin refuses in exactly that case with its `1001`.
  *
- * So the walk does not settle a day on a `0` from here. It asks the PC twin before it says
- * "already" (see `signGroupPc`). This stays the first call for two reasons: it needs no `Referer`,
- * and the walk has always made it first, so a positive score from it is a known sign.
+ * The three `0`s measured before that — 2026-10-10, groups 7366311 (twice, the second a repeat) and
+ * 6672975 (once) — settled nothing by themselves, because nothing established those boards' states;
+ * they stay on record as what they are, three calls that answered `0`. The one new-sign score on record
+ * is still `24` (group 历史, an `action_logs` row of 2026-10-09).
+ *
+ * So the walk reads a positive score as a sign this call made, and puts a `0` to the PC twin, where the
+ * day's two answers live: a `200` with a positive score is the sign it placed, and its `1001` is "today
+ * is already in". This stays the first call for two reasons: it needs no `Referer`, and the walk has
+ * always made it first, so a positive score from it is a known sign.
+ *
+ * **What is not measured, and may not be read into the above.** One board, one call, one moment: that a
+ * `0` accompanies "nothing signed" is measured exactly once. Whether `0` also encodes something else —
+ * a threshold, say — is not measured here at all: the maintained third-party implementation this
+ * endpoint's shape was reconstructed from reads its own `data == 0` as 「没有7级以上的鱼吧或极速签到
+ * 已完成」, and that is evidence of its author's reading rather than a measurement of the service. And
+ * the two calls of 2026-10-10 kept no raw bytes (the probe recorded the parsed verdicts beside the HTTP
+ * statuses), so what is on record for them is `status_code` 200 with `data` 0 and `addLevelScore` 3 —
+ * not a body.
  */
 export async function signGroupAndroid(
   token: string,
@@ -763,20 +785,46 @@ export async function signGroupAndroid(
 const yubaTopicSignDataSchema = z.object({ addLevelScore: counter.optional() })
 
 /**
- * `POST ybapi/topic/sign` — the PC twin of the fast sign, and the call that settles a
- * `fastSign` `0`.
+ * `POST ybapi/topic/sign` — the PC twin of the fast sign, and the call that settles a `fastSign` `0`.
  *
- * Needs `Referer: https://yuba.douyu.com/group/<id>` and reports "already signed" as
- * `status_code: 1001` with no `data` at all, which is why it is implemented against its own
- * schema. Evidence for `1001` as the already verdict: the constant's existing use in this file,
- * and the one third-party client seen for this endpoint (`bighammer-link/Common-scripts`,
- * `yuba_check.py`), which reads `200` as signed and `1001` as 「今天已经签到了」. Neither is a
- * capture from this account, and no PC body has been captured here.
+ * Needs `Referer: https://yuba.douyu.com/group/<id>`.
  *
- * Its `200` is read as a sign performed (see `YubaSignOutcome`). There is no read-back here:
- * no endpoint that reports today's sign state was found, and the group page's `isSigned`
- * was `0` on all four of the owner's boards on 2026-10-10 even though he reports signing one
- * of them by hand, so it is not used as one either.
+ * **Its two answers are now both measured, on 2026-10-10, owner's account.**
+ *
+ *  - **`1001` is the already verdict.** Board 11244190 (「145宝宝」) answered
+ *    `{"status_code":1001,"status":"error","message":"今天已经签到过了","toast_message":"","data":[]}`.
+ *    Before and after that one POST the board read the same on every reading this file has: `myFollow`
+ *    `is_signed` 0, and the group page `isSigned` 0 with its 签到 button present. Which day the service
+ *    means by 「今天」 is still unmeasured — that call was at 06:36 Asia/Shanghai, nothing of this
+ *    project's had signed that board that day, and the same board's earlier walk ran at 05:14 on
+ *    2026-10-09.
+ *  - **`200` with a positive `addLevelScore` is a sign this call placed.** Board 11254805 (「Drop」,
+ *    followed that morning) answered `status_code` 200 with `addLevelScore` 3, 0.2 s after that same
+ *    board's `fastSign` had answered `data: 0` — so the twin is what put that day's signature on that
+ *    board, and the `0` before it had left the day open (see `signGroupAndroid`). The two answers differ
+ *    in code (1001 versus 200), in `data` (`[]` versus an object) and in the sentence.
+ *
+ * **What that does not establish.** The `200` of 11254805 is on record as a parsed verdict, not as a
+ * body: neither its bytes nor its `message` were kept, so "a `200` is a sign" rests on the
+ * `addLevelScore` it carried, on the shape difference above, and on the third-party clients that
+ * classify the same two answers — `refs/ref-douyuEx/src/packages/Sign/Sign_Yuba.js` counts a
+ * `topic/sign` reply as a fresh sign only when its `message` is empty, and reads `fastSign`'s
+ * `data == 0` as 「没有7级以上的鱼吧或极速签到已完成」 (an earlier version of this comment also cited
+ * `bighammer-link/Common-scripts`'s `yuba_check.py` for `200` as signed and `1001` as 已签, which is
+ * not in this workspace's `refs/` and could not be re-checked). Whether a `200` can also arrive for a
+ * board whose sign is already in stays unmeasured — nothing has ever seen one, and nothing here claims
+ * it cannot. And no read-back was improved by any of this: on board 11254805 both `is_signed` and the
+ * page's `isSigned` still read 0 *after* a sign landed, the second time those readings have been
+ * measured to disagree with a sign that happened.
+ *
+ * The walk reads a `200` with a positive `addLevelScore` as a sign performed, and a `200` without a
+ * positive score as unsettled. That whole sentence was the conservative reading while only the `1001`
+ * half had been measured; its first half now has one sample behind it (above) and its second half still
+ * has none.
+ *
+ * There is no read-back that verifies a sign. On 2026-10-10 board 11254805's `myFollow` `is_signed` and
+ * its group page's `isSigned` both read 0 in every read that bracketed the sign the twin placed, and
+ * that page's markup carried no account id at all — so neither is used as a gate or as a verification.
  */
 export async function signGroupPc(
   token: string,

@@ -205,7 +205,10 @@ export interface TargetInfo {
   readonly titleNote: string
   readonly anchorId: string
   readonly anchorName: string
-  /** The Platform's own liveness value; only meaningful for live-room targets. */
+  /**
+   * The normalised liveness the scheduler will act on: `LiveStatus.Live` or `LiveStatus.Offline`, never the
+   * Platform's raw code. A 轮播 arrives as `Offline`, so the picker never draws a looping room as 直播中.
+   */
   readonly liveStatus: number
 }
 
@@ -1012,31 +1015,28 @@ export interface HealthInfo {
 /**
  * The liveness values the UI may see.
  *
- * `LiveStatus.Live`/`Offline` are the **normalised** values `ProbeResult` reports
- * on any Platform, which is what a task's `lastLiveStatus` carries. `Round` is
- * Bilibili's raw `live_status` `2` and can only reach the UI through a freshly
- * resolved Target, never through a probe — the adapters fold it into "not live"
- * before the scheduler ever compares it.
- *
- * A resolved Target's `liveStatus` is the Platform's **raw** value, so this table
- * is only right for Bilibili's encoding. Douyu's raw `1` can be a 轮播 (`videoLoop`
- * 1) and its raw `2` is an anchor who is not streaming, not a 轮播.
+ * The liveness values the UI shows, and every one of them is normalised. A task's
+ * `lastLiveStatus` is what `ProbeResult` reports and a Target's `liveStatus` is what
+ * `resolveTarget` reports, and both carry the seam's two states on every Platform. The
+ * adapters fold a 轮播 into `Offline` before it reaches here, so no raw Platform code
+ * (Bilibili's `2`, Douyu's `show_status`) can arrive at this table.
  */
 export const LiveStatus = {
   Offline: 0,
-  Live: 1,
-  Round: 2
+  Live: 1
 } as const
 
-/** Labels a normalised status or a raw Bilibili Target value; see LiveStatus for why Douyu's raw values do not fit. */
+/**
+ * Labels a normalised liveness value, or `null` for a task the probe has not read yet.
+ * The offline word says 「含轮播」 because a looping room lands in this bucket, and a
+ * label that said only 「未开播」 would be the wrong fact for one of its members.
+ */
 export function describeLiveStatus(status: number | null): string {
   switch (status) {
     case LiveStatus.Live:
       return '直播中'
-    case LiveStatus.Round:
-      return '轮播中'
     case LiveStatus.Offline:
-      return '未开播'
+      return '未开播（含轮播）'
     case null:
       // Distinct from "unknown": the probe has not succeeded yet, which is a
       // different situation from a status the app does not recognise.

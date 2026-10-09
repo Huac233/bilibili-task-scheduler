@@ -35,6 +35,7 @@ import {
   type ActionDescriptor,
   describeLiveStatus,
   type Library,
+  LiveStatus,
   type TargetInfo,
   TaskAction
 } from '../types/api.js'
@@ -684,7 +685,7 @@ onMounted(async () => {
                 <div :key="'anchor'">
                   <NTag v-if="target.anchorName !== ''" size="small">{{ target.anchorName }}</NTag>
                 </div>
-                <NTag size="small" :type="target.liveStatus === 1 ? 'success' : 'default'">
+                <NTag size="small" :type="target.liveStatus === LiveStatus.Live ? 'success' : 'default'">
                   {{ describeLiveStatus(target.liveStatus) }}
                 </NTag>
               </NSpace>

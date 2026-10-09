@@ -592,6 +592,25 @@ describe('resolveTarget', () => {
   })
 
   /**
+   * The picker and a task must reach one verdict. A 轮播 (`live_status` 2) used to come back from
+   * `resolveTarget` as 2, which the picker drew as 直播中-or-nothing while the probe called it offline.
+   */
+  it.each([
+    [1, 1],
+    [0, 0],
+    [2, 0]
+  ])('resolves live_status %i as %i, the verdict the probe reaches', async (raw, expected) => {
+    resolveRoomMock.mockResolvedValue({ room_id: 84074, short_id: 0, uid: 12345, live_status: raw, live_time: 1 })
+
+    const target = await bilibiliPlatform.resolveTarget('84074')
+    resolveRoomMock.mockResolvedValue({ room_id: 84074, short_id: 0, uid: 12345, live_status: raw, live_time: 1 })
+    const probed = await bilibiliPlatform.probe(account(), '84074')
+
+    expect(target.liveStatus).toBe(expected)
+    expect(probed.liveStatus).toBe(expected)
+  })
+
+  /**
    * An empty name is not a name, so the label falls through to the room's 标题 — the order
    * `resolveTarget` states in full.
    *

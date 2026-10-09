@@ -26,6 +26,7 @@ import {
   YUBA_FAST_SIGN_URL,
   YUBA_TOPIC_SIGN_URL
 } from '../src/platform/douyu/protocol.js'
+import { TargetRefusal, TargetRefusalKind } from '../src/platform/target.js'
 import type { ActionOutcome, PlatformAccount, RefreshResult } from '../src/platform/types.js'
 import { ActionKey, TaskAction } from '../src/repo/tasks.js'
 
@@ -241,7 +242,8 @@ beforeEach(() => {
   claimFishBallMock.mockResolvedValue({ ok: true, code: 0, data: null })
   listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1')] })
   signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 3 })
-  // The PC twin's default is its already verdict: a zero from `fastSign` is then "already", as before.
+  // The PC twin's default is its already verdict: the walk's `fastSign` zero is then read as 已签
+  // because the twin says so, not because of the zero (measured 2026-10-10, see the pair case below).
   signGroupPcMock.mockResolvedValue({
     ok: true,
     code: YUBA_ALREADY_SIGNED,
@@ -818,13 +820,66 @@ describe('probe', () => {
  * resolveTarget
  * ------------------------------------------------------------------ */
 
+/**
+ * The picker and a task must reach the same liveness verdict for one room. Before this, `resolveTarget`
+ * returned Douyu's raw `show_status`, so a 轮播 read 直播中 on the picker while the scheduler refused to
+ * act on it. Each case reads the room through both halves of the adapter and asserts they agree.
+ */
+describe('resolveTarget liveness', () => {
+  it.each([
+    ['an ordinary broadcast (show_status 1, videoLoop 0)', { show_status: 1, videoLoop: 0 }, 1],
+    ['a 轮播 (show_status 1, videoLoop 1)', { show_status: 1, videoLoop: 1 }, 0],
+    ['an anchor who is not streaming (show_status 2)', { show_status: 2, videoLoop: 0 }, 0]
+  ])('resolves %s to the verdict the probe reaches', async (_label, fields, expected) => {
+    fetchMock.mockImplementation(async () => roomResponse(roomPayload(fields)))
+
+    const target = await douyuPlatform.resolveTarget('12306')
+    const probed = await douyuPlatform.probe(account(), '12306')
+
+    expect(target.liveStatus).toBe(expected)
+    expect(probed.liveStatus).toBe(expected)
+  })
+
+  // The undecidable read: `show_status` 1 with `videoLoop` absent. No target is returned, because a target
+  // whose liveness this build could not judge would be shown as a verdict nothing established.
+  it('refuses a live-looking room whose videoLoop is absent, and says it is a retry rather than a verdict', async () => {
+    fetchMock.mockImplementation(async () =>
+      roomResponse({ room: { room_id: 12306, room_name: 'r', owner_name: 'o', owner_uid: 310260, show_status: 1 } })
+    )
+
+    const refusal = await douyuResolveRefusalOf('12306')
+
+    expect(refusal.kind).toBe(TargetRefusalKind.PlatformUnanswered)
+    expect(refusal.message).toContain('轮播')
+    expect(refusal.message).toContain('请稍后再试')
+    // The probe grades the same read as a retry, so the two halves agree that nothing was learned.
+    fetchMock.mockImplementation(async () =>
+      roomResponse({ room: { room_id: 12306, room_name: 'r', owner_name: 'o', owner_uid: 310260, show_status: 1 } })
+    )
+    const probed = await douyuPlatform.probe(account(), '12306')
+    expect(probed).toMatchObject({ ok: false, code: 'no_verdict', failure: 'retry' })
+  })
+})
+
+/** The refusal one `resolveTarget` call throws; a call that resolves fails the test. */
+async function douyuResolveRefusalOf(input: string): Promise<TargetRefusal> {
+  try {
+    await douyuPlatform.resolveTarget(input)
+  } catch (error: unknown) {
+    if (error instanceof TargetRefusal) return error
+    throw error
+  }
+  throw new Error(`resolveTarget accepted ${input}, and this case needs it refused`)
+}
+
 describe('resolveTarget', () => {
   const expectedTarget = {
     key: '12306',
     title: '电棍的直播间',
     anchorId: '310260',
     anchorName: '电棍',
-    // The raw show_status, as `TargetInfo` documents; `probe` is where it is normalised.
+    // The normalised verdict, as `TargetInfo` documents: this payload is an ordinary broadcast (show_status 1,
+    // videoLoop 0), so it is live. The raw show_status no longer reaches the picker.
     liveStatus: 1,
     // Empty on purpose, and the reason is the contrast with Bilibili's adapter: this Platform
     // reports the room's own name and the Anchor's name in one payload, so there is never a
@@ -1058,9 +1113,11 @@ describe('reconcile', () => {
         data: [group('1', '主版块'), group('2', '安卓版块'), group('3', 'PC 版块')]
       })
       signGroupAndroidMock.mockImplementation(async (_token: string, groupId: string) => {
-        // fastSign says "already" with a 200 and a zero level score…
+        // fastSign places no sign and reports a zero for board 2 — which is what a `data: 0` is now
+        // measured to mean (2026-10-10, board 11254805)…
         if (groupId === '2') return { ok: true, code: 200, data: 0 }
-        // …and the PC twin says it with 1001. Neither may be read as a failure.
+        // …and the PC twin is where the day's answer comes from: it says 已签 with 1001 for board 3.
+        // Neither the zero nor the 1001 may be read as a failure.
         if (groupId === '3') return refused(YUBA_ALREADY_SIGNED, '今天已经签到过了')
         return { ok: true, code: 200, data: 3 }
       })
@@ -1090,7 +1147,8 @@ describe('reconcile', () => {
       signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
       signGroupPcMock.mockResolvedValue({ ok: true, code: 200, data: { levelScore: 5, alreadySigned: false } })
 
-      const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+      const { outcomes, logs } = await reconcileWith([ActionKey.YubaSign])
+      const outcome = outcomeOf(outcomes, ActionKey.YubaSign)
 
       expect(signGroupPcMock).toHaveBeenCalledTimes(1)
       expect(outcome).toMatchObject({ outcome: 'done', failure: 'none' })
@@ -1098,6 +1156,11 @@ describe('reconcile', () => {
       expect(outcome.items).toEqual([
         { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +5', code: '200' }
       ])
+      // The sign this line reports is the one the PC call placed — not a confirmation of the
+      // fastSign's zero. Measured 2026-10-10 on board 11254805: a `fastSign` `data: 0` was followed
+      // 0.2 s later by this call signing that same board (200, `addLevelScore` 3).
+      expect(logs).toHaveLength(1)
+      expect(logs[0]).toContain('PC 端点')
     })
 
     it('does not settle a day on a fastSign zero that the PC twin answers with a score of zero', async () => {

@@ -954,6 +954,21 @@ const SHOW_STATUS_LIVE = 1
 const VIDEO_LOOP_NONE = 0
 
 /**
+ * Douyu's liveness verdict for one room read, in the seam's terms: `LIVE_STATUS_LIVE`,
+ * `LIVE_STATUS_OFFLINE`, or `null` when the read does not establish one.
+ *
+ * `probe` and `resolveTarget` both judge through this function, so the picker and a task cannot
+ * disagree about a room. A room is live only when `show_status` is `SHOW_STATUS_LIVE` **and**
+ * `videoLoop` is `VIDEO_LOOP_NONE`; `show_status` 1 with `videoLoop` absent is `null`, because the
+ * body could describe a live room or a looping one.
+ */
+function douyuLiveVerdict(meta: RoomMeta): number | null {
+  if (meta.showStatus !== SHOW_STATUS_LIVE) return LIVE_STATUS_OFFLINE
+  if (meta.videoLoop === null) return null
+  return meta.videoLoop === VIDEO_LOOP_NONE ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE
+}
+
+/**
  * A host that serves room pages, and only those.
  *
  * The allowlist is what stops an arbitrary link from being read as a room, and it
@@ -1104,6 +1119,16 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     throw error
   }
 
+  // The same judgement `probe` makes, so the picker cannot show a verdict a task will not act on. A read
+  // that cannot establish one is refused: no target is returned whose liveness nothing established.
+  const liveStatus = douyuLiveVerdict(meta)
+  if (liveStatus === null) {
+    throw new TargetRefusal(
+      TargetRefusalKind.PlatformUnanswered,
+      '斗鱼显示这个直播间开播，但没有给出轮播标记，无法判断它是否真在播，暂时不能添加。请稍后再试一次。'
+    )
+  }
+
   return {
     // The room's own id, as the service reports it, rather than the number that was
     // pasted: the socket frame's `roomid` and the fish-ball call both want this one.
@@ -1116,8 +1141,8 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     titleNote: '',
     anchorId: String(meta.ownerUid),
     anchorName: meta.ownerName,
-    // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.
-    liveStatus: meta.showStatus
+    // The normalised verdict, as `TargetInfo` documents: the judgement `probe` applies, read off the same body.
+    liveStatus
   }
 }
 
@@ -1179,17 +1204,16 @@ async function probe(_account: PlatformAccount, targetKey: string): Promise<Prob
     return probeFailure(transportCodeOf(error), `读取直播间信息失败：${errorText(error)}`, 'retry')
   }
 
-  // `videoLoop` is only read when `show_status` says live: for any other status the room is
-  // offline already, and its absence there must not turn an offline verdict into a refusal.
-  if (meta.showStatus === SHOW_STATUS_LIVE && meta.videoLoop === null) {
+  // `videoLoop` is only read when `show_status` says live (see `douyuLiveVerdict`): for any other status
+  // the room is offline already, and its absence there must not turn an offline verdict into a refusal.
+  const liveStatus = douyuLiveVerdict(meta)
+  if (liveStatus === null) {
     return probeFailure(LocalCode.NoVerdict, '直播间显示为开播，但读不到轮播标记，无法判断是否真在播', 'retry')
   }
 
-  const live = meta.showStatus === SHOW_STATUS_LIVE && meta.videoLoop === VIDEO_LOOP_NONE
-
   return {
     ok: true,
-    liveStatus: live ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE,
+    liveStatus,
     // Free here, unlike Bilibili's: the call this probe already made carries it.
     title: meta.roomName,
     code: String(meta.showStatus),
@@ -1502,14 +1526,19 @@ const MAX_GROUP_PAGES = 5
  * attempted and "already" is a success — the flag would only ever have caused a
  * group that needed signing to be skipped.
  *
- * **A `fastSign` score of `0` settles nothing by itself.** `fastSign` answered `0` on every
- * call measured on 2026-10-10 (three calls, two boards), and nothing measured says whether that
- * means "already signed" or "nothing was signed". So a positive score is a sign this run made,
- * and a `0` is put to the PC twin: its `status_code: 1001` is the only already verdict this
- * walk accepts from a zero, and any other success is a sign performed. Whatever the PC twin
- * cannot answer is a failed item, which leaves the day unsettled so the next sweep retries it.
- * A `fastSign` refusal with `1001` is still read as already, since that code is the endpoint's
- * own named verdict rather than a value that merely could mean it.
+ * **A `fastSign` score of `0` means this call placed no sign, and that is measured rather than
+ * inferred.** 2026-10-10, board 11254805 (「Drop」, followed that morning): `fastSign` answered
+ * `{"data":0,"status_code":200}`, and 0.2 s later the PC twin **signed that same board** and
+ * reported the level score it added (`3`). So a `0` leaves the day open — the board was unsigned
+ * when this call answered — and the walk has to get the day's signature from the twin. The reading
+ * this code used to carry (a `0` as 已签) is refuted by that same sequence: a board whose sign is
+ * already in has nothing for the twin to sign, and the twin refuses in exactly that case with its
+ * `1001`, measured once (see `signGroupPc`). A positive score from `fastSign` stays a sign this run
+ * made; a `0` is put to the twin, whose `200` with a positive score is the sign it just placed and
+ * whose `1001` is the already verdict. A `200` with no score stays unsettled — a failed item, left
+ * for the next sweep. A `fastSign` refusal with `1001` is still read as already, since that code is
+ * the endpoint's own named verdict rather than a value that merely could mean it, though that reading
+ * is not measured for `fastSign`.
  *
  * **The list can span pages.** Each page is de-duplicated by `group_id` before
  * anything is attempted, which is what makes the walk safe to keep asking: a service
@@ -1659,10 +1688,12 @@ async function reconcileYubaSign(
       continue
     }
 
-    // `fastSign`'s zero is not a verdict (see `signGroupAndroid`), so the same group is put to the
-    // PC twin before anything is settled. A transport failure ends the walk, as it does above.
+    // `fastSign`'s zero is measured as "this call placed no sign" (see `signGroupAndroid`), so the
+    // day's signature can only come from the PC twin: it either signs the board now (a `200` with a
+    // score) or answers that today is already in (`1001`). A transport failure ends the walk, as it
+    // does above.
     const checked = await callGraded(
-      '鱼吧签到核实',
+      '鱼吧 PC 端点签到',
       () => signGroupPc(credential.token, group.group_id),
       credential.token
     )
@@ -1681,14 +1712,14 @@ async function reconcileYubaSign(
         message: verdict.message,
         classification: verdict.classification
       })
-      log(`鱼吧「${name}」：核实签到失败（code ${codeText(verdict.code)}）`)
+      log(`鱼吧「${name}」：PC 端点签到失败（code ${codeText(verdict.code)}）`)
       items.push({ kind: 'group', label, outcome: 'failed', detail: verdict.message, code: codeText(verdict.code) })
       continue
     }
 
     if (verdict.data.alreadySigned) {
       already += 1
-      log(`鱼吧「${name}」：今天已经签到过了（核实 status_code ${String(YUBA_ALREADY_SIGNED)}）`)
+      log(`鱼吧「${name}」：今天已经签到过了（PC 端点 status_code ${String(YUBA_ALREADY_SIGNED)}）`)
       items.push({
         kind: 'group',
         label,
@@ -1699,10 +1730,11 @@ async function reconcileYubaSign(
       continue
     }
 
-    // A 200 from the PC twin with no score cannot be told from "already", so it settles nothing:
-    // the item fails with `retry`, and the next sweep asks again.
+    // A 200 from the PC twin with no positive score is not a verdict this walk has measured (its
+    // 1001 is, and so is its 200 with a score — see `signGroupPc`), so it settles nothing: the item
+    // fails with `retry`, and the next sweep asks again.
     if (verdict.data.levelScore <= 0) {
-      const detail = '签到核实没有给出等级分，今天是否已签判定不了，留待下次重试'
+      const detail = 'PC 端点签到没有给出等级分，今天是否已签判定不了，留待下次重试'
       failures.push({ name, code: String(verdict.code), message: detail, classification: 'retry' })
       log(`鱼吧「${name}」：${detail}`)
       items.push({ kind: 'group', label, outcome: 'failed', detail, code: String(verdict.code) })
@@ -1710,7 +1742,7 @@ async function reconcileYubaSign(
     }
 
     done += 1
-    log(`鱼吧「${name}」：签到成功（核实），等级分 +${String(verdict.data.levelScore)}`)
+    log(`鱼吧「${name}」：PC 端点签到成功，等级分 +${String(verdict.data.levelScore)}`)
     items.push({
       kind: 'group',
       label,

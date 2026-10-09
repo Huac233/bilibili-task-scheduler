@@ -144,6 +144,9 @@ let resolvedTitle: string | null = null
 /** The sentence a test forces the fixture to answer, or null to let it answer on the ask. */
 let resolveNote: string | null = null
 
+/** The normalised liveness a test forces the fixture to answer, or null for the default live verdict. */
+let resolvedLiveStatus: number | null = null
+
 /** When set, the account list is refused: the page then cannot say whether anything is bound. */
 let accountsRefused = false
 
@@ -225,7 +228,7 @@ function fixtureFor(method: string, url: string, body: unknown): unknown {
         title: resolvedTitle ?? (credentialed ? ANCHOR_NAME : BROADCAST_TITLE),
         anchorId: credentialed ? '1' : '',
         anchorName: credentialed ? ANCHOR_NAME : '',
-        liveStatus: 1,
+        liveStatus: resolvedLiveStatus ?? 1,
         titleNote: resolveNote ?? (credentialed ? '' : NO_ACCOUNT_NOTE)
       }
     }
@@ -474,6 +477,7 @@ beforeEach(() => {
   secondAccount = false
   resolvedTitle = null
   resolveNote = null
+  resolvedLiveStatus = null
   librariesRefused = false
   targetResolveRefused = false
   createdStatus = 'running'
@@ -902,6 +906,21 @@ describe('TaskCreateView, and the Target it resolves', () => {
     // …and it is in the alert that announced the Target, so nothing else on the page is claiming it — the
     // failure bar is a different element drawn from `error`, which this read did not write.
     expect(alertCarrying(NO_ACCOUNT_NOTE)).toBe(announced)
+  })
+
+  /**
+   * The picker shows the normalised verdict the scheduler acts on. A room that will not be acted on (a 轮播
+   * reads offline) must not be drawn as 直播中, and the offline word says it covers 轮播.
+   */
+  it('shows a room the scheduler will not act on as offline, and never as 直播中', async () => {
+    resolvedLiveStatus = 0
+    const view = await mountView()
+    await choose(view, SEND.key)
+    await typeInto('目标', '8801')
+    await clickButton('解析')
+
+    expect(alertCarrying('未开播（含轮播）')).not.toBeUndefined()
+    expect(alertCarrying('直播中')).toBeUndefined()
   })
 
   /**

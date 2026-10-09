@@ -444,8 +444,8 @@ async function resolveTarget(input: string, account?: PlatformAccount): Promise<
     // the 标题 whenever that read does not answer, and that is a fallback for the same one field rather
     // than a second label — so it is no reason to fill this one either.
     anchorName: '',
-    // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.
-    liveStatus: room.live_status
+    // The normalised verdict, as `TargetInfo` documents: 轮播 (2) is offline, the same fold `probe` applies.
+    liveStatus: normalisedLiveStatus(room)
   }
 }
 
@@ -461,6 +461,15 @@ function anchorNameClient(account: PlatformAccount | undefined, anonymous: BiliH
   if (account === undefined) return anonymous
   const credential = parseCredential(account.credentials)
   return credential === null ? anonymous : sessionClientFor(credential)
+}
+
+/**
+ * Bilibili's raw `live_status`, folded to the seam's two states. `isLive` is the single place that decides
+ * `2` (轮播) is not live, and both `probe` and `resolveTarget` fold through here, so the picker and a task
+ * cannot read one room differently.
+ */
+function normalisedLiveStatus(room: RoomInit): number {
+  return isLive(room.live_status) ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE
 }
 
 /**
@@ -546,10 +555,9 @@ async function probe(account: PlatformAccount, targetKey: string): Promise<Probe
 
   return {
     ok: true,
-    // `isLive` is the single place that decides `2` (轮播) is not live; folding the
-    // raw value to the seam's two states here is what lets the scheduler compare once
-    // for every Platform instead of knowing each one's encoding.
-    liveStatus: isLive(room.live_status) ? LIVE_STATUS_LIVE : LIVE_STATUS_OFFLINE,
+    // Folded to the seam's two states by `normalisedLiveStatus`, which `resolveTarget` shares: that is what
+    // lets the scheduler compare once for every Platform, and the picker show the same verdict.
+    liveStatus: normalisedLiveStatus(room),
     // Empty rather than a third round trip. The title is cosmetic, the caller gets it
     // once from `resolveTarget`, and this probe runs on a timer for every task
     // against endpoints that answer 412 when they are pushed.
