@@ -1247,7 +1247,11 @@ describe('one row, one block', () => {
     expect(asks()).toHaveLength(1)
 
     // The account arrives — the one move this row's answer depends on.
-    panelStateOf(panel).accounts = [...ACCOUNTS]
+    //
+    // Bracket access, not a dot: `panelStateOf` returns a record with an index signature, and
+    // `noPropertyAccessFromIndexSignature` is on — so `vue-tsc -p tsconfig.test.json` is what
+    // catches this file, not the build, which only typechecks `src/**`.
+    panelStateOf(panel)['accounts'] = [...ACCOUNTS]
     await settle()
 
     // The row may not go on saying it has no account: that sentence is about a state it has left.
