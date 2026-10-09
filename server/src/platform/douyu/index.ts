@@ -74,6 +74,7 @@ import {
   GROWTH_POOL_CSRF_REJECTED,
   GROWTH_POOL_NOT_ENOUGH_FISH_BALLS,
   GROWTH_POOL_TOKEN_REJECTED,
+  GROWTH_POOL_WINDOW_NOT_OPEN,
   type GrowthPoolJoin,
   joinGrowthPool,
   listFollowedGroups,
@@ -284,14 +285,18 @@ const ACTIONS: readonly ActionDescriptor[] = [
     action: TaskAction.Reconcile,
     label: '打卡分鱼丸',
     description:
-      '打卡分鱼丸：报名立即扣 200 鱼丸，次日 19:00–21:00 打卡后与所有打了卡的人瓜分奖池；不打卡就算弃权，那 200 鱼丸不退——所以报名和打卡两半都要做。',
+      '打卡分鱼丸：报名立即扣 200 鱼丸，获得次日 19:00–21:00 的打卡机会；打卡后与所有打了卡的人瓜分奖池，瓜分是随机的、可能低于 200 鱼丸；不打卡就算弃权，那 200 鱼丸不退——所以报名和打卡两半都要做。',
     /**
-     * The only costly action in the catalogue: entering the pool **spends 200
-     * 鱼丸**, and 鱼丸 is an account balance rather than a generated token, so a
-     * wrong run is not recoverable. `types.ts` documents what `costly` is for —
-     * the action defaults to off and the UI says why — and `repo/action-settings.ts`
-     * implements the other half: absence of a row means off, so a costly action
-     * ships dark and can only ever run because a person turned it on.
+     * The first costly action in the catalogue, and the one whose cost is not all of it:
+     * entering the pool **spends 200 鱼丸** and 鱼丸 is an account balance rather than a
+     * generated token, so a wrong run is not recoverable — while what comes back is the
+     * activity's own 「随机（有概率低于 200 鱼丸）瓜分」, which is why the sentence above
+     * states the randomness where the fee is stated. (This read 「the only costly action」
+     * while it was; 钓鱼, 亲密度任务 and 清仓 are costly too, and the test that counts them
+     * names all four.) `types.ts` documents what `costly` is for — the action defaults to off
+     * and the UI says why — and `repo/action-settings.ts` implements the other half: absence
+     * of a row means off, so a costly action ships dark and can only ever run because a person
+     * turned it on.
      */
     costly: true,
     needsTarget: false,
@@ -4529,9 +4534,25 @@ const GROWTH_POOL_JOINED = 1
  * the network never confirmed is read back as 已报名 on the next run, so a retry risks a repeated
  * attempt and never a second 200 鱼丸.
  *
- * The check-in's success shape has never been captured — no correctly-formed request has
- * ever reached that endpoint — so nothing here reads a field of it and no award is
- * reported; see `clockGrowthPool`.
+ * **The check-in has been reached, and the latch clears — both measured on 2026-10-09, one
+ * account, one night** (the record is on `growthPoolStatusSchema` in `protocol.ts`). The check-in
+ * answered `0` and its `data` carried the new round's pool pair, which nothing here reads: no
+ * award is reported, and none could be — the activity settles 「当日 21:00 后」 and pays 「22:00 前」
+ * (see `clockGrowthPool`). The second half of that measurement is the one this state machine rests
+ * on: `getSignInfo` answered `signStatus: 1` before the check-in and `0` after it, so the next
+ * run's very first read offers **报名** again and the cycle closes. A latch that had stayed at `1`
+ * would have left this action clocking a round it had already settled, for as long as the round
+ * lasted.
+ *
+ * **One run does one half, and 「打完卡瓜分完鱼丸后又报名一次」 is therefore two runs.** The latch
+ * is read once, at the top, and one branch is taken from it; neither half re-reads the latch
+ * afterwards, and each returns `done` — which `runner.ts` counts as settled for the platform-day.
+ * So the re-join lands on a later run, which is where the new round wants it anyway: a join opens
+ * the *next* day's 19:00–21:00 window. That reading is confirmed rather than assumed, and the shape
+ * it confirms is the one already here: `growthPoolSignUp` and `growthPoolCheckIn` are single-purpose
+ * by construction, and a single run doing both halves would have to decide the second from a latch
+ * read *before* the write that changed it — which is the one way this action could spend 200 鱼丸
+ * twice. Nothing changes for it.
  */
 async function reconcileGrowthPool(credential: ParsedCredential | null, now: number): Promise<ActionOutcome> {
   const key = ActionKey.GrowthPool
@@ -4598,6 +4619,16 @@ async function growthPoolSignUp(key: string, token: string, dyCookie: string): P
  * Absent rather than zero-filled: a `0` would be a claim about a pool nobody counted, and
  * the line reads properly without the clause — which is why both counters are optional
  * in the schema. An upstream rename costs a clause, not the action.
+ *
+ * **This is the only sentence either counter reaches, and it is a sentence about the pool rather
+ * than about the account.** The two must not be confused, so the wording carries both halves:
+ * 本场奖池 for `ywTotal`, 人已报名 for `joinTotal`. The measurement of 2026-10-09 is what makes
+ * that a fact rather than a convention — at all three of that night's reads the pool was one
+ * entry fee per joiner (`joinTotal × 200 === ywTotal`, while `HANDOFF.md` §3.1 keeps a round that
+ * does not divide to 200, so this is the night's observation and not a rule) — and the pair is
+ * replaced wholesale when a round ends, which is why the same field reads `78400` after a
+ * check-in that had read `884800` before it. Rendered without those two nouns, that pair reads as
+ * a balance this account lost. See `growthPoolStatusSchema`.
  */
 function poolClauseOf(join: GrowthPoolJoin): string {
   if (join.ywTotal === undefined || join.joinTotal === undefined) return ''
@@ -4611,6 +4642,17 @@ function poolClauseOf(join: GrowthPoolJoin): string {
  * the account is in this round, so the window is the only question left. Inside it the
  * check-in is attempted; outside it the run reports `blocked` and writes nothing, which is
  * trap 1 in the doc above.
+ *
+ * **This gate is why `57005` means what it means here.** The service's own window-closed answer
+ * is only ever seen *past* this check, so a run that gets it was already inside 19:00–21:00 by
+ * this project's clock: the two clocks disagree, and the grade that follows from that is
+ * `growthPoolRefusal`'s (retry, never a parked day).
+ *
+ * **Neither outcome claims an amount**, and the activity's rules say why that is the only
+ * honest report: 「每日瓜分鱼丸数额于当日 21:00 后开始结算，22:00 前自动发放至个人账户」， so at
+ * the instant of the check-in the figure does not exist yet. The clock reply's `data` carries the
+ * new round's pool pair and nothing else (measured 2026-10-09, see `growthPoolStatusSchema`), and
+ * this run reads none of it.
  */
 async function growthPoolCheckIn(key: string, token: string, dyCookie: string, now: number): Promise<ActionOutcome> {
   if (!withinLocalWindow(now, GROWTH_POOL_CLOCK_FROM_HOUR, GROWTH_POOL_CLOCK_TO_HOUR)) {
@@ -4628,13 +4670,19 @@ async function growthPoolCheckIn(key: string, token: string, dyCookie: string, n
   const receipt = clocked.reply
   if (!receipt.ok) return growthPoolRefusal(key, '打卡失败', receipt)
 
-  return accountOutcome(key, 'done', '已打卡、鱼丸 21:00 后结算', String(receipt.code), 'none')
+  return accountOutcome(
+    key,
+    'done',
+    '已打卡、瓜分结果 21:00 后开始结算、22:00 前发放（本次运行看不到数额）',
+    String(receipt.code),
+    'none'
+  )
 }
 
 /**
  * Grades one refusal from the 打卡分鱼丸 family.
  *
- * Three of its codes do not mean what a global table would say, so the mapping lives here,
+ * Four of its codes do not mean what a global table would say, so the mapping lives here,
  * beside the endpoints that produce them — the same reasoning `FISH_BALL_ALREADY_CLAIMED`
  * is built on:
  *
@@ -4646,6 +4694,17 @@ async function growthPoolCheckIn(key: string, token: string, dyCookie: string, n
  *    `failed`, which is the vocabulary's own word for a balance the Platform refused on.
  *    (Its source is the activity page's bundle rather than a capture: this account has
  *    always had enough.)
+ *  - `57005` is **the window not being open at Douyu**, and it is `retry` — never
+ *    `action_stop`. It was measured on 2026-10-09 as the same call's answer at 18:45 and
+ *    `0` at 19:00:20 (see `GROWTH_POOL_WINDOW_NOT_OPEN`), and the branch it lands in here
+ *    sits *below* `growthPoolCheckIn`'s own `withinLocalWindow` gate: this side has already
+ *    said the window is open, so the code says the two clocks disagree rather than that the
+ *    day is over. `action_stop` would park the action until tomorrow and forfeit a round for
+ *    what is usually a skew of seconds — the whole 200 鱼丸 — while `retry` keeps the sweep
+ *    asking for as long as this project's clock is inside the window. Nor is it `none`: a
+ *    disagreement between two clocks is the one thing worth an 动作受阻 line, and `emitOnce`
+ *    keeps it to one a day. `blocked` rather than `failed`, because nothing broke and nothing
+ *    was spent.
  *  - `152101` and everything else stay `retry`. `152101` is the CSRF double submit, and it
  *    is transient beyond doubt — 25 in a row between two windows of `0`, the same request
  *    shape succeeding again afterwards. What makes retrying it safe is the next run minting
@@ -4665,6 +4724,17 @@ function growthPoolRefusal(key: string, what: string, refusal: DouyuFailure): Ac
     // `blocked`, and phrased as the fact it is: the two `actionFailure` branches around it
     // keep their sentences, because a failure is the one case where a person needs the reason.
     return accountOutcome(key, 'blocked', `${what}、鱼丸不足 200${said}`, codeText(code), 'action_stop')
+  }
+  if (code === GROWTH_POOL_WINDOW_NOT_OPEN) {
+    // The clause names the disagreement rather than the account, because that is the only
+    // state this branch is reachable from: our own gate has already said the window is open.
+    return accountOutcome(
+      key,
+      'blocked',
+      `${what}、服务端说窗口未开（两边时钟不一致时才会出现，下一次运行再试）${said}`,
+      codeText(code),
+      'retry'
+    )
   }
   if (code === GROWTH_POOL_CSRF_REJECTED) {
     return actionFailure(

@@ -422,6 +422,15 @@ describe('the action catalogue', () => {
     const pool = douyuPlatform.actions.find(action => action.key === ActionKey.GrowthPool)
     expect(pool?.description).toContain('200')
     expect(pool?.description).toContain('鱼丸')
+    // The asymmetry the activity's own rules state, and the reason this assertion exists: the fee
+    // is certain and the return is not. 「随机（有概率低于 200 鱼丸）瓜分奖池内全部鱼丸」 is the rule,
+    // and this is the catalogue's first action that spends — a sentence promising a split with no
+    // word about the risk is the one omission a person cannot discover in time.
+    expect(pool?.description).toContain('随机')
+    expect(pool?.description).toContain('可能低于 200')
+    // The facts that were already in the sentence stay in it.
+    expect(pool?.description).toContain('19:00–21:00')
+    expect(pool?.description).toContain('不退')
 
     const fishing = douyuPlatform.actions.find(action => action.key === ActionKey.Fishing)
     expect(fishing?.description).toContain('20 枚')

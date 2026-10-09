@@ -969,7 +969,7 @@ export async function signActivity(
 /**
  * This family's verdicts, each named where it was actually seen.
  *
- * All three are numbers Douyu reuses elsewhere for other things, so none of them belongs
+ * All four are numbers Douyu reuses elsewhere for other things, so none of them belongs
  * in `errors.ts`'s global table: the classification is attached by the caller that knows
  * which endpoint produced the number, exactly as `FISH_BALL_ALREADY_CLAIMED` is.
  *
@@ -978,14 +978,24 @@ export async function signActivity(
  * double-submit layer** (`dy_token` in the body versus `dy_cookie` in the header, missing
  * or unequal), and it is transient: a live run saw 25 consecutive `152101` between two
  * windows of `0`, on requests of a shape that had just succeeded. **`57002` is the only
- * one of the three that is not a capture** — it comes from the activity page's own
+ * one of the four that is not a capture** — it comes from the activity page's own
  * bundle, which shows 「你的鱼丸不足200 无法参与打卡挑战」 for it, and it is named here
  * because a balance this adapter cannot read is exactly the refusal a caller has to
  * describe rather than retry.
+ *
+ * **`57005` is the check-in window not being open, and its evidence is a contrast rather than a
+ * body.** The same `clockSignActivity` call answered `57005` at 18:45 and `0` at 19:00:20 on
+ * 2026-10-09, one account and one night (the record is on `growthPoolStatusSchema`), so the number
+ * is the endpoint's "the window is shut right now" and not a verdict about the account or the round.
+ * It is the one of the four whose meaning needs *this* side's clock: `growthPoolCheckIn` calls it
+ * only after `withinLocalWindow` has already said the window is open, so a `57005` arriving there
+ * says the two clocks disagree rather than that the day is over — which is why the adapter grades it
+ * `retry` and never `action_stop` (see `growthPoolRefusal` in the adapter).
  */
 export const GROWTH_POOL_TOKEN_REJECTED = 10001
 export const GROWTH_POOL_CSRF_REJECTED = 152101
 export const GROWTH_POOL_NOT_ENOUGH_FISH_BALLS = 57002
+export const GROWTH_POOL_WINDOW_NOT_OPEN = 57005
 
 /**
  * The body every call in this family takes: the token, and the CSRF value the header
@@ -1008,12 +1018,44 @@ function growthPoolBody(token: string, dyCookie: string): string {
  * missing latch as "not joined" would spend 200 鱼丸 on a shape nobody verified. The
  * values this build knows come from the activity page's own button logic — `0` is
  * 未报名 (the button offers 报名) and `1` is 已报名 — and the caller reports anything
- * else as a state it does not know rather than guessing at it. Whether the value returns
- * to `0` after the check-in is **not** captured: the page hard-codes `0` on its own
- * clock branch, and a client-side constant is not a response.
+ * else as a state it does not know rather than guessing at it.
  *
- * `ywTotal` / `joinTotal` are optional because they only ever become a sentence about
- * the pool; nothing is decided from them.
+ * **The latch does return to `0` after the check-in, and that is a measurement rather than the
+ * page's own constant.** This block used to say the opposite — that the value coming back was
+ * *not* captured, because the page hard-codes `0` on its own clock branch — and that sentence was
+ * load-bearing: the whole two-run design (`0` ⇒ 报名, `1` ⇒ 打卡) rests on the latch clearing, and
+ * a value that never returned would have left this adapter clocking a round it could no longer
+ * enter. The service's own read is what answered it:
+ *
+ *     2026-10-09 +08:00 — one account (已报名, `signStatus: 1`), one night, no room (this family
+ *     is per account), and the three endpoints called directly rather than through a run:
+ *
+ *       18:45    clockSignActivity → 57005                      窗口未开 (`GROWTH_POOL_WINDOW_NOT_OPEN`)
+ *       19:00:20 clockSignActivity → 0, {"ywTotal":78400,"joinTotal":392}
+ *       19:00:20 getSignInfo       → 0, {"signStatus":0,"ywTotal":78400,"joinTotal":392}
+ *       19:00:20 joinSignActivity  → 0, {"ywTotal":78800,"joinTotal":394}
+ *
+ *     and the read taken minutes before, while the previous round was still live:
+ *       getSignInfo → {"signStatus":1,"ywTotal":884800,"joinTotal":4424}
+ *
+ * `ywTotal` / `joinTotal` are the **pool's** figures and not this account's balance, and those four
+ * reads are what say so. The pool is the entries of everyone who joined, at 200 鱼丸 each — the
+ * activity's published rules read 「支付 200 鱼丸可报名参加活动，获得次日打卡机会」 and 「奖池由
+ * 前一天参加活动用户的报名鱼丸组成」 — and `joinTotal × 200 === ywTotal` holds at all three
+ * observation points (4424/884800, 392:78400, 394:78800). The numbers also swap wholesale across
+ * the check-in because the read afterwards describes the **next** round (392 people have already
+ * paid into it) rather than a loss this account took, and the same pair moved by one entry between
+ * the read and the join reply. One account, one night, three points: the relation is an observation
+ * to record, **not a rule to assert anywhere** — and this repository already holds a reading that
+ * does not fit it (`HANDOFF.md` §3.1: 901600 ÷ 3693 ≈ 244, a different round), so the ratio is
+ * Douyu's to change and a test built on it would go red on a fact this repository does not own.
+ *
+ * They stay optional because they only ever become a sentence about the pool; nothing is decided
+ * from them. The one sentence that renders them is `poolClauseOf` in the adapter, which names them
+ * 本场奖池 / 人已报名 — checked when this record was written, and the status read's own two copies
+ * are read by nothing at all. That check is worth repeating rather than assuming: a pool figure read
+ * as a balance is the one misreading this pair invites, and `884800 → 78400` across a check-in
+ * would look exactly like a very bad night if anything rendered it that way.
  *
  * `clockLeftTime` is deliberately **not** modelled. It counts down to the window
  * *opening* and says nothing about it closing — a live read gave `107999` s for the next
@@ -1053,8 +1095,10 @@ export async function readGrowthPoolStatus(
  * and it carries no `signStatus`: the activity page sets that to `1` itself after a
  * successful join, as a client-side constant. A caller that read the latch out of this
  * reply would read `undefined`, which is why the only thing that reads a latch anywhere
- * is `readGrowthPoolStatus`. Both counters are optional so that an upstream rename costs
- * one sentence rather than the action.
+ * is `readGrowthPoolStatus`. A second sample — 2026-10-09 19:00:20, the same evening the
+ * check-in was measured, `{"error":0,"data":{"ywTotal":78800,"joinTotal":394},"msg":""}` —
+ * answers the same two counters and no latch again. Both counters are optional so that an
+ * upstream rename costs one sentence rather than the action.
  */
 export const growthPoolJoinSchema = z.object({
   ywTotal: counter.optional(),
@@ -1069,6 +1113,13 @@ export type GrowthPoolJoin = z.infer<typeof growthPoolJoinSchema>
  * Whether to call it at all is the caller's decision, taken from the latch: this function
  * cannot know whether the account can afford it, and a spend must never rest on a guess
  * made here.
+ *
+ * What those 200 鱼丸 buy is the activity's own published rule rather than anything this
+ * module reads: 「支付 200 鱼丸可报名参加活动，获得次日打卡机会」, and 「未在打卡时间内打卡，
+ * 报名鱼丸不退回」 — so the entry fee is certain and the return is not: 「随机（有概率低于
+ * 200 鱼丸）瓜分奖池内全部鱼丸」. The person-facing sentence for that asymmetry lives on the
+ * action's `description` in the adapter, where whoever decides about the switch reads it;
+ * nothing here reports a payout, because this reply carries the pool and no award.
  */
 export async function joinGrowthPool(
   token: string,
@@ -1080,19 +1131,27 @@ export async function joinGrowthPool(
 }
 
 /**
- * `POST /h5nc/userSignActivity/clockSignActivity` — the check-in, and the *unverified* half.
+ * `POST /h5nc/userSignActivity/clockSignActivity` — the check-in.
  *
- * **No correctly-formed request has ever been sent here.** The only attempt on record
- * answered `152101 请求异常` — the CSRF double submit, which is a missing or unequal
- * `dy_token`/`dy_cookie` pair — and the live run that verified the join half left this one
- * alone on purpose: the check-in it opens belongs to the next day's 19:00. So the success
- * shape is unknown and nothing here invents one: `data` is read as opaque, no field is
- * named, and no award is reported. The OK code is `0` — the code this same family's join
- * half answers a success with, measured, and the one the activity page's own handler tests
- * for on both writes.
+ * **It has now been reached with a correctly-formed request, and the reply was `0`.**
+ * The only attempt on record before that answered `152101 请求异常` — the CSRF double submit,
+ * a missing or unequal `dy_token`/`dy_cookie` pair — and the live run that verified the join
+ * half left this one alone on purpose, because the check-in it opens belongs to the next day's
+ * 19:00. On 2026-10-09 19:00:20 the call went out with that pair minted in the same run and
+ * answered `{"error":0,"data":{"ywTotal":78400,"joinTotal":392}}` — one account, one night, the
+ * record is on `growthPoolStatusSchema`. So `0` is measured *here* now rather than inferred from
+ * the join half and the page's own handler, and what the reply did was put the new round's pool
+ * on the wire: the same two counters `growthPoolStatusSchema` reads, for the round that has just
+ * opened.
  *
- * That keeps the correction cheap: when the first real response arrives, this comment and
- * this schema are what change — the caller acts on the verdict, not on the payload.
+ * `data` still stays opaque and no field of it is named, and the measurement is what makes that
+ * deliberate rather than timid. Nothing reads the pair from here — the caller acts on the verdict
+ * alone — and the award is not in this reply at all: the activity's rule is 「每日瓜分鱼丸数额于
+ * 当日 21:00 后开始结算，22:00 前自动发放至个人账户」， so the instant of the check-in is *before*
+ * the settlement that decides what it paid. A field named here would be the next reader's excuse
+ * to report a figure this response cannot carry.
+ *
+ * `57005` is this endpoint's window-closed answer; see `GROWTH_POOL_WINDOW_NOT_OPEN`.
  */
 export async function clockGrowthPool(
   token: string,

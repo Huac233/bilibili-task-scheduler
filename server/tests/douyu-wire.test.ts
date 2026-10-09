@@ -108,6 +108,22 @@ let script: Script
 const MEASURED_POOL = { ywTotal: 38400, joinTotal: 192, clockLeftTime: 107999 }
 
 /**
+ * The check-in as it was measured on the evening of 2026-10-09 — one account (already 已报名),
+ * one night, no room (this family is per account), and every field read off the service rather
+ * than off a run.
+ *
+ * Three named reads rather than one fixture, because the *movement* between them is the fact:
+ * the latch clears (`1` → `0`), and the pool pair is replaced wholesale at the check-in
+ * (`884800`/`4424` → `78400`/`392` — one entry fee per joiner, 200 鱼丸 each, which is why the
+ * same two fields describe a different round rather than a loss). The join that follows answers
+ * the round it belongs to: `78800`/`394`. Nothing here asserts the arithmetic itself: Douyu sets
+ * that ratio, and a test built on it would go red on a fact this repository does not own.
+ */
+const BEFORE_CHECK_IN = { signStatus: 1, ywTotal: 884800, joinTotal: 4424 }
+const AFTER_CHECK_IN = { signStatus: 0, ywTotal: 78400, joinTotal: 392 }
+const AFTER_JOIN = { ywTotal: 78800, joinTotal: 394 }
+
+/**
  * The one `doSign` body this repo holds from the service, verbatim.
  *
  * Read out of `captured/` rather than retyped as an object literal, and that is the point of the
@@ -127,9 +143,11 @@ function freshScript(): Script {
     // Verbatim from the live run: the join's `data` carries the pool and **no `signStatus`**,
     // because the activity page sets that to 1 itself after the join succeeds.
     join: { json: { error: 0, data: MEASURED_POOL, msg: '' } },
-    // The check-in has never received a correctly-formed request, so this reply is a shape
-    // nobody has seen. That is the point of the case that uses it: the adapter must not read
-    // anything out of it.
+    // A reply the adapter must not read: the one measured success (2026-10-09) carried the new
+    // round's pool pair and nothing else, and this one deliberately names a field that is neither
+    // of those — the case below asserts the run succeeds on the code alone. The comment here used
+    // to say no correctly-formed request had ever landed on this endpoint; one has now, and the
+    // point of the fixture did not change with it.
     clock: { json: { error: 0, data: { nobodyHasModelledThis: 1 }, msg: '' } },
     activityStatus: { json: { error: 0, data: { todaySigned: 0 }, msg: '' } },
     // The activity's own success answer, as captured on 2026-10-09 03:20:35 — not a paraphrase of it.
@@ -442,6 +460,54 @@ describe('打卡分鱼丸 at the wire', () => {
 
     expect(outcome).toMatchObject({ outcome: 'blocked', code: '57002', failure: 'action_stop' })
     expect(outcome.detail).toContain('鱼丸不足 200')
+  })
+
+  it('keeps asking when the service says the window is shut, instead of parking the day', async () => {
+    // Measured 2026-10-09: `clockSignActivity` answered 57005 at 18:45 and `0` at 19:00:20, so this
+    // is the endpoint's "the window is not open right now" and not a verdict about the account.
+    // A run only ever sees it *after* its own `withinLocalWindow` gate has said 19:00–21:00 is
+    // open, so what it actually reports is a disagreement between two clocks.
+    script.poolStatus = { json: { error: 0, data: { ...BEFORE_CHECK_IN }, msg: '' } }
+    script.clock = { json: { error: 57005, msg: '' } }
+
+    const outcome = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+
+    expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    expect(outcome).toMatchObject({ outcome: 'blocked', code: '57005', failure: 'retry' })
+    // `blocked` is not settled, and `retry` does not park the task: the sweep has to come back for
+    // the window that is still open on this side, because a parked day forfeits the round — all
+    // 200 鱼丸 — over what is usually a skew of seconds.
+    expect(outcome.outcome).not.toBe('skipped')
+    expect(outcome.failure).not.toBe('action_stop')
+    expect(outcome.detail).toContain('下一次运行再试')
+    expect(outcome.detail).not.toContain('需要重新绑定')
+  })
+
+  it('re-offers 报名 on the next run, because the check-in clears the latch', async () => {
+    // The two-run design, at the wire and with tonight's own numbers. Run 1 finds the latch at `1`
+    // and checks in; run 2 reads the latch the service hands back after a check-in — `0`, with the
+    // new round's pool — and joins, which is the half that spends.
+    script.poolStatus = { json: { error: 0, data: { ...BEFORE_CHECK_IN }, msg: '' } }
+    script.clock = { json: { error: 0, data: { ywTotal: 78400, joinTotal: 392 }, msg: '' } }
+
+    const first = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+    expect(first).toMatchObject({ outcome: 'done', code: '0' })
+    expect(first.detail).toContain('21:00')
+
+    script.poolStatus = { json: { error: 0, data: { ...AFTER_CHECK_IN }, msg: '' } }
+    script.join = { json: { error: 0, data: { ...AFTER_JOIN }, msg: '' } }
+
+    const second = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+
+    expect(second).toMatchObject({ outcome: 'done', code: '0' })
+    // The join reply's two counters reach exactly one sentence, and it names them 本场奖池 /
+    // 人已报名: the night's own reads are what proved that pair is the pool and not a balance.
+    expect(second.detail).toContain('本场奖池')
+    expect(second.detail).toContain('78800')
+    // One half per run, which is the design rather than an accident: the second run joined
+    // without clocking again, because the latch it read is the only thing selecting the branch.
+    expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    expect(sentTo(POOL_JOIN_PATH)).toHaveLength(1)
   })
 
   it('reports the closed window without a write, and says when it opens', async () => {
