@@ -2,9 +2,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 
 import { descriptorsWithDeclarations } from '../actions/action-options.js'
+import { platformAccountOf } from '../platform/account.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
 import { TargetRefusal, TargetRefusalKind } from '../platform/target.js'
-import type { TargetInfo } from '../platform/types.js'
+import type { PlatformAccount, TargetInfo } from '../platform/types.js'
+import { getAccount } from '../repo/accounts.js'
 import { type AppContext, requireUser } from './context.js'
 
 /**
@@ -27,6 +29,12 @@ import { type AppContext, requireUser } from './context.js'
  * and a catalogue that answers anonymously is a fingerprinting surface for no
  * benefit: the UI has a token before it draws anything.
  *
+ * **`resolveTarget` also takes the account the person picked, and this route is what resolves that id to a
+ * row.** The lookup is user-scoped — it takes the session's `user.id` — and that is a fact the adapters
+ * never see, so it belongs above the seam; what crosses is the `PlatformAccount` that `probe` and `send`
+ * already take. Optional, because a resolve from a settings row may have no account behind it; when it is
+ * absent the adapter is told nothing rather than handed a placeholder, and the label it produces says why.
+ *
  * **How a failed resolve is reported.** The answer a person reads is this route's `error` string, drawn
  * beside the box they typed into, so the shape of the failure is decided by the adapter's own
  * `TargetRefusal` (see `platform/target.ts`) and this route only turns its three kinds into statuses:
@@ -37,7 +45,21 @@ import { type AppContext, requireUser } from './context.js'
 
 const resolveTargetSchema = z.object({
   platform: z.string({ error: '请选择平台' }).min(1, '请选择平台'),
-  input: z.string({ error: '请输入直播间链接或房间号' }).min(1, '请输入直播间链接或房间号')
+  input: z.string({ error: '请输入直播间链接或房间号' }).min(1, '请输入直播间链接或房间号'),
+  /**
+   * The account the person had picked when they pasted the link — optional, because a resolve driven from a
+   * settings row may have none.
+   *
+   * It is here because Bilibili refuses the read that names a Room's Anchor to a caller with no credential
+   * (`bilibili/credential.ts`'s `credentialToSessionCookies` carries the measurement), and the create-task
+   * form picks the account *before* the room — so the ordinary resolve is a credentialed one, and a route
+   * that could not carry the account would leave every label on its 标题. The id is the row's own, as
+   * `GET /api/accounts` reports it; nothing about the credential travels back out.
+   */
+  accountId: z
+    .number({ error: '请选择账号' })
+    .pipe(z.int({ error: '账号 ID 无效' }).positive('账号 ID 无效'))
+    .optional()
 })
 
 export function registerPlatformRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -80,9 +102,26 @@ export function registerPlatformRoutes(app: FastifyInstance, ctx: AppContext): v
         return reply.code(400).send({ ok: false, error: `未知平台：${request.body.platform}` })
       }
 
+      // The account, when the body names one, and the two ways it can be wrong are both refusals rather
+      // than a quiet fallback to an anonymous resolve: the person asked for a credentialed read, and a 200
+      // that silently answered without the credential is the same lie the label's own note exists to
+      // prevent. Both sentences are `routes/tasks.ts`'s, and the statuses are too — a missing row is 404,
+      // and an account on another Platform is 400 because the request cannot be honoured at all.
+      let account: PlatformAccount | undefined
+      if (request.body.accountId !== undefined) {
+        const row = getAccount(ctx.db, user.id, request.body.accountId)
+        if (row === null) return reply.code(404).send({ ok: false, error: '账号不存在' })
+
+        if (row.platform !== platform.key) {
+          return reply.code(400).send({ ok: false, error: `账号不属于平台「${platform.label}」` })
+        }
+
+        account = platformAccountOf(ctx.db, row)
+      }
+
       let target: TargetInfo
       try {
-        target = await platform.resolveTarget(request.body.input.trim())
+        target = await platform.resolveTarget(request.body.input.trim(), account)
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error)
 

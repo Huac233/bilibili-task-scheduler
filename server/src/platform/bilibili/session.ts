@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { buildCredential, credentialToCookies } from '../../bilibili/credential.js'
+import { buildCredential, credentialToCookies, credentialToSessionCookies } from '../../bilibili/credential.js'
 import { BiliHttp, CookieJar, DEFAULT_TIMEOUT_MS } from '../../bilibili/http.js'
 
 /**
@@ -67,6 +67,28 @@ export function clientFor(credential: ParsedCredential): BiliHttp {
     cookies: CookieJar.fromJSON(credential.cookies),
     timeoutMs: DEFAULT_TIMEOUT_MS
   })
+}
+
+/**
+ * A client for the reads that are not the account's own business, but that Bilibili answers only to a
+ * logged-in caller — the Anchor's name today.
+ *
+ * **Deliberately a second builder beside `clientFor` rather than a widening of it, and the reason is the
+ * one a later reader is most likely to erase.** `clientFor` replays the whole stored jar, device cookies
+ * included, and that is *right* for the account's own operations: a send, a like or a medal read is the
+ * account acting, Bilibili risk-controls those, and its risk control reads the device fingerprint. This one
+ * is for a read of somebody else's public data — the same Anchor name whoever asks — where the measurement
+ * says the three session cookies suffice and `buvid3` adds nothing (the table is
+ * `bilibili/credential.ts`'s `credentialToSessionCookies`, which is also where the set is defined). They
+ * look like the same builder with a narrower jar; they are two contracts, and neither is the other's
+ * special case.
+ *
+ * The ceiling is passed for the same reason `clientFor` passes it: one 15 s per stack, from the
+ * transport's own name for it.
+ */
+export function sessionClientFor(credential: ParsedCredential): BiliHttp {
+  const session = credentialToSessionCookies(buildCredential(credential.cookies, credential.refreshToken))
+  return new BiliHttp({ cookies: CookieJar.fromJSON(session), timeoutMs: DEFAULT_TIMEOUT_MS })
 }
 
 /**

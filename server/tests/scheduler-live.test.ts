@@ -401,6 +401,9 @@ registerPlatform({
   resolveTarget: async (input: string) => ({
     key: input,
     title: '',
+    // This stub's label is the pasted text itself, so there is nothing to explain — and the field is
+    // required, so a stub that omitted it would be a `TargetInfo` that does not typecheck.
+    titleNote: '',
     anchorId: '',
     anchorName: '',
     liveStatus: 0

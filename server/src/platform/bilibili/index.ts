@@ -52,7 +52,7 @@ import {
   type SendOutcome,
   type TargetInfo
 } from '../types.js'
-import { clientFor, cookiesEqual, parseCredential, serializeCredential } from './session.js'
+import { clientFor, cookiesEqual, parseCredential, serializeCredential, sessionClientFor } from './session.js'
 
 /**
  * Bilibili, behind the Platform seam.
@@ -286,8 +286,13 @@ const wbiKeys: WbiKeyStore = new WbiKeyStore()
  * there, or Bilibili not answering — all three of which used to arrive as one of the other two. The seam
  * gives this member no failure variant, and there is nothing here to retry: a form submission either names
  * a room or it does not.
+ *
+ * `account` is the account the person had picked when they pasted the link, and it changes exactly one
+ * request: the Anchor-name read, which Bilibili refuses a cookie-less caller (the measurement is
+ * `bilibili/credential.ts`'s `credentialToSessionCookies`). Everything else here answers anonymously and
+ * keeps doing so.
  */
-async function resolveTarget(input: string): Promise<TargetInfo> {
+async function resolveTarget(input: string, account?: PlatformAccount): Promise<TargetInfo> {
   const paste = parseRoomPaste(input)
   // Two refusals, two sentences, and neither is the other: a person who pasted a shortcut is told the
   // shortcut is what this build does not read, and everyone else is told which shapes it does.
@@ -298,10 +303,10 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     throw new TargetRefusal(TargetRefusalKind.UnreadableInput, UNREADABLE_INPUT_DETAIL)
   }
 
-  // A fresh, cookie-less client on purpose: `room_init` is anonymous, and this
-  // runs while a task is being created, before an account is necessarily chosen. The
-  // deadline is stated rather than defaulted so that "an adapter call can never hang"
-  // is visible here, and it is the transport's own name for that ceiling.
+  // A cookie-less client, and the deadline is stated rather than defaulted so that "an adapter call can
+  // never hang" is visible here, and it is the transport's own name for that ceiling. Every read below
+  // that answers anonymously goes out on this one — `room_init`, the 标题 fallback — because a request
+  // carries what it needs and no more, and those two need nothing.
   const http = new BiliHttp({ timeoutMs: DEFAULT_TIMEOUT_MS })
 
   let room: RoomInit
@@ -340,27 +345,29 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
   //   3. **`''`**, only when both reads are unavailable. That is the state `ActionSettingsPanel.vue`'s
   //      echo renders as 「目标 <room id>」, and it stays reachable rather than being papered over.
   //
-  // **Why step 2 is the ordinary path here rather than a rare net.** `getInfoByRoom` answers a cookie-less
-  // client `code: -352` with no `data` at all (measured 2026-10-09 for room 14709735, and the envelope is
-  // kept verbatim in `tests/captured/bilibili-getInfoByRoom-14709735-anonymous.json`; the same room
-  // answered `code: 0` with `data.anchor_info.base_info.uname` = 「炫神_」 once the account's cookies
-  // travelled). This member's client is anonymous on purpose (see above), so **step 1 does not fire for it
-  // today**: what ships is the 标题, and the name becomes reachable the day this member has an account to
-  // read with. An endpoint that can answer *without* a name must not be able to take the label away from
-  // a read that can — `tests/bilibili-target-label.test.ts` drives that captured refusal through this
-  // exact path.
+  // **Why step 1 fires only when an account is in hand.** `getInfoByRoom` refuses a cookie-less client
+  // `code: -352` with no `data` at all, and it is the *session* cookies that lift that refusal — not the
+  // device cookies, which were tried alone and refused (2026-10-09, room 14709735; the table is beside
+  // `credentialToSessionCookies`). So the name read goes out on the account's session when there is one,
+  // and on the anonymous client when there is not. It is still **made** in that second case rather than
+  // skipped: a refusal is the Platform's answer and can change (the code is documented as temporary),
+  // and a branch that pre-empted it would be this build asserting an endpoint's behaviour instead of
+  // asking. What the caller is told in that case is `titleNote` below, not a quieter label.
   //
   // Cosmetic in the one sense that matters here — the room resolved, which is all the caller needs — so
   // neither failure may block creating the task. The order costs one extra request, and only on the path
   // where no name arrived: a name that arrives still short-circuits.
-  let title = ''
+  const nameHttp = anchorNameClient(account, http)
+
+  let name = ''
   try {
-    title = await fetchAnchorName(http, room.room_id)
+    name = await fetchAnchorName(nameHttp, room.room_id)
   } catch {
     // Ignored: a task this read could not name is still a task, and the 标题 below is what the label
     // falls back to.
   }
 
+  let title = name
   if (title === '') {
     try {
       title = (await fetchRoomInfo(http, room.room_id)).title
@@ -370,11 +377,24 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     }
   }
 
+  // **Why the label is a 标题, when it is one — and this is the sentence the regression was missing.**
+  // The label above is one field with three sources, so a reader cannot tell a name this build read from a
+  // subject line it fell back to, and the owner asked for that to be said out loud rather than left to be
+  // inferred (「如果没绑需要写明提示并回退」). Two causes, two sentences, because they send a person to two
+  // different places: **no account travelled** is theirs to fix by picking one, while **an account travelled
+  // and the name still did not arrive** is not — and printing the first sentence over the second case would
+  // send them to fix the one thing that is already right. It is computed from which read answered rather
+  // than from the text, so an empty `title` (both reads failed) keeps the cause it belongs to instead of
+  // inventing one.
+  let titleNote = ''
+  if (name === '') titleNote = account === undefined ? NO_ACCOUNT_TITLE_NOTE : NAME_UNREAD_TITLE_NOTE
+
   return {
     // The real room id, not the number that was pasted: every write endpoint wants
     // the id `room_init` maps to.
     key: String(room.room_id),
     title,
+    titleNote,
     anchorId: String(room.uid),
     // Empty, and for a different reason than this line used to give: this adapter *does* read the
     // Anchor's display name now, but it belongs in `title` — the field the echo and a task row draw —
@@ -388,6 +408,20 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.
     liveStatus: room.live_status
   }
+}
+
+/**
+ * The client the Anchor-name read goes out on when the person had picked an account.
+ *
+ * Both halves of the fallback are stated rather than smuggled into a `??`: with no account it is the
+ * caller's own anonymous client, and an account whose credential blob this build cannot read is the same
+ * case — `parseCredential` answers `null` for that, which is a person's re-bind to make rather than a
+ * request to fail, and this read is cosmetic either way.
+ */
+function anchorNameClient(account: PlatformAccount | undefined, anonymous: BiliHttp): BiliHttp {
+  if (account === undefined) return anonymous
+  const credential = parseCredential(account.credentials)
+  return credential === null ? anonymous : sessionClientFor(credential)
 }
 
 /**
@@ -2289,6 +2323,30 @@ const UNREADABLE_INPUT_DETAIL = '无法从该链接解析出直播间号'
  */
 const SHORT_LINK_DETAIL =
   '这是 b23.tv 短链：它指向哪个直播间只有打开它才知道，本版不打开短链；请粘贴它跳转到的 live.bilibili.com 直播间链接，或直接填直播间号。'
+
+/**
+ * 「The label is a 标题 because no account travelled」 — the note `resolveTarget` attaches, and the one the
+ * owner asked for by name (「如果没绑需要写明提示并回退」).
+ *
+ * It exists because the *read* needs an account and the *label* does not show it: `getInfoByRoom` answers a
+ * cookie-less caller `code: -352` with no `data`, so without an account the only name-less read left is
+ * `get_info`'s 标题 — measured 2026-10-09 for room 14709735, one cookie set per call, the table beside
+ * `bilibili/credential.ts`'s `credentialToSessionCookies`. The sentence names the cause rather than the
+ * current display, because what the page draws under it — the 标题, or 「目标 <room id>」 when that failed
+ * too — is the page's own decision and a second sentence claiming it would be this one going stale.
+ */
+const NO_ACCOUNT_TITLE_NOTE = '未选择账号，读不到主播名：B 站只在请求带上账号的登录 cookie 时才给出这个字段'
+
+/**
+ * 「An account travelled and the name still did not arrive」 — the other cause, in as few words as it takes.
+ *
+ * A name is one call away from being unavailable for reasons that have nothing to do with the person
+ * (a `19002000`, a risk-control refusal, a deadline), and none of them is a missing account — so this is
+ * deliberately *not* a variant of the sentence above. What it must not do is say a room "has no name":
+ * nothing here establishes that, and a room whose name this build could not read is a different fact from
+ * a room reporting none.
+ */
+const NAME_UNREAD_TITLE_NOTE = '没读到主播名'
 
 export const bilibiliPlatform: Platform = {
   /** The exact string the `accounts` and `tasks` rows carry; see `db/migrations.ts`. */

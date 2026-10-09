@@ -56,12 +56,17 @@ import { envelopedOptionalData } from './types.js'
  */
 
 /**
- * 房间级读侧。**不需要 WBI 也不需要 csrf —— 但需要一个带 cookie 的客户端。**
+ * 房间级读侧。**不需要 WBI 也不需要 csrf —— 但需要客户端带上会话 cookie。**
+ *
+ * 「会话 cookie」是 2026-10-09 量到的集合，一次只送一组、同一房间 14709735：`buvid3` 单独送 → `-352`；
+ * `SESSDATA` 单独送 → `-352`；`SESSDATA` + `bili_jct` → 也是 `-352`；`SESSDATA` + `bili_jct` +
+ * `DedeUserID` → `code 0` 读到主播名 —— 而整只 jar（多一个 `buvid3`）在同一分钟里也回 `code 0`，所以那几次
+ * 拒绝是 cookie 集合的事、不是风控。集合定义在 `credential.ts` 的 `credentialToSessionCookies`，客户端由
+ * `bilibili/session.ts` 的 `sessionClientFor` 造，完整记录在 `live.ts` 的 `fetchAnchorName`。
  *
  * 模块头部那句「不需要 WBI，也不需要 csrf」是在**本模块这条带凭据的读路径**上量的（读侧客户端由
  * `clientFor` 造，jar 里带着绑定账号的 cookie），所以它推不出「匿名客户端也能读」。实测（2026-10-09，房间
- * 14709735）：无 cookie 时这个端点答 `code -352`、`data` 整个缺席，一个字段都读不到。完整记录与推论错在哪，
- * 在 `live.ts` 的 `fetchAnchorName`。
+ * 14709735）：无 cookie 时这个端点答 `code -352`、`data` 整个缺席，一个字段都读不到。
  */
 export const ROOM_INFO_BY_ROOM_URL = 'https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom'
 

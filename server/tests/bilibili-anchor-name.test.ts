@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { BiliHttp, DEFAULT_TIMEOUT_MS } from '../src/bilibili/http.js'
 import { fetchAnchorName, RoomRefusedError } from '../src/bilibili/live.js'
 import { ROOM_INFO_BY_ROOM_URL } from '../src/bilibili/medal.js'
+import { sessionClientFor } from '../src/platform/bilibili/session.js'
 
 /**
  * The read that answers 「who streams in this room」, driven against a stubbed transport.
@@ -39,7 +40,12 @@ function installFetchMock(reply: unknown): void {
   vi.stubGlobal('fetch', fetchMock)
 }
 
-/** The cookie-less client `resolveTarget` builds: this read needs no session (see `medal.ts`'s header). */
+/**
+ * A client with no credential at all — which is what this read is *handed* when the person had not picked an
+ * account, and **not** a client this endpoint answers: it answers a cookie-less caller `-352` with no `data`
+ * (the measurement is `live.ts`'s `fetchAnchorName`). The reader below composes no cookie of its own either
+ * way, which is what the case at the end of this file pins from both sides.
+ */
 function anonymousHttp(): BiliHttp {
   return new BiliHttp({ timeoutMs: DEFAULT_TIMEOUT_MS })
 }
@@ -63,9 +69,35 @@ it('asks the room page’s payload with the real room id, and reads the name nes
   expect(name).toBe('炫神_')
   expect(calls.map(call => call.url)).toEqual([`${ROOM_INFO_BY_ROOM_URL}?room_id=84074`])
   expect(calls[0]?.method).toBe('GET')
-  // No credential travels with it: the client is anonymous on purpose, so a request that suddenly
-  // carried the session would be a defect rather than a detail.
+  // The reader contributes no cookie of its own: whatever travelled is the client's, which the case below
+  // pins from the other side. A reader that reached into the jar here would be a defect either way.
   expect(calls[0]?.headers.get('cookie')).toBeNull()
+})
+
+/**
+ * The other side of that: this reader sends what its client carries, and the client is the caller's choice.
+ *
+ * Which is the whole of the fix for the empty label — the caller has an account and this is the read that
+ * needs it — so the pair of cases pins the boundary: the *reader* never invents a credential, and the
+ * *caller* supplies one on this path. Which cookies the supplied client holds is
+ * `bilibili/credential.ts`'s `credentialToSessionCookies` and is asserted through the real transport in
+ * `bilibili-target-label.test.ts`.
+ */
+it('sends the session cookies of the client it was handed', async () => {
+  installFetchMock(anchorPayload('炫神_'))
+
+  const credentialed = sessionClientFor({
+    cookies: { SESSDATA: 'sessdata-fixture-4b1e77c0', bili_jct: 'csrf-fixture-9a2f31b6', DedeUserID: '12345678' },
+    refreshToken: ''
+  })
+
+  await fetchAnchorName(credentialed, 84074)
+
+  expect(calls[0]?.headers.get('cookie')?.split('; ').sort()).toEqual([
+    'DedeUserID=12345678',
+    'SESSDATA=sessdata-fixture-4b1e77c0',
+    'bili_jct=csrf-fixture-9a2f31b6'
+  ])
 })
 
 it('answers nothing, rather than throwing, when the room reports no name', async () => {

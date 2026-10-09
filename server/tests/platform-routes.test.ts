@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
 import type { BuiltServer } from '../src/index.js'
 import { allPlatforms, registerPlatform } from '../src/platform/registry.js'
 import { TargetRefusal, TargetRefusalKind } from '../src/platform/target.js'
-import type { TargetInfo } from '../src/platform/types.js'
+import type { PlatformAccount, TargetInfo } from '../src/platform/types.js'
 import { upsertAccount } from '../src/repo/accounts.js'
 import { test as it, registerUser, type Session } from './fixtures.js'
 
@@ -36,7 +36,29 @@ class StubStringStatusError extends Error {
 /** Registered here so `resolveTarget` can be driven without touching any network. */
 const STUB_PLATFORM = 'resolve_stub'
 
-const RESOLVED_TARGET: TargetInfo = { key: '42', title: '标题', anchorId: '7', anchorName: '主播', liveStatus: 1 }
+/**
+ * A credential blob, kept obviously fake.
+ *
+ * Its only job is to prove the route passes the *row* through rather than a summary of it: an adapter that
+ * cannot read the blob cannot act as the account, and this is the field a route could quietly drop without
+ * anything else noticing.
+ */
+const STUB_CREDENTIALS = '{"cookies":"{}","refreshToken":"stub-refresh"}'
+
+/**
+ * The account the route handed the adapter — which is a fact only the adapter can observe, so the stub
+ * records it rather than the test looking for it in the response (a credential never travels back).
+ */
+const stubSeen: { account: PlatformAccount | null } = { account: null }
+
+const RESOLVED_TARGET: TargetInfo = {
+  key: '42',
+  title: '标题',
+  titleNote: '没读到主播名',
+  anchorId: '7',
+  anchorName: '主播',
+  liveStatus: 1
+}
 
 /**
  * The stub's next answer, as a typed holder rather than a `let`.
@@ -55,7 +77,10 @@ registerPlatform({
   // Deliberately empty: a Platform with no actions must still be listed, and its
   // empty catalogue must not disturb the switchboard's merge.
   actions: [],
-  resolveTarget: async () => stubReply.current(),
+  resolveTarget: async (_input: string, account?: PlatformAccount) => {
+    stubSeen.account = account ?? null
+    return await stubReply.current()
+  },
   probe: async () => ({ ok: true, liveStatus: 0, title: '', code: '0', detail: '', failure: 'none' }),
   send: async () => ({ ok: true, code: '0', detail: '', failure: 'none' }),
   reconcile: async () => []
@@ -440,6 +465,111 @@ describe('POST /api/targets/resolve', () => {
     expect(response.json<{ error: string }>().error).toContain('未知平台')
   })
 
+  /**
+   * The account a person picked before pasting the link, which is the ordinary case on the create-task
+   * form — and the reason the route takes one at all: Bilibili refuses the Anchor-name read to a caller with
+   * no credential, so a resolve without an account can only ever label a room with its 标题.
+   *
+   * The assertion is on what the *adapter* received, because that is where the fact lives: the credential
+   * travels one way only, and a route that dropped it would answer exactly the same HTTP response.
+   */
+  it('hands the picked account to the adapter, credential and meta included', async ({ server, session }) => {
+    const account = upsertAccount(server.ctx.db, session.userId, {
+      platform: STUB_PLATFORM,
+      externalId: '987654',
+      displayName: '测试账号',
+      avatar: '',
+      credentials: STUB_CREDENTIALS,
+      meta: '{"seen":true}'
+    })
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      payload: { platform: STUB_PLATFORM, input: 'whatever', accountId: account.id },
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(stubSeen.account).toMatchObject({
+      id: account.id,
+      platform: STUB_PLATFORM,
+      externalId: '987654',
+      credentials: STUB_CREDENTIALS,
+      meta: '{"seen":true}'
+    })
+  })
+
+  /**
+   * The other half of the same seam, and the state the owner asked to be told about: a resolve the settings
+   * page drives has no account behind it, so the adapter must be handed *nothing* rather than a blank
+   * placeholder that looks like one.
+   */
+  it('hands no account when the body names none', async ({ server, session }) => {
+    stubSeen.account = null
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      payload: { platform: STUB_PLATFORM, input: 'whatever' },
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(stubSeen.account).toBeNull()
+  })
+
+  it('rejects a body whose accountId is not a number, rather than resolving without it', async ({
+    server,
+    session
+  }) => {
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      payload: { platform: STUB_PLATFORM, input: 'whatever', accountId: 'first-one' },
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(400)
+  })
+
+  it('answers 404 for an accountId that names no account of this person', async ({ server, session }) => {
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      payload: { platform: STUB_PLATFORM, input: 'whatever', accountId: 987_654 },
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(response.json<{ error: string }>().error).toBe('账号不存在')
+  })
+
+  /**
+   * A mismatch is refused rather than resolved anonymously, and the two halves of why: an account on another
+   * Platform carries a credential this adapter cannot read, and silently dropping it would answer 200 for a
+   * read the person asked to be credentialed — the same lie the note exists to prevent.
+   */
+  it('answers 400 when the account belongs to another Platform', async ({ server, session }) => {
+    const other = upsertAccount(server.ctx.db, session.userId, {
+      platform: 'bilibili',
+      externalId: '987654',
+      displayName: '别家账号',
+      avatar: '',
+      credentials: STUB_CREDENTIALS
+    })
+
+    const response = await server.app.inject({
+      method: 'POST',
+      url: '/api/targets/resolve',
+      payload: { platform: STUB_PLATFORM, input: 'whatever', accountId: other.id },
+      headers: session.auth()
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json<{ error: string }>().error).toBe('账号不属于平台「目标解析测试」')
+  })
+
   it('returns the adapter’s target unchanged', async ({ server, session }) => {
     const response = await server.app.inject({
       method: 'POST',
@@ -452,6 +582,7 @@ describe('POST /api/targets/resolve', () => {
     expect(response.json<{ target: TargetInfo }>().target).toEqual({
       key: '42',
       title: '标题',
+      titleNote: '没读到主播名',
       anchorId: '7',
       anchorName: '主播',
       liveStatus: 1

@@ -190,11 +190,21 @@ export async function fetchRoomInfo(http: BiliHttp, roomId: number): Promise<Roo
  * and a same-site `Referer` and no cookie: `{"code":-352,"message":"-352","ttl":1}` — no `data`, so no
  * anchor block and no name to read (that envelope is kept verbatim in
  * `tests/captured/bilibili-getInfoByRoom-14709735-anonymous.json`). The same room answered `code: 0`
- * with `data.anchor_info.base_info.uname` = 「炫神_」 once the account's cookies travelled; **which of
- * those cookies is load-bearing is not measured**, only that the jar is part of the contract. Which is
- * why `resolveTarget` — anonymous on purpose, being built before an account is chosen — reads this
- * endpoint's name first and falls back to the room's 标题, and why a `''` from an empty anchor block is
- * a state its caller had to stop treating as the only alternative.
+ * with `data.anchor_info.base_info.uname` = 「炫神_」 once the account's cookies travelled.
+ *
+ * **Which of those cookies is load-bearing was measured afterwards, and the answer changes what a caller
+ * owes this read: the session, not the device.** One cookie set per call, same room: `buvid3` alone →
+ * `-352`; `SESSDATA` alone → `-352`; `SESSDATA` + `bili_jct` → `-352`; `SESSDATA` + `bili_jct` +
+ * `DedeUserID` → `code: 0` with the name; the whole stored jar → the same `code: 0` **in the same minute
+ * the subsets were refused**, which is what makes those refusals a fact about the cookie set rather than
+ * about a risk-controlled caller. The table lives beside `bilibili/credential.ts`'s
+ * `credentialToSessionCookies`, which is where the three are defined and what `platform/bilibili/session.ts`'s
+ * `sessionClientFor` builds a client from, so a caller holding an account owes this read *that* client and
+ * not the whole jar. With no account at all there is nothing to hand it, which is not this reader's problem
+ * to solve: it throws, `resolveTarget` falls back to the room's 标题, and the sentence that says why a label
+ * is a 标题 is `platform/types.ts`'s `TargetInfo.titleNote`. A `''` from an empty anchor block is the third
+ * state, and it stays reachable rather than being folded into the refusal — the caller had to stop treating
+ * it as the only alternative, which is a different mistake from the one above.
  *
  * **Named for the room, not for a user id, and that is the design decision here.** A name can be had
  * from a profile call as well (`live_user/v1/UserInfo/get_anchor_in_room?roomid=`, whose

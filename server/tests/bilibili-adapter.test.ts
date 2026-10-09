@@ -67,6 +67,24 @@ const CREDENTIALS = JSON.stringify({
 const UNREADABLE_CREDENTIALS = '{}'
 
 /**
+ * The same credential with the device cookies a real binding carries.
+ *
+ * Kept apart from `CREDENTIALS` because that one is the *ordinary* jar every other case runs on, while this
+ * one exists for a single assertion: a read that needs the session must not send the device cookie, and a
+ * fixture without one could not tell that apart from sending it. The `buvid3` value is a marker rather than
+ * a plausible device id so the negative below cannot be satisfied by accident (`AGENTS.md`'s rule).
+ */
+const CREDENTIALS_WITH_DEVICE = JSON.stringify({
+  cookies: JSON.stringify({
+    SESSDATA: 'sessdata-value',
+    bili_jct: 'csrf-value',
+    DedeUserID: '987654',
+    buvid3: 'BUVID3-DEVICE-MARKER-MUST-NOT-TRAVEL'
+  }),
+  refreshToken: ''
+})
+
+/**
  * The Anchor's name, as the read that answers it returns one.
  *
  * The reported case's own pair, and the reason this file has a name fixture at all: room `84074`'s
@@ -540,6 +558,8 @@ describe('resolveTarget', () => {
       // The label a person reads, which is a **name**: 「已解析：炫神_」 beside the input, and a task
       // row's `targetTitle`. Never the room's 标题 — see the case below, where both are on offer.
       title: ANCHOR_NAME,
+      // Nothing to explain: the label is the name, and a note here would repeat the line it sits beside.
+      titleNote: '',
       anchorId: '12345',
       // Empty, and now for a different reason than it used to be: this adapter *does* read the
       // Anchor's name (into `title`, which is the field both the echo and a task row draw), and
@@ -590,6 +610,62 @@ describe('resolveTarget', () => {
     expect(target.key).toBe('22637261')
     // Asked of the real room id, as every read here is: `get_info` takes what `room_init` mapped to.
     expect(fetchRoomInfoMock).toHaveBeenCalledWith(expect.anything(), 22637261)
+  })
+
+  /**
+   * The two causes behind one label, and the reason the note is a sentence rather than a flag.
+   *
+   * A label that is a 标题 can mean 「nobody selected an account, so the read could not be credentialed」 or
+   * 「an account was in hand and the name still did not arrive」. Neither is a refusal and the target
+   * resolved either way — so neither is an error — but they send a person to two different places, and the
+   * second sentence is deliberately not a variant of the first. (The mock cannot show *why* a credentialed
+   * read came back empty; the real reader and the real refusal are `tests/bilibili-target-label.test.ts`'s
+   * job, and what this case pins is which sentence each resolve picks.)
+   */
+  it('says whether the name went unread for want of an account or in spite of one', async () => {
+    fetchAnchorNameMock.mockResolvedValue('')
+
+    const accountless = await bilibiliPlatform.resolveTarget('22637261')
+    expect(accountless.titleNote).toBe('未选择账号，读不到主播名：B 站只在请求带上账号的登录 cookie 时才给出这个字段')
+
+    const credentialed = await bilibiliPlatform.resolveTarget('22637261', account())
+    expect(credentialed.title).toBe('标题')
+    expect(credentialed.titleNote).toBe('没读到主播名')
+  })
+
+  /**
+   * The account reaches exactly one request, and it is the name read.
+   *
+   * Asserted on the client the adapter builds rather than on a URL, because that *is* the observable at
+   * this seam: `fetchAnchorName` is mocked here, so the jar it was handed is the only thing to look at.
+   * The wire measure of it — the three session cookies and no device cookie — goes through the real
+   * transport in `tests/bilibili-target-label.test.ts`; what this case adds is the other half, that the
+   * two anonymous reads keep their own cookie-less client instead of inheriting one because it is in hand.
+   */
+  it('hands the account to the name read only, and only that account’s session cookies', async () => {
+    // An empty name so the 标题 fallback also runs: the case needs all three reads to see which clients
+    // they were handed.
+    fetchAnchorNameMock.mockResolvedValue('')
+
+    await bilibiliPlatform.resolveTarget('22637261', account(CREDENTIALS_WITH_DEVICE))
+
+    // Ready off the mock's own arguments — `vi.fn()` carries them untyped, so this stays a test-local
+    // read rather than a cast the type system would have to be talked out of.
+    const nameJar = fetchAnchorNameMock.mock.calls[0]?.[0].cookies
+    expect(nameJar.toHeader().split('; ').sort()).toEqual([
+      'DedeUserID=987654',
+      'SESSDATA=sessdata-value',
+      'bili_jct=csrf-value'
+    ])
+    // The half the measurement bought: the device cookie is in the credential this adapter was handed,
+    // and it must not travel on this read.
+    expect(nameJar.has('buvid3')).toBe(false)
+    expect(nameJar.toHeader()).not.toContain('BUVID3-DEVICE-MARKER-MUST-NOT-TRAVEL')
+
+    // And the other half: the two reads that need nothing keep their own cookie-less client instead of
+    // inheriting one because it happens to be in hand.
+    expect(resolveRoomMock.mock.calls[0]?.[0].cookies.toHeader()).toBe('')
+    expect(fetchRoomInfoMock.mock.calls[0]?.[0].cookies.toHeader()).toBe('')
   })
 
   /**

@@ -1,17 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite'
 
 import { transaction } from '../db/tx.js'
+import { platformAccountOf } from '../platform/account.js'
 import { allPlatforms, platformFor } from '../platform/registry.js'
 import { dayKeyOf, startOfPlatformDay } from '../platform/time.js'
 import type { ActionOutcome, FailureKind, Platform, PlatformAccount } from '../platform/types.js'
-import {
-  type Account,
-  getAccountById,
-  getAccountCredentials,
-  getAccountMeta,
-  listAccountsByPlatform,
-  updateAccountCredentials
-} from '../repo/accounts.js'
+import { type Account, getAccountById, listAccountsByPlatform, updateAccountCredentials } from '../repo/accounts.js'
 import { appendActionLog, hasActionLogWithCodeSince, settledActionKeysSince } from '../repo/action-logs.js'
 import { actionOptions, getActionSetting } from '../repo/action-settings.js'
 import { appendEvent, EventKind, EventSeverity, hasRecentEvent } from '../repo/events.js'
@@ -927,21 +921,11 @@ export class Scheduler {
   /**
    * Loads an account into the shape an adapter takes.
    *
-   * The credential blob is read here rather than carried on `Account`, because the
-   * list and read helpers deliberately omit it — an accidental leak through a route
-   * handler is the failure mode that design avoids. The scheduler genuinely needs
-   * it, so it asks explicitly.
+   * The body moved to `platform/account.ts` when the resolve route needed the same mapping; this stays as
+   * the scheduler's own door to it, so its three call sites do not each have to carry the database handle.
    */
   private platformAccountOf(account: Account): PlatformAccount {
-    return {
-      id: account.id,
-      platform: account.platform,
-      externalId: account.externalId,
-      displayName: account.displayName,
-      avatar: account.avatar,
-      credentials: getAccountCredentials(this.deps.db, account.id) ?? '',
-      meta: getAccountMeta(this.deps.db, account.id) ?? ''
-    }
+    return platformAccountOf(this.deps.db, account)
   }
 
   /**

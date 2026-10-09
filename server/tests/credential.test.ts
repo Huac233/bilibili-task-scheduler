@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildCredential,
   credentialToCookies,
+  credentialToSessionCookies,
   describeCredential,
   extractCredentialFromUrl,
   isCredentialComplete,
@@ -128,6 +129,43 @@ describe('credentialToCookies', () => {
     const cookies = credentialToCookies(buildCredential(fullCookies, 'secret-refresh'))
     expect(Object.values(cookies)).not.toContain('secret-refresh')
     expect('ac_time_value' in cookies).toBe(false)
+  })
+})
+
+describe('credentialToSessionCookies', () => {
+  /**
+   * The three cookies a session *is*, and what that set rests on is the function's own doc comment — four
+   * measured calls, one cookie set each. What this case adds is the **coupling**: the set has to be exactly
+   * the fields `isCredentialComplete` demands, so a fourth cookie added here, or a required field added
+   * there, cannot go unnoticed.
+   */
+  it('carries exactly the cookies a credential cannot be used without', () => {
+    const session = credentialToSessionCookies(buildCredential(fullCookies, 'rt'))
+
+    expect(Object.keys(session).sort()).toEqual(['DedeUserID', 'SESSDATA', 'bili_jct'])
+    expect(isCredentialComplete(buildCredential(session))).toBe(true)
+
+    for (const name of Object.keys(session)) {
+      const without: Record<string, string> = { ...session }
+      delete without[name]
+      expect(isCredentialComplete(buildCredential(without))).toBe(false)
+    }
+  })
+
+  /**
+   * The negative the narrowing exists for. The device cookies are part of what a credential is *stored*
+   * and compared as — `credentialToCookies` writes them, and `canonicalCookies` keeps that — but they are
+   * not part of the session, and one measured call per set says they add nothing to the read that needs a
+   * session at all.
+   */
+  it('never carries the device cookies, however present they are', () => {
+    const session = credentialToSessionCookies(buildCredential(fullCookies, 'rt'))
+
+    expect('buvid3' in session).toBe(false)
+    expect('buvid4' in session).toBe(false)
+    expect(Object.values(session)).not.toContain('buvid3-value')
+    expect(Object.values(session)).not.toContain('buvid4-value')
+    expect('ac_time_value' in session).toBe(false)
   })
 })
 

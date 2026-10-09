@@ -117,14 +117,45 @@ export function extractCredentialFromUrl(url: string, refreshToken = ''): BiliCr
  * cookie, and sending it as one is both wrong and a needless leak.
  */
 export function credentialToCookies(credential: BiliCredential): Record<string, string> {
-  const cookies: Record<string, string> = {
+  const cookies = credentialToSessionCookies(credential)
+  if (credential.buvid3 !== '') cookies[CookieName.Buvid3] = credential.buvid3
+  if (credential.buvid4 !== '') cookies[CookieName.Buvid4] = credential.buvid4
+  return cookies
+}
+
+/**
+ * The cookies that **are** the session — the three without which a credential cannot be used at all.
+ *
+ * **This set exists because a read was measured to need this much and no more.** `getInfoByRoom`, the one
+ * read that answers a Room's Anchor name (`live.ts`'s `fetchAnchorName`), is refused when asked with no
+ * cookie: `200` `{"code":-352,"message":"-352","ttl":1}`, no `data` at all. Measured 2026-10-09 for room
+ * 14709735, **one cookie set per call**:
+ *
+ *     buvid3 alone                       -> -352, no data
+ *     SESSDATA alone                     -> -352, no data
+ *     SESSDATA + bili_jct                -> -352, no data
+ *     SESSDATA + bili_jct + DedeUserID   -> code 0, data.anchor_info.base_info.uname = 「炫神_」
+ *     the whole stored jar               -> code 0, the same name
+ *
+ * The last line is the control rather than a sixth candidate: it was answered in the same minute the
+ * subsets were refused, so those refusals are about the cookie set and not about a risk-controlled
+ * caller. Two things follow. **The device cookies are not what that read needs** — `buvid3` alone is
+ * refused, and the jar that is answered is answered by these three alone, so a client built from this
+ * set sends a request that carries its need and nothing wider. **And the account's identity is what it
+ * needs**: `DedeUserID` is the whole difference between the two three-cookie calls, and since the answer
+ * is the room's own name, the label depends on *some* account's session travelling rather than on which
+ * account is selected.
+ *
+ * `REQUIRED_FIELDS` above names the same three fields; this is that list as cookies, and
+ * `tests/credential.test.ts` couples them — dropping any one of these cookies has to make
+ * `isCredentialComplete` say no, so the two cannot drift apart in silence.
+ */
+export function credentialToSessionCookies(credential: BiliCredential): Record<string, string> {
+  return {
     [CookieName.SessData]: credential.sessdata,
     [CookieName.Csrf]: credential.biliJct,
     [CookieName.UserId]: credential.dedeUserId
   }
-  if (credential.buvid3 !== '') cookies[CookieName.Buvid3] = credential.buvid3
-  if (credential.buvid4 !== '') cookies[CookieName.Buvid4] = credential.buvid4
-  return cookies
 }
 
 /**

@@ -1082,6 +1082,11 @@ async function resolveTarget(input: string): Promise<TargetInfo> {
     // pasted: the socket frame's `roomid` and the fish-ball call both want this one.
     key: String(meta.roomId),
     title: meta.roomName,
+    // Empty, and the contrast with Bilibili's adapter is the whole of it: this Platform reports the room's
+    // own name, and the Anchor's name with it (`anchorName` below), in one payload — so nothing a person
+    // reads here is a fallback. Bilibili keeps a note because its label *can* be one, and `TargetInfo` says
+    // what the field is for.
+    titleNote: '',
     anchorId: String(meta.ownerUid),
     anchorName: meta.ownerName,
     // The raw value, as `TargetInfo` documents. `probe` is where it is normalised.

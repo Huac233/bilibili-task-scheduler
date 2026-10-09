@@ -723,7 +723,12 @@ describe('resolveTarget', () => {
     anchorId: '310260',
     anchorName: '电棍',
     // The raw show_status, as `TargetInfo` documents; `probe` is where it is normalised.
-    liveStatus: 1
+    liveStatus: 1,
+    // Empty on purpose, and the reason is the contrast with Bilibili's adapter: this Platform
+    // reports the room's own name and the Anchor's name in one payload, so there is never a
+    // reason a person has to be told about here. Bilibili is the one that may answer without a
+    // name, and that is where `titleNote` carries a sentence.
+    titleNote: ''
   }
 
   it.each([

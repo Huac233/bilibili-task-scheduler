@@ -303,6 +303,23 @@ export interface PlatformAccount {
 export interface TargetInfo {
   readonly key: string
   readonly title: string
+  /**
+   * What `title` does not say, as a sentence the page shows beside it — `''` when there is nothing to
+   * explain.
+   *
+   * **The field exists because a label can be a fallback, and a fallback that does not say it is one
+   * reads as an answer.** Bilibili's `title` is the Anchor's name when a credential can read it and the
+   * broadcast's 标题 when it cannot, and the two are indistinguishable to a reader: 「铁人」 is a room's
+   * subject line, and a person shown it has no way to know that this build failed to read 「炫神_」. So the
+   * adapter says why, in its own words, and the page draws it as a note beside the label rather than as an
+   * error — the target did resolve, and this is not a refusal (`TargetRefusal` is that, and it is thrown).
+   *
+   * **Empty means "nothing to add", not "no reason recorded".** A Platform whose label is already the
+   * name it means — Douyu's `meta.roomName`, or a Bilibili resolve that read the name — answers `''`, and
+   * the field is deliberately required so every adapter states which of those it is rather than leaving a
+   * reader to guess from a missing key.
+   */
+  readonly titleNote: string
   readonly anchorId: string
   readonly anchorName: string
   /** The Platform's own liveness value; only meaningful for live-room targets. */
@@ -413,13 +430,21 @@ export interface Platform {
    * room; narrowing this sentence is the honest half of the two. A slug in a *personal-space* URL
    * (`space.bilibili.com/<id>`) is a third shape again — a user id, not a room — and is not one of these.
    *
+   * **`account` is the account the person picked before pasting, and it is optional because it may not
+   * exist yet.** On the create-task form the account is chosen first (the form preselects it when the
+   * person has exactly one on that Platform) and the room is pasted second, so the credentialed path is
+   * the ordinary one; a resolve driven from a settings row may well have no account behind it at all. An
+   * adapter uses it for the reads that need one and for nothing else — it is a *hint about who is asking*,
+   * never a credential to store, and the account must not be assumed to belong to this Platform (the route
+   * refuses a mismatch before calling).
+   *
    * **Failing is a `TargetRefusal`, and it says which failure it is** (`platform/target.ts`): the route
    * renders its `message` beside the box a person typed into, so the shape they pasted, a room that is not
    * there, and the Platform not answering have to be three tellable sentences rather than one. A transport
    * fault is thrown as the adapter's own error class, which is what keeps one Platform's error type out of
    * `routes/**`.
    */
-  resolveTarget(input: string): Promise<TargetInfo>
+  resolveTarget(input: string, account?: PlatformAccount): Promise<TargetInfo>
 
   /** One liveness probe, for actions that need a live room. */
   probe(account: PlatformAccount, targetKey: string): Promise<ProbeResult>
