@@ -195,7 +195,7 @@ pnpm lint:fix        # 自动修格式
 
 ## 许可证
 
-AGPL-3.0
+AGPL-3.0 —— 正文见 [LICENSE.md](./LICENSE.md)。
 
 参考了 [bakapiano/bilibili-task-scheduler-backend](https://github.com/bakapiano/bilibili-task-scheduler-backend) 的任务字段设计；它那个「每个用户最多 10 个任务」的上限没有沿用（任务数现在没有上限，理由写在 `server/src/routes/tasks.ts` 里那段「There is no cap」上面），发送间隔下限和任务时长上限也没有沿用它的值，是有意改掉的。另有 [aijc123/bilibili-live-wheel-auto-follow](https://github.com/aijc123/bilibili-live-wheel-auto-follow) 的 WBI 签名实现思路。
 
