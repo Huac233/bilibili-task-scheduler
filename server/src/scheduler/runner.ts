@@ -102,6 +102,24 @@ const EVENT_SUPPRESS_MS = 30 * 60 * 1000
  */
 const REFRESH_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
 
+/**
+ * Work a Platform starts that outlives the sweep which started it: a resident viewing loop, for one. A sweep cannot
+ * end such work, because the sweep is over by the time the work is still running, so `Scheduler.stop()` asks for it
+ * to end through these hooks instead.
+ */
+const stopHooks = new Set<() => Promise<void>>()
+
+/**
+ * Registers `hook` to run when a scheduler stops, after the sweep in flight has finished. Returns the function that
+ * removes it again.
+ */
+export function onSchedulerStop(hook: () => Promise<void>): () => void {
+  stopHooks.add(hook)
+  return (): void => {
+    stopHooks.delete(hook)
+  }
+}
+
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | null = null
   private ticking = false
@@ -176,6 +194,9 @@ export class Scheduler {
    * completion, so a waiter that resumes here cannot observe a write after it.
    *
    * A second call is harmless: the loop is already stopped, and the wait is the same wait.
+   *
+   * It also waits for the stop hooks (`onSchedulerStop`), which run after the sweep: the sweep is the only thing
+   * that starts work the hooks end, and by then it cannot start any more.
    */
   async stop(): Promise<void> {
     const wasRunning = this.timer !== null
@@ -187,6 +208,14 @@ export class Scheduler {
     // One await is enough: with the interval cleared nothing can install a new mark, so this field is
     // either the sweep that was running when `stop` was called or already null.
     await this.inFlight
+
+    for (const hook of [...stopHooks]) {
+      try {
+        await hook()
+      } catch (error: unknown) {
+        this.log(`stop hook failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
 
     // Logged after the wait rather than before it, because "scheduler stopped" is a claim about the
     // moment this resolves — the log line was previously true of the timer and false of the sweep.
@@ -545,7 +574,7 @@ export class Scheduler {
     if (outcome.outcome === 'blocked') {
       // `failure: 'none'` means the Platform parked this action **as a matter of course**,
       // and it is expected back on a later sweep: Douyu's 打卡分鱼丸 before its 19:00 window
-      // opens, Bilibili's 观看直播 between one slice and the next. Nothing is broken, so a
+      // opens, Bilibili's 观看直播 while its viewing session is still running. Nothing is broken, so a
       // 「动作受阻」 event would be a false alarm — and an alarm that fires every day for an
       // action that is working exactly as designed is worse than no alarm, because it
       // teaches whoever reads the feed to ignore it. The `code` and `detail` still land in

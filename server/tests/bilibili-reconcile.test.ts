@@ -4,7 +4,7 @@ import { LIKE_INTERACT_URL, LIKE_REPORT_V3_URL } from '../src/bilibili/like.js'
 import { ROOM_INFO_URL } from '../src/bilibili/live.js'
 import { ACTIVATED_MEDAL_INFO_URL, ROOM_INFO_BY_ROOM_URL } from '../src/bilibili/medal.js'
 import { LIVE_TRACE_ENTER_URL, LIVE_TRACE_HEARTBEAT_URL } from '../src/bilibili/watch-live.js'
-import { bilibiliPlatform } from '../src/platform/bilibili/index.js'
+import { bilibiliPlatform, stopWatchLoops } from '../src/platform/bilibili/index.js'
 import type { ActionOutcome, PlatformAccount, ReconcileContext } from '../src/platform/types.js'
 import { ActionKey, TaskAction } from '../src/repo/tasks.js'
 
@@ -28,6 +28,9 @@ import { ActionKey, TaskAction } from '../src/repo/tasks.js'
  * 时间被 mock：`node:timers/promises` 的 `setTimeout` 换成立刻返回的替身，于是「等的是服务端下发的
  * 间隔」既被断言了（断言的是**毫秒数**），又不会让测试真的等上几分钟。这也让「900 秒不是心跳周期」
  * 可以钉住：整份文件里没有任何一次 `sleep(900000)`。
+ *
+ * `watch_live` 那一段还有第二个时钟：常驻观看循环睡的是全局 `setTimeout`，而被替身换掉的那个模块函数管
+ * 不到它，所以那个 describe 自己开着假时钟（只伪造 `setTimeout`/`clearTimeout`），循环的拍子由测试推着走。
  */
 
 const { fetchMock, sleepMock } = vi.hoisted(() => ({ fetchMock: vi.fn(), sleepMock: vi.fn() }))
@@ -232,6 +235,11 @@ let logs: string[] = []
 /**
  * 装上路由表。前缀匹配，**没有兜底回复**：这一版最需要防的恰恰是「多发了一次请求」，一个默认成功
  * 会把它盖住。
+ *
+ * 一个路由可以返回一个**永不落定**的 promise：常驻观看循环的请求不在 sweep 的 `await` 链上，所以
+ * 「把循环卡在半路」是这一版能证明「sweep 没有等它」的办法。中止那条路同样必要 —— 循环自己的
+ * `AbortController` 会中止在途请求，而一个忽略 signal 的替身会让 `loop.finished` 永远悬着，
+ * 于是 `stopWatchLoops` 在每个用例之间挂死。
  */
 function serve(routes: Readonly<Record<string, Route>>): void {
   const counts = new Map<string, number>()
@@ -246,9 +254,33 @@ function serve(routes: Readonly<Record<string, Route>>): void {
     const attempt = counts.get(key) ?? 0
     counts.set(key, attempt + 1)
 
-    const reply = routes[key]?.(attempt)
+    const reply = await settleOrAbort(routes[key]?.(attempt), init?.signal)
     if (reply instanceof Response) return reply
     return new Response(JSON.stringify(reply), { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+}
+
+/** 等一次回复，或者在请求被中止时当场抛 —— 与真 `fetch` 唯一有关的那一点行为。 */
+function settleOrAbort(work: unknown, signal: AbortSignal | null | undefined): Promise<unknown> {
+  return new Promise<unknown>((resolve, reject) => {
+    const abort = (): void => {
+      reject(new DOMException('This operation was aborted', 'AbortError'))
+    }
+    if (signal?.aborted === true) {
+      abort()
+      return
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    Promise.resolve(work).then(
+      value => {
+        signal?.removeEventListener('abort', abort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal?.removeEventListener('abort', abort)
+        reject(error)
+      }
+    )
   })
 }
 
@@ -385,7 +417,11 @@ beforeEach(() => {
   withRoutes()
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // 观看循环跑在 sweep 之外，所以它不属于任何一个用例：`stopWatchLoops` 是模块为此导出的那个口子，
+  // 它也是只在这里能停住循环的地方（`watchLoops` 本身不导出）。放在 `unstubAllGlobals` **之前**，
+  // 因为中止在途请求要走的就是那个替身 fetch。
+  await stopWatchLoops()
   vi.unstubAllGlobals()
 })
 
@@ -734,113 +770,182 @@ describe('like_danmaku', () => {
  * ------------------------------------------------------------------ */
 
 describe('watch_live', () => {
-  it('一个短片里保持会话，服务端说攒够了就报完成', async () => {
-    withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE, TASKS_AFTER_WATCH]) })
-
-    const outcome = await runOne(ActionKey.WatchLive)
-
-    expect(outcome).toMatchObject({ outcome: 'done', failure: 'none', code: '0' })
-    expect(outcome.detail).toContain('任务已完成')
-    expect(outcome.detail).toContain('亲密度+1')
-
-    // 900 秒是任务要攒的时长，**不是**心跳周期：整轮里没有任何一次 15 分钟的睡觉，而等待是服务端在响应
-    // 里给的 60 秒。一次调用只做**一个短片**（≤ 60 秒），不占住 sweep。
-    expect(sleptMs()).toEqual([60_000])
-    expect(sleptMs()).not.toContain(900_000)
-
-    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(1)
-    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(1)
-    // 读 → 进场 → 拍后回读：两次读。
-    expect(requestsTo(ACTIVATED_MEDAL_INFO_URL)).toHaveLength(2)
+  /**
+   * 这个 describe 把时钟拿在手里，因为**循环睡的是 `setTimeout`**（`watch-loop.ts` 的 `pause`），而 sweep
+   * 自己一秒都不睡：它的契约是「启动、读一次、报告」，循环的拍子只有时钟被推着走时才会发生。只伪造
+   * `setTimeout`/`clearTimeout` —— `Date` 保持真实，`AbortSignal.timeout` 也就还是真的超时。
+   */
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   })
 
-  it('片子结束而任务还没攒够时报 blocked + watch_in_progress，交给下一轮继续', async () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /**
+   * 让循环自己的 promise 链跑到下一个 await。`setImmediate` 是真的（没被伪造），所以这不是在推进时钟，
+   * 只是把替身 fetch 那几层微任务走完。
+   */
+  async function letLoopRun(): Promise<void> {
+    for (let round = 0; round < 10; round += 1) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+  }
+
+  /** 把时钟推 `ms`，然后让被叫醒的那一段跑完。 */
+  async function advanceLoop(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms)
+    await letLoopRun()
+  }
+
+  /** 先让 sweep 启动一个循环并拍 `beats` 拍（`beatMsOf` 在 60 秒间隔下就是 60 秒一拍）。 */
+  async function startLoopWith(beats: number): Promise<void> {
+    const started = await runOne(ActionKey.WatchLive)
+    expect(started).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
+    for (let beat = 0; beat < beats; beat += 1) await advanceLoop(60_000)
+    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(beats)
+  }
+
+  /**
+   * 「循环该停」的那五个状态共用的形状：先有一个真在跑的循环，再让一次 sweep 撞上那个状态，最后确认循环
+   * 已经不在了。
+   *
+   * 「不在了」只能从外面这样看：把时钟推十拍的长度，一个还在跑的循环会继续往下拍 —— 多拍几拍取决于状态
+   * （面板与直播间是每三拍回读一次，所以四种状态它自己也会在三拍后发现，只有「任务表里没有这一项」它永远
+   * 发现不了），因此这里的断言是心跳数**一个都不涨**。`discard` 只发出请求、不等它，能证明它到位的也只有
+   * 这个。
+   */
+  async function stateStopsTheRunningLoop(routes: Readonly<Record<string, Route>>): Promise<ActionOutcome> {
+    await startLoopWith(1)
+
+    withRoutes(routes)
+    const outcome = await runOne(ActionKey.WatchLive)
+
+    const sent = requestsTo(LIVE_TRACE_HEARTBEAT_URL).length
+    await advanceLoop(600_000)
+    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(sent)
+
+    return outcome
+  }
+
+  it('面板在 sweep 的回读里判定完成时报 already，并把在跑的循环停掉', async () => {
+    // 判定完成的只有面板，而 sweep 每次自己也会读一次；这一条钉的是读数之外的那一半：面板说这一天够了，
+    // 那个还在后台拍心跳的循环就必须当场被叫停（它自己也会在三拍后的回读里发现同一件事，但那是三分钟后，
+    // 而 sweep 现在就知道）。
+    const outcome = await stateStopsTheRunningLoop({
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_AFTER_WATCH])
+    })
+
+    expect(outcome).toMatchObject({ outcome: 'already', failure: 'action_stop', code: 'watch_task_done' })
+  })
+
+  it('循环在跑时报 blocked + watch_in_progress，句子里是循环自己的拍数，这一轮不等它', async () => {
     withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]) })
 
-    const outcome = await runOne(ActionKey.WatchLive)
+    const started = await runOne(ActionKey.WatchLive)
 
-    // `blocked`（不是 done/already：那会把当天判成落定；也不是 failed：没有东西坏掉），
-    // 而 `blocked` 正是 runner 不肯当作落定的那两个取值之一，所以下一轮 sweep 会接着看。
-    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'none', code: 'watch_in_progress' })
-    expect(outcome.detail).toContain('任务还没完成')
-    // 一个短片就是一个短片：一次等待、一拍心跳，而不是一直看到 15 分钟。
-    expect(sleptMs()).toEqual([60_000])
+    // `blocked`（不是 done/already：那会把当天判成落定；也不是 failed：没有东西坏掉），而 `blocked` 正是
+    // runner 不肯当作落定的那两个取值之一，所以下一轮 sweep 会接着看。
+    expect(started).toMatchObject({ outcome: 'blocked', failure: 'none', code: 'watch_in_progress' })
+    // 刚启动的那一段一拍都还没有：这个数字是循环自己的计数，不是 sweep 编的。
+    expect(started.detail).toContain('0 拍')
+    expect(started.items).toHaveLength(1)
+
+    await advanceLoop(60_000)
     expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(1)
-    expect(outcome.items).toHaveLength(1)
+
+    const observed = await runOne(ActionKey.WatchLive)
+
+    // 同一个循环，它的拍数长了一拍：句子里的数字必须跟着长，因为那一句读的就是 `loop.beats`。
+    expect(observed).toMatchObject({ outcome: 'blocked', failure: 'none', code: 'watch_in_progress' })
+    expect(observed.detail).toContain('1 拍')
+    expect(observed.detail).toContain('这一轮不等它')
   })
 
-  it('两轮 sweep 接着看，第二轮服务端说够了——分片能自然收敛', async () => {
-    // 同一份路由表跑两次 reconcile。第一次：拍前没够、拍后也没够 → blocked。第二次：拍前还是没够，拍后
-    // 够了 → done。这正是「靠 blocked 不落定把动作交给下一轮」的形状，而且中途我们一秒都没数过。
+  it('循环卡在进场里时 sweep 照样立刻返回，同一个 key 也不会起第二个循环', async () => {
     withRoutes({
-      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([
-        TASKS_BEFORE_LIKE,
-        TASKS_BEFORE_LIKE,
-        TASKS_BEFORE_LIKE,
-        TASKS_AFTER_WATCH
-      ])
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
+      // 进场永不落定：这一轮能返回，只可能是因为它没有等循环。`runner.ts` 用 `ticking` 守卫把任务串起来，
+      // 在这里等一次，就是所有别的任务一起等 25 分钟。
+      [LIVE_TRACE_ENTER_URL]: () => new Promise(() => {})
     })
 
     const first = await runOne(ActionKey.WatchLive)
     const second = await runOne(ActionKey.WatchLive)
 
     expect(first).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
-    expect(second).toMatchObject({ outcome: 'done', code: '0' })
-    expect(second.detail).toContain('亲密度+1')
-    // 两个短片，各一次进场、各一拍心跳。
-    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(2)
-    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(2)
-    expect(sleptMs()).toEqual([60_000, 60_000])
+    expect(second).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
+    expect(second.detail).toContain('0 拍')
+    // 一次进场：第二次 sweep 先问 `running(key)`，拿回的就是那一个循环，所以没有第二个。
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(1)
   })
 
-  it('服务端下发的间隔更短时，一个短片里放得下好几拍', async () => {
-    // 短片的上限是 60 秒：间隔 30 秒时两拍刚好装下（第三拍就 90 秒了）。也就是说拍数由服务端下发的数字
-    // 决定，本地只有一个「这次调用愿意等多久」的上限。
+  it('上一段循环放弃了自己：下一次 sweep 报出它的结局，报过就取走，再下一次另开一段', async () => {
     withRoutes({
-      [LIVE_TRACE_ENTER_URL]: () => enterReply(30),
-      [LIVE_TRACE_HEARTBEAT_URL]: () => heartbeatReply(30),
-      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE])
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
+      // 服务端把请求体回显回来的情况：`benchmark` 字段就是那一拍的会话密钥。
+      [LIVE_TRACE_HEARTBEAT_URL]: () => ({
+        code: -352,
+        message: 'risk: benchmark=secret-key-from-server rejected'
+      })
     })
 
-    const outcome = await runOne(ActionKey.WatchLive)
+    const started = await runOne(ActionKey.WatchLive)
+    expect(started).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
 
-    expect(outcome).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
-    expect(sleptMs()).toEqual([30_000, 30_000])
-    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(2)
+    // 三拍都被拒、两次重进场之间的等待也都走完，循环就放弃了自己。sweep 从不等这件事发生：结局是它下一次
+    // 读到时报出来的。
+    await advanceLoop(240_000)
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(3)
+
+    const reported = await runOne(ActionKey.WatchLive)
+
+    // 被拒的码决定分级：`-352` 不是账号级，所以是 `retry`；而结局是循环自己的 `gave_up`，不是某个码。
+    expect(reported).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'watch_gave_up' })
+    // 循环自己的理由是那句 detail，码照原样带在里面。
+    expect(reported.detail).toContain('code -352')
+    // 循环报出的每一段文本都经 `BiliHttp.redact` 抠过，所以会话密钥连进句子的机会都没有。
+    expect(reported.detail).not.toContain('secret-key-from-server')
+    expect(reported.detail).toContain('<redacted>')
+    expect(JSON.stringify(reported)).not.toContain('secret-key-from-server')
+
+    // `retire` 是取走：同一段结局不会被下一个 sweep 再说一遍（那句话里没有一个字是「放弃了」），
+    // 它老老实实另开了一段。
+    const after = await runOne(ActionKey.WatchLive)
+    expect(after).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
+    expect(after.detail).not.toContain('放弃')
+    expect(after.detail).toContain('0 拍')
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(4)
   })
 
-  it('服务端下发的间隔比短片还长时，等满一拍就收手（不能假装那段间隔已经过去）', async () => {
-    // 300 秒是模块允许的最大间隔。比上限短，睡不满再报 `time=300` 就是伪造一个没发生的间隔，所以这一种
-    // 情况下短片会比 60 秒长；另一种做法（干脆不发）会让这个动作永远停在「进行中」而一个请求都不发。
-    withRoutes({
-      [LIVE_TRACE_ENTER_URL]: () => enterReply(300),
-      [LIVE_TRACE_HEARTBEAT_URL]: () => heartbeatReply(300),
-      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE])
-    })
+  /* 旧的「一个短片」契约里还有三条在**这条接缝上**没有对应物，所以删掉而不是改写：
+   *   - 「服务端下发的间隔更短时，一个短片里放得下好几拍」；
+   *   - 「服务端下发的间隔比短片还长时，等满一拍就收手（不能假装那段间隔已经过去）」；
+   *   - 「服务端把间隔报到毫秒级时，短片按本地下限走，请求数不跟着那个数字放大」。
+   * 三条断言的都是**短片自己的睡眠**（`sleptMs()` 与请求数），而 sweep 现在一秒都不睡：睡多久、本地下限与
+   * 上限夹在哪里、`time` 写的就是真正睡过的那段，全是循环的事，`watch-loop.test.ts` 里那几条（`beatMsOf`
+   * 的两条与「间隔 0.001 秒时按 1 秒睡」）就在钉它们。搬到这里只能是把循环的数当作 sweep 的数报出来 ——
+   * 而「这一轮不等它」正是这个动作现在不做的事。 */
 
-    const outcome = await runOne(ActionKey.WatchLive)
-
-    expect(outcome).toMatchObject({ outcome: 'blocked', code: 'watch_in_progress' })
-    expect(sleptMs()).toEqual([300_000])
-    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toHaveLength(1)
-  })
-
-  it('进场用房间读回来的分区与主播 id，设备 cookie 从直播页接住', async () => {
-    withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE, TASKS_AFTER_WATCH]) })
+  it('进场用的是房间读回来的分区与主播 id，设备 cookie 从直播页接住', async () => {
+    withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]) })
 
     await runOne(ActionKey.WatchLive)
+    await letLoopRun()
 
     const call = requestsTo(LIVE_TRACE_ENTER_URL)[0]
     if (call === undefined) throw new Error('没有发出进场请求')
     const body = bodyOf(call)
 
-    // 进场序号是 0；分区那两个 id 来自 `Room/get_info`（本文件里唯一构造出来的房间响应）。
+    // 进场序号是 0；分区那两个 id 来自 `Room/get_info`（本文件里唯一构造出来的房间响应）—— sweep 读它、
+    // 再把它们交给循环，所以这一条同时钉住了「这两个 id 是哪里来的」。
     expect(body.get('id')).toBe(JSON.stringify([1, 283, 0, ROOM_ID]))
     expect(body.get('ruid')).toBe(String(ANCHOR_ID))
 
     const device = JSON.parse(body.get('device') ?? '[]') as unknown[]
     expect(device[0]).toBe(BUVID)
-    // uuid 是本次会话自造的，只要求形状是四段式；它必须同时出现在 device 里。
+    // uuid 由注册表按（账号，直播间）记住，这里只要求形状是四段式；它必须同时出现在 device 里。
     expect(String(device[1])).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
 
     // 直播页只被访问一次，而且是为了那条 Set-Cookie。
@@ -940,77 +1045,67 @@ describe('watch_live', () => {
     expect(requestsTo(LIVE_TRACE_ENTER_URL)).toEqual([])
   })
 
-  it('心跳被拒：码决定分级，且会话密钥不许出现在任何上报里', async () => {
+  it('心跳被拒 -101：同一个结局里码决定分级，这一次是账号级', async () => {
     withRoutes({
       [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
-      // 服务端把请求体回显的情况：`benchmark` 字段就是那一拍的密钥。
-      [LIVE_TRACE_HEARTBEAT_URL]: () => ({ code: -352, message: 'risk: benchmark=secret-key-from-server rejected' })
+      [LIVE_TRACE_HEARTBEAT_URL]: () => ({ code: -101, message: '账号未登录' })
     })
 
-    const outcome = await runOne(ActionKey.WatchLive)
+    await runOne(ActionKey.WatchLive)
+    await advanceLoop(60_000)
 
-    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: '-352' })
-    expect(outcome.detail).not.toContain('secret-key-from-server')
-    expect(outcome.detail).toContain('<redacted>')
-    expect(JSON.stringify(outcome)).not.toContain('secret-key-from-server')
+    const reported = await runOne(ActionKey.WatchLive)
+
+    // `-101` 是登录态已失效：重进场没有用，所以循环当场以 `account_stop` 收场，而且不再发第二次进场。
+    expect(reported).toMatchObject({ outcome: 'failed', failure: 'account_stop', code: '-101' })
+    expect(reported.detail).toContain('重新扫码')
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(1)
   })
 
-  it('心跳传输层失败时分级为 retry，而且网关回显的密钥也被抹掉', async () => {
+  it('心跳传输层失败按同一个上限计数，成为一句话里的 HTTP 502，而且网关回显的密钥被抹掉', async () => {
     withRoutes({
       [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
-      // 网关把请求体回显出来的情况：`benchmark` 字段就是那一拍的密钥。
+      // 网关把请求体回显出来的情况：`benchmark` 字段就是那一拍的会话密钥。
       [LIVE_TRACE_HEARTBEAT_URL]: () => new Response('bad gateway: benchmark=secret-key-from-server', { status: 502 })
     })
 
-    const outcome = await runOne(ActionKey.WatchLive)
+    await runOne(ActionKey.WatchLive)
+    await advanceLoop(240_000)
 
-    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'http_502' })
-    expect(outcome.detail).toContain('心跳失败')
-    expect(outcome.detail).not.toContain('secret-key-from-server')
-    expect(outcome.detail).toContain('<redacted>')
+    const reported = await runOne(ActionKey.WatchLive)
+
+    // 这是这一版与「短片」契约分岔的地方，写下来免得下一次被当成漏掉的断言：结局的 `code` 是 sweep 自己的
+    // `watch_gave_up`，循环遇见的那一次失败留在它自己的句子里（这里是 `BiliHttpError` 那句 HTTP 502）。
+    expect(reported).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'watch_gave_up' })
+    expect(reported.detail).toContain('心跳失败')
+    expect(reported.detail).toContain('HTTP 502')
+    expect(reported.detail).not.toContain('secret-key-from-server')
+    expect(reported.detail).toContain('<redacted>')
   })
 
-  it('进场本身抛在传输层时同样收成一条记录', async () => {
-    // 接缝契约的另一半：`enterLiveRoom` 也会抛（`requestJson` 对非 2xx 抛，`sessionOf` 对不合格的间隔也
-    // 直接 throw），而它同样裸调在 `reconcile` 里。同一函数里相邻的那处心跳是包着的 —— 同一个动作两种
-    // 态度，正是这条用例要钉住的。
+  it('进场本身抛在传输层时同样收成一条记录，而且一个心跳都不发', async () => {
     withRoutes({
       [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
+      // `enterLiveRoom` 也会抛（非 2xx、签不出的间隔），而这一条钉的是它没有把整轮结果带走。
       [LIVE_TRACE_ENTER_URL]: () => new Response('gateway boom', { status: 502 })
     })
 
-    const outcome = await runOne(ActionKey.WatchLive)
+    await runOne(ActionKey.WatchLive)
+    // 三次进场都抛、两次重进场之间的等待都走完：放弃，而且一拍都没发出去。
+    await advanceLoop(60_000)
 
-    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'http_502' })
-    expect(outcome.detail).toContain('进入观看会话失败')
+    const reported = await runOne(ActionKey.WatchLive)
+
+    expect(reported).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'watch_gave_up' })
+    expect(reported.detail).toContain('进场失败')
+    expect(reported.detail).toContain('HTTP 502')
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(3)
     expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL)).toEqual([])
   })
 
-  it('服务端把间隔报到毫秒级时，短片按本地下限走，请求数不跟着那个数字放大', async () => {
-    // `0.001` 秒通过了现有所有闸（`watch-live.ts` 只拒 `<= 0` 和超过 300 秒），而短片的预算累加的是
-    // **名义**睡眠 —— 没有下界的话一个 60 秒短片就是 6 万拍，每拍一次心跳加一次回读，约 12 万次请求，而
-    // sweep 是串行的。`like.ts` 对同一种「服务端拥有的节奏」立过先例（350 ms 的下限）。
-    withRoutes({
-      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE]),
-      [LIVE_TRACE_ENTER_URL]: () => enterReply(0.001),
-      [LIVE_TRACE_HEARTBEAT_URL]: () => heartbeatReply(0.001)
-    })
-
-    const outcome = await runOne(ActionKey.WatchLive)
-
-    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'none' })
-    expect(requestsTo(LIVE_TRACE_HEARTBEAT_URL).length).toBeLessThanOrEqual(60)
-    expect(sleptMs().every(ms => ms >= 1_000)).toBe(true)
-    expect(sleptMs().reduce((sum, ms) => sum + ms, 0)).toBeLessThanOrEqual(60_000)
-
-    // …and the number the beat *sends* is the same one it slept, not the 0.001 the service named.
-    // `time` 在签名和 body 里是同一个值（都由它算），此前两处都是 `session.heartbeatInterval`，
-    // 于是下限一生效，请求就在写一个没有发生过的间隔 —— 「等过的间隔」这句在下一个读者那里是假的。
-    const beat = requestsTo(LIVE_TRACE_HEARTBEAT_URL)[0]
-    const sent = new URLSearchParams(beat?.body ?? '')
-    expect(sent.get('time')).toBe('1')
-    expect(sent.get('time')).not.toBe('0.001')
-  })
+  /* 这里原来是「服务端把间隔报到毫秒级时，短片按本地下限走，请求数不跟着那个数字放大」。本地下限现在是
+   * 循环的（`beatMsOf` 的 `WATCH_MIN_HEARTBEAT_MS`），钉它的是 `watch-loop.test.ts` 的
+   * 「间隔 0.001 秒时按 1 秒睡，并且 time 写 1 而不是服务端的数字」；在这里留一条只会重复它。 */
 
   it('面板读被拒 -101 时按账号级处理，不开会话', async () => {
     withRoutes({ [ACTIVATED_MEDAL_INFO_URL]: () => ({ code: -101, message: '账号未登录' }) })
@@ -1019,6 +1114,43 @@ describe('watch_live', () => {
 
     expect(outcome).toMatchObject({ outcome: 'failed', failure: 'account_stop', code: '-101' })
     expect(requestsTo(LIVE_TRACE_ENTER_URL)).toEqual([])
+  })
+
+  /* 下面四条是同一个形状的另一半：**这五种状态里每一种都不该继续拍心跳，所以每一种都要把在跑的循环停掉。**
+   * 其中四种循环自己也会在三拍后的回读里发现（面板与直播间就是那时读的），但「任务表里没有这一项」它永远
+   * 发现不了（`isTaskDone` 对缺失的那一行答「没做」，面板又是亮的、直播间又在播），那一种只有 sweep 能停。
+   * 独立成例而不是合并在一条里，是因为「停掉」的断言（时钟推十拍、心跳数一个不涨）对每一种状态都要各自
+   * 成立：漏掉其中一处 `discard`，红的只有对应的那一条。 */
+
+  it('牌子没点亮时停掉在跑的循环，报 blocked + medal_not_lit', async () => {
+    const outcome = await stateStopsTheRunningLoop({ [ACTIVATED_MEDAL_INFO_URL]: unlitPanel() })
+
+    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'none', code: 'medal_not_lit' })
+  })
+
+  it('任务表里没有观看这一项时停掉循环，fail-closed 报 failed', async () => {
+    const outcome = await stateStopsTheRunningLoop({
+      [ACTIVATED_MEDAL_INFO_URL]: panelReplies([TASKS_BEFORE_LIKE.filter(task => task.jump_type !== 'watchLive')])
+    })
+
+    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'retry', code: 'watch_task_missing' })
+  })
+
+  it('直播间不在开播时停掉循环，报 blocked + watch_room_offline', async () => {
+    const outcome = await stateStopsTheRunningLoop({
+      [ROOM_INFO_URL]: () => ({ code: 0, message: '0', data: { ...ROOM_INFO_DATA, live_status: 0 } })
+    })
+
+    expect(outcome).toMatchObject({ outcome: 'blocked', failure: 'none', code: 'watch_room_offline' })
+  })
+
+  it('面板读被拒 -101 时停掉在跑的循环，按账号级处理', async () => {
+    const outcome = await stateStopsTheRunningLoop({
+      [ACTIVATED_MEDAL_INFO_URL]: () => ({ code: -101, message: '账号未登录' })
+    })
+
+    expect(outcome).toMatchObject({ outcome: 'failed', failure: 'account_stop', code: '-101' })
+    expect(requestsTo(LIVE_TRACE_ENTER_URL)).toHaveLength(1)
   })
 })
 

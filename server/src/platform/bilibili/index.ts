@@ -23,8 +23,15 @@ import {
 } from '../../bilibili/medal.js'
 import { refreshIfRequired } from '../../bilibili/refresh.js'
 import { LikeCode, type RoomInfo, type RoomInit, RoomInitCode, SendDanmakuCode } from '../../bilibili/types.js'
-import { enterLiveRoom, sendLiveHeartbeat, type WatchSession } from '../../bilibili/watch-live.js'
+import {
+  ACCOUNT_STOP_DETAIL,
+  WATCH_LOOP_CEILING_MS,
+  WATCH_MAX_CONSECUTIVE_FAILURES,
+  type WatchEnd,
+  WatchLoops
+} from '../../bilibili/watch-loop.js'
 import { ActionKey, TaskAction } from '../../repo/tasks.js'
+import { onSchedulerStop } from '../../scheduler/runner.js'
 // One home for "is a credential in this string", imported rather than copied. Five copies used to
 // answer it — this file's `withoutSecret`, `withoutSecrets` in `douyu/index.ts` and `douyu/passport.ts`,
 // `redact` in `bilibili/medal.ts`, and the parameter-name pattern in `douyu/errors.ts` — and they
@@ -74,7 +81,8 @@ import { clientFor, cookiesEqual, parseCredential, serializeCredential, sessionC
  * is therefore the one **account-scoped** reconcile action on this Platform (empty `targetKey`, one row
  * for the whole account). Its wire code is not here either: the medal panel and the room's like switches
  * are `bilibili/medal.ts`, the like request and its pre-flight gate are `bilibili/like.ts`, and the
- * viewing heartbeat is `bilibili/watch-live.ts`. What this file adds is the piece none of them owns:
+ * viewing session is `bilibili/watch-live.ts` for its requests and `bilibili/watch-loop.ts` for the resident
+ * loop that drives them. What this file adds is the piece none of them owns:
  * **the loop over one day's outstanding work** — read the Platform, act, read it again, and report
  * what each action was about.
  */
@@ -180,8 +188,13 @@ const ACTIONS: readonly ActionDescriptor[] = [
     key: ActionKey.WatchLive,
     action: TaskAction.Reconcile,
     label: '观看直播',
+    /**
+     * The description is the only surface a person reads before switching this on, so it says what the session
+     * is (resident, in the background), what ends it (the room going off the air, or the task being done), and
+     * whose verdict the completion is.
+     */
     description:
-      '保持一段观看会话，让这个直播间的「观看满15分钟」粉丝牌任务攒够时长；够没够只由服务端回读决定，不是本地计时。',
+      '在后台保持一段常驻观看会话，让这个直播间的「观看满15分钟」粉丝牌任务攒够时长；每隔几拍回读一次面板，够没够只由服务端回读决定，不是本地计时；直播间不在开播时停下。',
     /** Watching spends nothing. */
     costly: false,
     /** Per Room as well: the 观看 task is a row on one anchor's medal. */
@@ -189,8 +202,9 @@ const ACTIONS: readonly ActionDescriptor[] = [
     needsLibrary: false,
     maxMessageLength: 0,
     /**
-     * The session itself paces on the server-issued heartbeat interval; this is only how
-     * often a run may start one, and a fresh session is cheap.
+     * The session is not paced by this number. The resident loop (`bilibili/watch-loop.ts`) runs on the server's
+     * heartbeat interval, once per (account, room). This is how often the sweep reads the panel and writes a row
+     * for it: one row per interval while the loop runs, and the loop does not wait for it.
      */
     defaultIntervalSeconds: 300,
     minIntervalSeconds: 60
@@ -252,9 +266,10 @@ const ACTIONS: readonly ActionDescriptor[] = [
  * of 2026-10-09 were each reported `failed` for it while the counter was advancing behind them, and
  * the day ended `任务已完成`. Its outcome is `blocked` for that reason (see `reconcileLikeDanmaku`), so the day stays
  * open, the feed gets an 动作受阻 rather than an 动作失败, and the next run reads again.
- * `watch_in_progress` is the opposite kind of state: nothing
- * is wrong at all, the slice simply ended before the day's watching was credited, and its name is
- * what separates "still going" from "stuck" in the event feed.
+ * `watch_in_progress` is the opposite kind of state: nothing is wrong at all, the day's watching has not been
+ * credited yet and the resident loop is still running, and its name is what separates "still going" from "stuck"
+ * in the record. `watch_room_offline` is a room not on air, where no session is opened, and `watch_gave_up` is a
+ * loop that refused too many times in a row and stopped, with the reason in its sentence.
  *
  * 点亮粉丝牌's four are the same idea for a different chore. `medal_room_offline` is the *normal*
  * state of that action — an anchor nobody is watching is exactly when the like cannot be sent —
@@ -278,7 +293,9 @@ const LocalCode = {
   Transport: 'transport',
   LikeUnfinished: 'like_unfinished',
   WatchAreaMissing: 'watch_area_missing',
+  WatchGaveUp: 'watch_gave_up',
   WatchInProgress: 'watch_in_progress',
+  WatchRoomOffline: 'watch_room_offline',
   WatchTaskDone: 'watch_task_done',
   WatchTaskMissing: 'watch_task_missing',
   MedalRoomOffline: 'medal_room_offline',
@@ -563,10 +580,10 @@ async function send(account: PlatformAccount, targetKey: string, text: string): 
   // The one secret this request puts in its **body**: `live.ts` sends `csrf` and `csrf_token` as
   // multipart fields, so a transport failure's own text can carry it — `http.ts` puts the first 200
   // characters of a response body into the message it throws, and an echoed multipart rejection is
-  // exactly that shape. `readGraded`'s `secret` argument exists for the one caller whose body holds a
-  // credential — the heartbeat, whose `benchmark` field is the session's signing key, passed at its
-  // own call site in `reconcileWatchLive` — and this is the other call site whose body does, holding
-  // the value itself. Redacting at the refusal below is not a substitute: `result.error` is
+  // exactly that shape. `readGraded`'s `secret` argument exists for a caller whose body holds a
+  // credential, and this call holds one: its csrf. The heartbeat's `benchmark` field is the session's
+  // signing key, and the loop that sends it redacts its own text (`bilibili/watch-loop.ts`). Redacting at
+  // the refusal below is not a substitute: `result.error` is
   // Bilibili's own sentence about a request whose csrf sat in the body rather than in the query
   // string the like endpoints carry theirs in, so this call is not the omission it looks like.
   const http = clientFor(credential)
@@ -939,75 +956,38 @@ async function reconcileLikeDanmaku(context: ReconcileContext, http: BiliHttp | 
 }
 
 /**
- * 观看直播 (watch_live) — **one short slice** of a viewing session per run.
+ * 观看直播 (watch_live)：**每个账号、每个直播间一个常驻循环。这个 sweep 只负责启动它、读它、报告它。**
  *
- * **The 900 s is the duration to accumulate, not a heartbeat period.** 「观看直播满15分钟」
- * states how much watching the task wants; the beat period is `heartbeat_interval`, which the
- * server issues on every response and `watch-live.ts` already refuses outside `(0, 300]`. So
- * the waiting is the server's number, and nothing here ever sleeps the task's own duration.
+ * **循环跑在 sweep 之外，这是这段注释要记下的决定。** `runner.ts` 用 `ticking` 守卫让任务一个接一个地跑，sweep 里的
+ * 任何一个 `await` 都会把后面的任务挡住。如果这个动作在 sweep 里持有观看会话，别的任务就要等到会话结束，而这个任务要攒的
+ * 是 15 分钟。所以这里不等循环：sweep 启动它（或看见它在跑）、读一次面板，就返回。
  *
- * **Whether enough has accumulated is decided only by `isTaskDone`.** Nothing here adds up
- * watched seconds. The reference implementation does (`while (duration < 25 * 60)` — it holds one
- * session for 25 minutes and watches its own clock run out), and that is precisely the local
- * accounting this project exists not to do: the panel is the only thing that knows, so it is
- * re-read after every beat, and between slices the day's progress is whatever the server says it is.
+ * **为什么是常驻的。** 旧做法每个 sweep 开一个新会话、睡一拍、丢掉：设备标识每个 sweep 都换，覆盖的只是其中一部分时间。
+ * 现在的循环（`bilibili/watch-loop.ts` 的 `WatchLoops`）进场一次，整个生命里用同一个设备，按服务端下发的间隔一拍一拍地走。
+ * 三种互相不排斥的解释（服务端按拍计分、要求连续在场、惩罚设备变化）实测都没有证明；循环的形状与它们都相容，它不声称哪一种为真。
  *
- * **Why a slice and not the whole session, written down because undoing it is the next reader's
- * most likely move.** `runner.ts` sweeps tasks **serially** behind a `ticking` guard, so a call
- * that held one session would block every other task for its length — the 15 minutes this task
- * accumulates, or the reference's full 25-minute session when the server never credits it — and on
- * a bad day that same block would come round again every interval, because the handshake has no live
- * capture and the server may quietly ignore it. Trading an unverified chain for that price is the
- * wrong way round. One slice costs at most `WATCH_SLICE_BUDGET_SECONDS`, and repeated sweeps carry
- * the accumulation. **That ceiling is a promise the interval's floor keeps**: the budget accumulates
- * the *nominal* sleeps, so an interval the service could name below a second would otherwise buy it a
- * slice of tens of thousands of beats, each one a heartbeat and a read-back —
- * `WATCH_MIN_HEARTBEAT_MS` is what refuses that.
+ * **sweep 依次做的事：**
+ *   1. 凭据、直播间号、csrf 都在本地判断，缺任何一个都不发请求；
+ *   2. 读直播间（`uid`、`room_id`、分区、`live_status`）与粉丝牌面板；
+ *   3. 面板未点亮就停（`medal_not_lit`）；没有「观看」那一行就 fail-closed（`watch_task_missing`）；
+ *   4. 面板判定完成：停掉这个 key 的循环，报 `already`；
+ *   5. 直播间不在开播：停掉循环，报 `watch_room_offline`，不开会话；
+ *   6. 循环在跑：报 `watch_in_progress`，说出它已有几拍被服务端接受；
+ *   7. 上一段循环以 `gave_up` 结束：报 `failed` 并说出理由，这一轮不另开，下一轮再开；以 `account_stop` 结束：报账号级失败；
+ *   8. 其余情况（没有循环，或上一段到了生命周期上限）：区域与 buvid 都齐，就启动一个，报 `watch_in_progress`，这一轮不等它。
  *
- * A slice is `enterLiveRoom` → wait the server's interval → beat → re-read the panel → stop, and
- * it always takes at least one beat: sleeping less than the interval and then reporting it as
- * `time` in the signature would be claiming a gap that did not happen. That is also the one case
- * where a slice runs past the ceiling — a server issuing a 300 s interval is waited out once — and
- * the alternative, refusing to beat when the interval does not fit, would leave the action
- * reporting "in progress" forever without ever sending anything.
+ * **`blocked`，不是 `done`；`watch_in_progress`，不是 `failed`。** 循环在跑、面板没完成，这一天就没有落定。`blocked` 正是
+ * `runner.ts` 不肯当作落定的那两个取值之一，所以下一轮 sweep 会接着看。`failure` 是 `none`，`runner.ts` 不为它发动作受阻事件。
  *
- * **The other direction is the same rule and has its own shape, because `WATCH_MIN_HEARTBEAT_MS` can
- * make the sleep longer than the interval.** Below the floor the service may name 0.001 s while this
- * loop sleeps 1 s, so `time` has to carry the second, and it does: the loop hands `sendLiveHeartbeat`
- * the seconds it actually waited (`beatMs / 1000`) rather than `session.heartbeatInterval`, which is
- * what the field is documented to be and what its own note in `watch-live.ts` records. Both halves
- * of the sentence are therefore about the *gap that happened* — never the smaller number, never the
- * larger one — and the signature and the body carry the same value because both are built from it.
+ * **循环自己不写数据库，它的结局由 sweep 下一次读到时报出。** `gave_up` 与 `account_stop` 变成 `failed`，分别进入动作失败、
+ * 登录已失效两种事件，各自按任务去重 30 分钟；`ceiling` 变成 `blocked` 并说明另开了一段；`room_offline`、`medal_unlit`、`done`
+ * 则由 sweep 自己的面板与直播间回读报出。开播与否有两道检查：`requireOnline` 打开时，`runner.ts` 在 sweep 之前探测；循环自己在
+ * 每次回读时判断。
  *
- * The outcome when the panel has not finished is `blocked` with `watch_in_progress`. `blocked`
- * because it is one of the two outcomes `runner.ts` refuses to count as a settled day, which is
- * exactly what brings the action back for the next slice; `watch_in_progress` rather than a
- * failure-sounding code so that the record, the event and the debug panel read "still going"
- * instead of "broken".
+ * **判定完成的只有面板。** `isTaskDone` 在 sweep 的回读里、在循环的回读里，都是唯一的依据；本地从不累加秒数。
  *
- * **The price of slicing is a noisy event, and it belongs to the seam, not here.** Every unfinished
- * slice reports `blocked`, and `runner.ts` raises 动作受阻 for a `blocked` outcome — suppressed per
- * task and per kind for 30 minutes (`emitOnce`), so a day of slicing shows a handful of 动作受阻
- * warnings for an action working exactly as designed. That is what the five-outcome vocabulary
- * costs: `done`/`already`/`skipped` would settle the day and be a lie, `failed` would claim
- * something broke, and there is no "in progress and not settled" member. If that noise ever
- * becomes a nuisance the fix is to add that state to the seam — **not** to make this action hold
- * the whole session again.
- *
- * **What is not verified, recorded so nobody reads more into this than there is.** The
- * heartbeat chain has no live capture: its request shape comes from two independent reference
- * implementations, and `watch-live.ts`'s module header says so, including that `enterLiveRoom`
- * has never been confirmed against the server. It is wired anyway, because the catalogue must
- * carry it and the switch is a person's; the consequence is named here rather than hidden — a
- * handshake the server silently ignores keeps every slice reporting `watch_in_progress`, and the
- * 动作受阻 event that comes with it is how a person finds out. Slicing is what keeps that state
- * cheap: it costs one short call per sweep instead of a blocked scheduler. The module header's
- * precondition stands unchanged: run `enterLiveRoom` once against a real account, confirm
- * `code: 0` with a `secret_key`, and only then switch this action on.
- *
- * The room's liveness precondition is the task's `requireOnline` here too — the reference's
- * watch path checks the same thing its like path does — and is deliberately not
- * re-implemented.
+ * **未实测的部分**（`watch-live.ts` 的模块头写得更详细）：心跳链路没有实盘抓包。第一次在真账号上跑，要看的是每一拍是否都返回
+ * `code: 0` 且带着 `secret_key`；在这一点通过之前，不能说循环在攒分。
  */
 async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | null): Promise<ActionOutcome> {
   const key = ActionKey.WatchLive
@@ -1032,6 +1012,9 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
   const room = roomRead.value
 
   const anchorId = room.uid
+  // One loop per (account, real room). Every sweep for that pair finds the same loop, and no other.
+  const loopKey = watchLoopKeyOf(context.account.id, room.room_id)
+
   const panelRead = await readGraded('读取粉丝牌任务', () => fetchMedalTasks(http, csrf, anchorId))
   if (!panelRead.ok) return roomOutcome(key, targetKey, 'failed', panelRead.detail, panelRead.code, 'retry')
   const panel = panelRead.value
@@ -1040,14 +1023,8 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
     // `-101` from the panel is a dead session, and grading it as an unreadable read would leave
     // it retrying forever instead of failing the task so a person can re-bind.
     if (panel.code === SendDanmakuCode.NotLoggedIn) {
-      return roomOutcome(
-        key,
-        targetKey,
-        'failed',
-        'B 站登录态已失效，需要重新扫码绑定账号。',
-        String(panel.code),
-        'account_stop'
-      )
+      watchLoops.discard(loopKey)
+      return roomOutcome(key, targetKey, 'failed', ACCOUNT_STOP_DETAIL, String(panel.code), 'account_stop')
     }
     return roomOutcome(
       key,
@@ -1059,16 +1036,19 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
     )
   }
 
+  // Each state below is one in which a loop earns nothing or cannot be judged, so the loop is asked to stop
+  // there rather than left to beat until its ceiling. `discard` only asks: nothing here waits for the loop.
   if (!panel.data.is_lighted) {
-    // Unlit medals do not carry this task at all; same state and same reason as the like's,
-    // spelled for this action rather than shared, the way the two helpers below are.
+    watchLoops.discard(loopKey)
+    // Unlit medals do not carry this task at all; same state and same reason as the like's, spelled for this
+    // action rather than shared, the way the two helpers below are.
     return roomOutcome(key, targetKey, 'blocked', '粉丝牌未点亮、观看不计亲密度', LikeRefusal.MedalNotLit, 'none')
   }
 
   const watchTask = findMedalTask(panel.data.task_info, MedalJumpType.WatchLive)
   if (watchTask === undefined) {
-    // Never observed on a lit panel — five rows, this one among them — so it is treated
-    // fail-closed rather than as "nothing to do".
+    watchLoops.discard(loopKey)
+    // Never observed on a lit panel, so it is treated fail-closed rather than as "nothing to do".
     return roomOutcome(
       key,
       targetKey,
@@ -1081,15 +1061,39 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
 
   // The Platform's own verdict, through the predicate `medal.ts` exports for it.
   if (isTaskDone(panel.data.task_info, MedalJumpType.WatchLive)) {
+    watchLoops.discard(loopKey)
     return roomOutcome(key, targetKey, 'already', '任务已完成', LocalCode.WatchTaskDone, 'action_stop')
   }
 
-  // The handshake's `id` field is `[parent_area_id, area_id, seq, room_id]`, so both ids have to
-  // exist before a session can be asked for — and this is the point in the run where that starts to
-  // matter, which is why it is judged here and not before the panel was read: a day already done
-  // needs no area at all. They are optional on the room payload for the reason `types.ts` gives
-  // (two of its three consumers never read them), so the gap is judged here rather than at the
-  // parse, and fail-closed rather than by handing the handshake an invented area.
+  if (!isLive(room.live_status)) {
+    watchLoops.discard(loopKey)
+    return roomOutcome(key, targetKey, 'blocked', WATCH_ROOM_OFFLINE_DETAIL, LocalCode.WatchRoomOffline, 'none')
+  }
+
+  const running = watchLoops.running(loopKey)
+  if (running !== undefined) {
+    return roomOutcome(key, targetKey, 'blocked', runningDetail(running.beats), LocalCode.WatchInProgress, 'none')
+  }
+
+  // Not running. How the last loop for this key ended decides what this run says, and reporting it takes it away,
+  // so the same ending is reported once and the next run starts afresh.
+  const previous = watchLoops.retire(loopKey)
+  if (previous?.kind === 'gave_up') {
+    return roomOutcome(
+      key,
+      targetKey,
+      'failed',
+      giveUpDetail(previous.beats, previous.detail),
+      LocalCode.WatchGaveUp,
+      'retry'
+    )
+  }
+  if (previous?.kind === 'account_stop') {
+    return roomOutcome(key, targetKey, 'failed', ACCOUNT_STOP_DETAIL, previous.code, 'account_stop')
+  }
+
+  // The handshake's `id` field is `[parent_area_id, area_id, seq, room_id]`, so both ids have to exist before a
+  // session can be entered. They are optional on the room payload (`types.ts` explains why), and a gap is judged here.
   const parentAreaId = room.parent_area_id
   const areaId = room.area_id
   if (parentAreaId === undefined || areaId === undefined) {
@@ -1105,11 +1109,10 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
 
   const buvidRead = await readGraded('读取直播间页面', () => liveBuvidOf(http, room.room_id))
   if (!buvidRead.ok) return roomOutcome(key, targetKey, 'failed', buvidRead.detail, buvidRead.code, 'retry')
-
   const buvid = buvidRead.value
   if (buvid === null) {
-    // Fail closed: the handshake signs with this device id, so sending one anyway would be
-    // inventing the value a signature is computed over.
+    // Fail closed: the handshake signs with this device id, so sending one anyway would be inventing the value
+    // a signature is computed over.
     return roomOutcome(
       key,
       targetKey,
@@ -1120,142 +1123,60 @@ async function reconcileWatchLive(context: ReconcileContext, http: BiliHttp | nu
     )
   }
 
-  // Graded for the reason the like calls above are: `watch-live.ts`'s `enterLiveRoom` lets a transport
-  // failure out, and this is a call inside `reconcile`, whose contract is that nothing a *transport*
-  // does can escape it — a throw here would lose the run's outcomes and write no row at all.
-  const enteredRead = await readGraded('进入观看会话', () =>
-    enterLiveRoom(http, {
-      roomId: room.room_id,
-      ruid: anchorId,
-      parentAreaId,
-      areaId,
-      buvid
-    })
-  )
-  if (!enteredRead.ok) {
-    return roomOutcome(key, targetKey, 'failed', enteredRead.detail, enteredRead.code, 'retry')
-  }
-  const entered = enteredRead.value
-  if (!entered.ok) {
-    return roomOutcome(
-      key,
-      targetKey,
-      'failed',
-      `进入观看会话被拒绝：${entered.error}`,
-      String(entered.code),
-      entered.code === SendDanmakuCode.NotLoggedIn ? 'account_stop' : 'retry'
-    )
-  }
-  context.log(
-    `观看直播：会话已建立，服务端下发的心跳间隔 ${String(entered.session.heartbeatInterval)} 秒（本地下限 ${String(WATCH_MIN_HEARTBEAT_MS / 1000)} 秒，低于它按它算）`
-  )
-
-  let session: WatchSession = entered.session
-  // The slice's own budget, in milliseconds: how long this call may spend waiting before it hands
-  // the session back to the next sweep. It is a bound on *this call's waiting*, never a measure of
-  // the task's progress — `isTaskDone` below is the only thing that decides whether the day is done.
-  //
-  // **And a fresh session per slice is this project's choice rather than a shape a capture
-  // establishes.** The reason is the sweep: `runner.ts` runs its tasks one at a time, so one session
-  // held for the whole day would hold every other task behind it (the argument `medal.ts` gives for
-  // `MAX_MEDAL_PANEL_PAGES`). **The heartbeat chain has no live capture at all** — `watch-live.ts`
-  // records that, twice, and so does this file's note above `reconcileWatchLive` — so nothing here
-  // claims the service re-issues the session's key, its timestamp and its interval per response. What
-  // is established is that this build sends a fresh `enter` per slice and the service accepts it.
-  const sliceBudgetMs = WATCH_SLICE_BUDGET_SECONDS * 1000
-  let waitedMs = 0
-  let beats = 0
-
-  // At least one beat — see the note above on why a slice is never shorter than an honest interval —
-  // and after that only while the next interval still fits inside the slice's ceiling. **The interval
-  // is `beatMsOf`'s, not the service's raw number**: a floor on it is what keeps the beats this loop
-  // sends inside the ceiling its own budget claims (see `WATCH_MIN_HEARTBEAT_MS`).
-  while (beats === 0 || waitedMs + beatMsOf(session) <= sliceBudgetMs) {
-    const beatMs = beatMsOf(session)
-    await sleep(beatMs)
-    waitedMs += beatMs
-
-    // The seconds this call actually slept, not the interval the service named: `sendLiveHeartbeat`
-    // puts that number in the signature **and** in the body's `time`, and the two have to be the same
-    // value. Above `WATCH_MIN_HEARTBEAT_MS` the two are identical; below it the floor is this
-    // project's own, and reporting the service's smaller number would be a gap in the request that
-    // never happened — the mirror image of the case the note above calls dishonest.
-    const beatRead = await readGraded(
-      '心跳',
-      () => sendLiveHeartbeat(http, session, Date.now(), beatMs / 1000),
-      session.secretKey
-    )
-    if (!beatRead.ok) {
-      return roomOutcome(key, targetKey, 'failed', `第 ${beats + 1} 拍${beatRead.detail}`, beatRead.code, 'retry')
-    }
-
-    const beatResult = beatRead.value
-    if (!beatResult.ok) {
-      // The session's own secret is redacted from anything reported, because this response is
-      // the one place a server could echo a body that carries it (`benchmark`).
-      return roomOutcome(
-        key,
-        targetKey,
-        'failed',
-        `第 ${beats + 1} 拍心跳被拒绝：${redactSecrets(beatResult.error, session.secretKey)}`,
-        String(beatResult.code),
-        beatResult.code === SendDanmakuCode.NotLoggedIn ? 'account_stop' : 'retry'
-      )
-    }
-    session = beatResult.session
-    beats += 1
-    context.log(`观看直播：第 ${beats} 拍心跳已发出，回读任务状态`)
-
-    const againRead = await readGraded(`第 ${beats} 拍心跳后的回读`, () => fetchMedalTasks(http, csrf, anchorId))
-    if (!againRead.ok) {
-      return roomOutcome(key, targetKey, 'failed', againRead.detail, againRead.code, 'retry')
-    }
-
-    const again = againRead.value
-    if (!again.ok) {
-      if (again.code === SendDanmakuCode.NotLoggedIn) {
-        return roomOutcome(
-          key,
-          targetKey,
-          'failed',
-          'B 站登录态已失效，需要重新扫码绑定账号。',
-          String(again.code),
-          'account_stop'
-        )
-      }
-      return roomOutcome(
-        key,
-        targetKey,
-        'failed',
-        `第 ${beats} 拍心跳后的回读失败：${redactSecrets(again.error, csrf)}`,
-        String(again.code),
-        'retry'
-      )
-    }
-
-    if (isTaskDone(again.data.task_info, MedalJumpType.WatchLive)) {
-      return roomOutcome(
-        key,
-        targetKey,
-        'done',
-        `任务已完成（服务端回读确认）${rewardClauseOf(watchTask.add_text)}`,
-        String(SendDanmakuCode.Ok),
-        'none'
-      )
-    }
-  }
-
-  // Not done yet: hand the day back to the next sweep. `blocked` is what keeps the action coming
-  // back, and `watch_in_progress` is what keeps the fact about it from reading like a fault.
-  return roomOutcome(
-    key,
-    targetKey,
-    'blocked',
-    `本轮保持 ${String(beats)} 拍、任务还没完成`,
-    LocalCode.WatchInProgress,
-    'none'
-  )
+  // Started, not awaited. The loop enters, beats and reads on its own time; this run says where it stands.
+  const loop = watchLoops.start(loopKey, {
+    http,
+    csrf,
+    roomId: room.room_id,
+    anchorId,
+    parentAreaId,
+    areaId,
+    buvid,
+    log: context.log
+  })
+  return roomOutcome(key, targetKey, 'blocked', startDetail(previous, loop.beats), LocalCode.WatchInProgress, 'none')
 }
+
+/** The room is not on air: nothing is sent and no session is opened. */
+const WATCH_ROOM_OFFLINE_DETAIL =
+  '直播间当前不在开播（未开播或在轮播），这一轮不发心跳，也不开观看会话；开播后的下一次运行再开始。'
+
+/** What a run says when it finds its loop still going. */
+function runningDetail(beats: number): string {
+  return `观看循环仍在后台运行：目前已有 ${String(beats)} 拍心跳被服务端接受，面板还没显示完成；这一轮不等它，下一次运行再读。`
+}
+
+/** What a run says when it has just started a loop. After a ceiling it says why the loop is a new one. */
+function startDetail(previous: WatchEnd | undefined, beats: number): string {
+  const progress = `目前已有 ${String(beats)} 拍心跳被服务端接受，面板还没显示完成，下一次运行再读。`
+  if (previous?.kind === 'ceiling') {
+    return `上一段观看循环已到生命周期上限（${String(WATCH_LOOP_CEILING_MS / 60_000)} 分钟）仍未回读到完成；另开的这一段在后台运行，这一轮不等它：${progress}`
+  }
+  return `观看循环已在后台启动，这一轮不等它：${progress}`
+}
+
+/** What a run says about a loop that gave up: how far it got, and the last failure it met. */
+function giveUpDetail(beats: number, detail: string): string {
+  return `观看循环连续 ${String(WATCH_MAX_CONSECUTIVE_FAILURES)} 次失败，已放弃（放弃前已有 ${String(beats)} 拍心跳被服务端接受）：${detail}；下一次运行再开一段。`
+}
+
+/** The key one account's loop for one room runs under. */
+function watchLoopKeyOf(accountId: number, roomId: number): string {
+  return `${String(accountId)}/${String(roomId)}`
+}
+
+/** The one registry of watch loops this process runs. */
+const watchLoops = new WatchLoops()
+
+/**
+ * Ends every watch loop this process runs, and waits until each has ended. The scheduler calls it when it stops
+ * (`onSchedulerStop`, below); the tests call it between cases.
+ */
+export function stopWatchLoops(): Promise<void> {
+  return watchLoops.stopAll()
+}
+
+onSchedulerStop(stopWatchLoops)
 
 /* ------------------------------------------------------------------ *
  * 点亮粉丝牌 — the account's dark medals, one anchor at a time
@@ -1882,9 +1803,9 @@ type GradedRead<T> =
  * programming error rather than disguise itself as a network blip, which is the lesson `probe`
  * records where its own `try` was narrowed.
  *
- * `secret` is for the one caller whose request body carries a credential — the heartbeat's
- * `benchmark` field is the session key — so that a transport failure, which would otherwise
- * report the response body verbatim, cannot be the path a secret leaks through.
+ * `secret` is for a caller whose request body carries a credential — the like path passes its csrf —
+ * so that a transport failure, which would otherwise report the response body verbatim, cannot be the
+ * path a secret leaks through. The watch loop redacts its own heartbeat text and does not come through here.
  */
 async function readGraded<T>(what: string, work: () => Promise<T>, secret = ''): Promise<GradedRead<T>> {
   try {
@@ -2019,47 +1940,6 @@ async function liveBuvidOf(http: BiliHttp, roomId: number): Promise<string | nul
 
   const issued = http.cookies.get(LIVE_BUVID_COOKIE)
   return issued === undefined || issued === '' ? null : issued
-}
-
-/**
- * The ceiling on one slice, in seconds.
- *
- * `60` is a decision rather than a measurement, and the reasoning is what matters: a slice should
- * be about **one beat** long, because the server issues `heartbeat_interval` and the whole point of
- * slicing is that the serial sweep keeps moving between slices. 60 s is the cadence this endpoint
- * is expected to issue (it is what both reference implementations and this project's fixtures are
- * written against), so a slice is normally exactly one beat — and since the server owns the number,
- * this is a ceiling rather than a fixed length: a shorter interval fits several beats in, and a
- * longer one is waited out once (see the doc above, where claiming a gap that did not happen is the
- * worse of the two).
- *
- * It bounds **this call's waiting**, and nothing else. How much watching the day has accumulated is
- * the Platform's answer, read from the panel; the day-level ceiling a reader might expect to find
- * here would have to be a counter kept between runs, and a local counter is precisely what
- * `medal.ts` exists to prevent.
- */
-const WATCH_SLICE_BUDGET_SECONDS = 60
-
-/**
- * The floor under one heartbeat interval, in milliseconds — and the reason a slice's budget is a bound at all.
- *
- * The slice's own accounting accumulates the **nominal** sleeps, so a service that named
- * `heartbeat_interval: 0.001` would pass every check otherwise in the way (`watch-live.ts` refuses `<= 0`
- * and anything above `MAX_HEARTBEAT_INTERVAL_SECONDS`, and a thousandth of a second is neither) and turn
- * a 60 s slice into 60 000 beats — each one a heartbeat plus a task read-back, roughly 120 000 requests —
- * while the doc above claims "one slice costs at most `WATCH_SLICE_BUDGET_SECONDS`". The sweep is serial,
- * so that is the whole scheduler stopped, not one slow task.
- *
- * One beat per second is a floor rather than a conversion: every interval ever measured here is ~60 s,
- * and nothing has been seen to ask for less. It is the same shape `like.ts` gives its own cadence
- * (`MinIntervalFloorMs`, 350 ms) and for the same reason — a cadence the service owns still needs a local
- * floor under it, or the service owns the request count too.
- */
-const WATCH_MIN_HEARTBEAT_MS = 1_000
-
-/** How long to wait before the next heartbeat: the service's own interval, with the floor above under it. */
-function beatMsOf(session: WatchSession): number {
-  return Math.max(session.heartbeatInterval * 1000, WATCH_MIN_HEARTBEAT_MS)
 }
 
 /** The action's label, from the catalogue. Never its key: an item's label is UI text. */

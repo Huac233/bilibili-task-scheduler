@@ -10,18 +10,18 @@ import { envelopedOptionalData, MISSING_CSRF } from './types.js'
  *
  * 任务本身是「观看直播满15分钟」（`jump_type = watchLive`，`add_text = 亲密度+1`，
  * `sub_title = 每日上限 0/1`）。**900 秒是任务要攒的时长，不是心跳周期** —— 周期由服务端
- * 在每次响应里下发（`heartbeat_interval`，秒），所以这个模块一次调用只做**一拍**，
- * 睡多久、攒够没有，都不是它的判断。
+ * 在每次响应里下发（`heartbeat_interval`，秒）。这个模块只做两种请求：进场一次、心跳一拍；
+ * 睡多久、什么时候回读面板、什么时候停，都是 `watch-loop.ts` 里那个常驻循环的判断。
  *
  * ## 谁决定「攒够了」
  *
- * 服务端。调用方的形状是**重复调用**，不是本地计时：
+ * 服务端。循环的形状是**重复心跳**，不是本地计时：
  *
  *   1. `enterLiveRoom` 拿一次会话（服务端给 `timestamp` / `secret_key` / `secret_rule` /
  *      `heartbeat_interval`）；
- *   2. 睡 `session.heartbeatInterval` 秒，`sendLiveHeartbeat` 发一拍，它把服务端新下发的
- *      一组值带回下一拍的 `WatchSession`；
- *   3. 隔一段时间用 `medal.ts` 的 `fetchMedalTasks` 重读一次，
+ *   2. 睡 `beatMsOf` 算出的时长（服务端的间隔，夹在本项目的下限与上限之间），`sendLiveHeartbeat`
+ *      发一拍，它把服务端新下发的一组值带回下一拍的 `WatchSession`；
+ *   3. 每隔几拍用 `medal.ts` 的 `fetchMedalTasks` 重读一次，
  *      `isTaskDone(tasks, MedalJumpType.WatchLive)` 为 `true` 就停 —— **不要本地累加秒数**。
  *      实测已经证明本地记账不成立：日上限逐牌子下发，任务表的有效性还由 `is_lighted` 门控。
  *
@@ -61,8 +61,9 @@ import { envelopedOptionalData, MISSING_CSRF } from './types.js'
  * （未点亮的牌子只有「仅点亮」，`medal.ts` 有实测记录），观看/点赞还都要求主播正在开播
  * （BLTH `LiveFansMedalTaskRunner.cs:288-289` 的 `if (room.Live_Status != 1) return;`）。
  *
- * 超时：两个请求都走 `BiliHttp.request`，它自带 `AbortSignal.timeout(timeoutMs)`，所以这里既
- * 不自己造 controller，也没有需要与调用方的 signal 组合的地方。
+ * 超时与中止：两个请求都走 `BiliHttp.request`，它自带 `AbortSignal.timeout(timeoutMs)`。调用方
+ * 可以再传一个 `signal`（循环的停止信号，见 `watch-loop.ts`），`BiliHttp.request` 把两者组合起来，
+ * 所以中止在途请求不需要这里自己造 controller。
  */
 
 /** 进场（EnterRoom）。 */
@@ -134,7 +135,7 @@ export interface WatchSession {
   readonly ruid: number
   /** `LIVE_BUVID` cookie 的值。 */
   readonly buvid: string
-  /** 本次会话自造的设备 uuid，四段式；与服务端无关，但必须前后一致。 */
+  /** 设备 uuid，四段式；与服务端无关，但在一次会话里必须前后一致。 */
   readonly uuid: string
   /** 下一拍要用的序号（进场为 0，之后逐拍 +1）。 */
   readonly sequence: number
@@ -172,7 +173,10 @@ export interface EnterLiveRoomOptions {
    * 与 `uid`/`anchorId` 一样：调用方给，这里不猜。
    */
   readonly buvid: string
-  /** 会话 uuid，默认随机生成一个四段式 uuid。测试里传固定值用。 */
+  /**
+   * 设备 uuid，四段式。不传就随机生成一个。常驻循环（`watch-loop.ts`）传入的是它按账号与直播间记住的那一个，
+   * 所以重进场时对服务端仍是同一台设备；测试里传固定值用。
+   */
   readonly uuid?: string
 }
 
@@ -272,11 +276,13 @@ function sessionOf(
  * `is_patch = 0`、`visit_id = ''` 是参考实现的固定值，本模块不解释它们的作用。
  *
  * @param nowMs 可注入的时钟（毫秒），用于测试；生产走 `Date.now()`。
+ * @param signal 循环的停止信号；中止时请求被取消，调用方自己判断那是不是中止。`null` 表示不带信号。
  */
 export async function enterLiveRoom(
   http: BiliHttp,
   options: EnterLiveRoomOptions,
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  signal: AbortSignal | null = null
 ): Promise<WatchResult> {
   const csrf = http.cookies.csrfToken
   if (!csrf) return MISSING_CSRF
@@ -304,7 +310,8 @@ export async function enterLiveRoom(
       // 参考实现给这两个端点显式设的是 www.bilibili.com（`api.ts:889`），与本项目默认的
       // live.bilibili.com 不同；没有别的证据说明该用哪个，所以照抄能工作的那一份。
       Referer: 'https://www.bilibili.com/'
-    }
+    },
+    signal
   })
 
   if (response.code !== 0) {
@@ -340,7 +347,7 @@ export async function enterLiveRoom(
  * benchmark，收到的确实是密钥 —— 两份参考实现都这么传）。`s` 是这场会话的签名。
  *
  * **「真正等过」和「服务端说的那个数」在这里不总是同一个值，所以它由调用方传进来。**
- * 服务端下发 `heartbeat_interval`，调用方睡的是 `platform/bilibili/index.ts` 的 `beatMsOf`
+ * 服务端下发 `heartbeat_interval`，调用方睡的是 `bilibili/watch-loop.ts` 的 `beatMsOf`
  * —— 那个下限（`WATCH_MIN_HEARTBEAT_MS`）是**本项目自己的**，服务端报一个小于 1 秒的间隔时，
  * 本地仍然睡满 1 秒。此前这里签的、发的都是 `session.heartbeatInterval`（服务端的数），于是
  * 下限一生效，body 说的间隔就比真实睡眠短 —— 一个**没有发生过的间隔被写进了请求**。现在两个
@@ -352,12 +359,14 @@ export async function enterLiveRoom(
  *
  * @param nowMs 可注入的时钟（毫秒），用于测试；生产走 `Date.now()`。
  * @param waitedSeconds 上一拍实际等过的秒数；见上面的说明，默认是服务端下发的间隔。
+ * @param signal 循环的停止信号；中止时请求被取消。`null` 表示不带信号。
  */
 export async function sendLiveHeartbeat(
   http: BiliHttp,
   session: WatchSession,
   nowMs: number = Date.now(),
-  waitedSeconds: number = session.heartbeatInterval
+  waitedSeconds: number = session.heartbeatInterval,
+  signal: AbortSignal | null = null
 ): Promise<WatchResult> {
   const csrf = http.cookies.csrfToken
   if (!csrf) return MISSING_CSRF
@@ -397,7 +406,8 @@ export async function sendLiveHeartbeat(
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       Referer: 'https://www.bilibili.com/'
-    }
+    },
+    signal
   })
 
   if (response.code !== 0) {
