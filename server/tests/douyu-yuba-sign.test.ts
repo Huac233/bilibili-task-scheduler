@@ -74,12 +74,18 @@ const MEASURED_FASTSIGN_ZERO = '{"data":0,"message":"","status_code":200}'
 const CONSTRUCTED_PC_SIGN_WITH_SCORE = '{"status_code":200,"data":{"addLevelScore":3}}'
 
 describe('signGroupPc', () => {
-  it('reads the measured 1001 as already signed, and sends one POST with the group referer', async () => {
+  it('reads the measured 1001 as already signed, keeps its sentence, and sends one POST with the group referer', async () => {
     reply = MEASURED_PC_ALREADY
 
     const result = await signGroupPc('tok', '11244190')
 
-    expect(result).toEqual({ ok: true, code: YUBA_ALREADY_SIGNED, data: { levelScore: 0, alreadySigned: true } })
+    // The message is the measured reply's own words, carried so the walk can record *which* 1001 it read:
+    // the false one of 2026-10-11 was indistinguishable from a true one once only the number was kept.
+    expect(result).toEqual({
+      ok: true,
+      code: YUBA_ALREADY_SIGNED,
+      data: { levelScore: 0, alreadySigned: true, message: '今天已经签到过了' }
+    })
     expect(sent).toHaveLength(1)
     expect(sent[0]).toEqual({
       url: 'https://yuba.douyu.com/ybapi/topic/sign',
@@ -96,7 +102,9 @@ describe('signGroupPc', () => {
 
     const result = await signGroupPc('tok', '11244190')
 
-    expect(result).toEqual({ ok: true, code: 200, data: { levelScore: 5, alreadySigned: false } })
+    // No message on a `200`: the shared envelope reader returns a success without one, and nothing here
+    // may invent a sentence for it.
+    expect(result).toEqual({ ok: true, code: 200, data: { levelScore: 5, alreadySigned: false, message: '' } })
   })
 
   it('reads a constructed 200 with no score as a score of zero, never as already', async () => {
@@ -105,7 +113,7 @@ describe('signGroupPc', () => {
 
     const result = await signGroupPc('tok', '11244190')
 
-    expect(result).toEqual({ ok: true, code: 200, data: { levelScore: 0, alreadySigned: false } })
+    expect(result).toEqual({ ok: true, code: 200, data: { levelScore: 0, alreadySigned: false, message: '' } })
   })
 
   it('does not read a constructed refusal as already', async () => {
@@ -145,7 +153,7 @@ describe('the measured first sign, board 11254805', () => {
 
     reply = CONSTRUCTED_PC_SIGN_WITH_SCORE
     const twin = await signGroupPc('tok', '11254805')
-    expect(twin).toEqual({ ok: true, code: 200, data: { levelScore: 3, alreadySigned: false } })
+    expect(twin).toEqual({ ok: true, code: 200, data: { levelScore: 3, alreadySigned: false, message: '' } })
 
     // The twin's branch is the one that signed: had the board been signed, it would have answered
     // `1001` and reported `alreadySigned` instead of a score.

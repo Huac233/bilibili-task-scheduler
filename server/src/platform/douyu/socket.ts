@@ -67,17 +67,31 @@ export const DANMAKU_MUTED = 5
 
 /** `res=290` — sent too fast. The measured floor is ~2 s (§2.7). */
 export const DANMAKU_RATE_LIMITED = 290
-/** `res=356` — the content rule rejects a long consecutive alphanumeric run (§2.7). */
+/**
+ * `res=356` — a content refusal. **One** measured cause is a long consecutive alphanumeric run (§2.7);
+ * that is not the only rule this code can carry, and this build has measured none of the others (see
+ * `classifySocketError`).
+ */
 export const DANMAKU_CONTENT_RULE = 356
 
 /**
  * The classification for a code read off this socket: the shared table, plus the two socket-only verdicts.
  *
- * **`356` is why this exists at all.** `classifyError` has never seen it and answers `retry`, while the
- * measurement says it is a deterministic *content* refusal: the same 40-character payload came back
- * `res=356` twice — 40 digits, then 40 Latin letters — where 30 of either was answered `res=0`, so
- * retrying it unchanged repeats it forever. `290` needs no entry: the cadence refusal is a `retry`, and
- * that is what the shared table already answers for it.
+ * **`356` is why this exists at all.** `classifyError` has never seen it and answers `retry`, while what
+ * the captures show is *a* content rule: two 40-character payloads came back `res=356` — 40 digits, then
+ * 40 Latin letters — where 30 of either was answered `res=0`, and a later round refused 35 Latin letters
+ * too while the same 40 letters with a separator every 5 characters passed. That is **one** measured
+ * cause, and not the only rule the code can carry: the frames say the service refused the *content*, and
+ * nothing here has measured another content rule — a banned-word rule, for instance, against which this
+ * build holds no evidence at all, and which nothing here can place at Douyu-wide or at one room. The
+ * grade rests on that much and no more: a `retry` reposts the same text at the refusal a content rule
+ * just gave, and the rewrite that would help depends on which rule fired — a fact no response carries.
+ * A person's words for the verdict are `gradeDanmaku`'s (`index.ts`), not this module's: naming the
+ * measured cause as one among unmeasured ones is that sentence's job, and it is the one that says how a
+ * person can tell a room's own rule from Douyu-wide one.
+ *
+ * `290` needs no entry: the cadence refusal is a `retry`, and that is what the shared table already
+ * answers for it.
  *
  * **`5` is the entry whose grade is not one word, and saying so here is the point of the entry.** What a
  * caller must do about a mute is stop, and `ErrorClassification` has one member for "the account":

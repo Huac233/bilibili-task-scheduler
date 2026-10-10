@@ -571,6 +571,7 @@ const LocalCode = {
   NothingExpiring: 'nothing_expiring',
   PaidTasksLeft: 'paid_tasks_left',
   Protocol: 'protocol',
+  RecheckPending: 'recheck_pending',
   TasksDone: 'tasks_done',
   Transport: 'transport',
   UnknownAction: 'unknown_action',
@@ -1271,12 +1272,24 @@ async function send(account: PlatformAccount, targetKey: string, text: string): 
  *
  * The code and nothing else. `res=290` is a cadence refusal — the measured floor is
  * about two seconds, so it says "the interval is wrong", not "the session is wrong",
- * and the next attempt at a proper cadence may well pass. `res=356` is a **content**
- * refusal and is parked for the day rather than retried: it fires on a long
- * consecutive alphanumeric run (35 and 40 Latin letters, 40 digits, while 30 digits
- * passed and the same 40 letters every 5 characters passed), so retrying it unchanged
- * repeats it forever — and a novel imported with URLs, hashes, ids or base64 in it
- * will hit it.
+ * and the next attempt at a proper cadence may well pass. `res=356` is **a content refusal, and the
+ * sentence below says only what that means.**
+ *
+ * **What is measured about `356`, and what the sentence may therefore claim.** The captures hold *one*
+ * measured cause: a long consecutive alphanumeric run — 40 digits and 40 Latin letters came back `356`
+ * while 30 of either was answered `res=0`, and a later round refused 35 Latin letters too while the same
+ * 40 letters with a separator every 5 characters passed. That is one rule, not the rule: the refusals
+ * say the service refused the *content*, and this build has measured no other content rule — a
+ * banned-word rule, for instance, against which nothing here holds any evidence, and which the row
+ * itself cannot place at Douyu-wide or at one room. So the sentence may not name a single cause, and the
+ * old special-case list (`URL`, hash, long id, base64) was advice the captures cannot support: none of
+ * those was the text that was refused, and none of them is what a refusal proves.
+ *
+ * **Why it is still parked rather than retried.** A retry reposts the same text at the refusal a content
+ * rule just gave, and the rewrite that *would* help depends on which rule fired — a fact the response
+ * does not carry. Parking is therefore the answer under every reading, and what a person can still find
+ * out on their own is whether the rule is room-scoped: the sentence tells them to send the same text in
+ * another room and read what comes back.
  *
  * **`res=5` is the one verdict here that is about the account rather than the message, and it is graded
  * `pause` rather than parked, retried or failed.** A mute refuses *every* send for as long as it lasts,
@@ -1331,7 +1344,7 @@ function gradeDanmaku(code: number | null, message: string): SendOutcome {
     case DANMAKU_CONTENT_RULE:
       return sendFailure(
         String(code),
-        `内容被拒（res=356）：命中「连续字母数字串过长」的内容规则，与长度无关——含 URL、hash、长 ID 或 base64 的文本会撞上它，先插分隔符再发；${message}`,
+        `内容被拒（res=356）：斗鱼拒绝了这条内容，本条判决能确定的只有这一点——内容规则不止一条，是哪一条这里说不出。已实测的原因之一是「连续字母数字串过长」（40 位纯数字、40 位和 35 位连续拉丁字母被拒；30 位数字、以及同样的 40 个字母每 5 个插一个空格，都通过），但它只是已实测的原因之一：斗鱼还有本版本没测过的内容规则，其中很可能包括敏感词（违禁词）规则——它可能全站生效，也可能只在这个版块生效，本版本分不出是哪一种。想自己判断是不是本版块：把同一段文字发到另一个版块，那边也被拒就不是本版块的问题。插分隔符只对上面那条已实测的规则有用，对没测过的规则没有把握；同样的文字本次不再重发。${message}`,
         'action_stop'
       )
     case DANMAKU_MUTED:
@@ -1368,12 +1381,22 @@ function gradeDanmaku(code: number | null, message: string): SendOutcome {
  * same `outcome`, `detail` and `code` the record gets, so an item cannot contradict
  * the run it belongs to — see `accountOutcome`.
  *
- * `dayKey` is deliberately not consulted: every action here is idempotent at the service,
- * "already done today" comes back as a code, and deriving the day locally is the guess
- * those codes exist to prevent. `now` **is** consulted, by exactly one action — 打卡分鱼丸,
- * whose check-in window is a clock fact and not a response, so no payload can be asked for
- * it (§3.1: the countdown the service sends points at the window opening and says nothing
- * about it closing). No other action here has an opening hour.
+ * **Two shapes are outside that rule, and both belong to 鱼吧's second look** (`reconcileYubaSign`): a
+ * sweep that only reports a wait asks Douyu nothing and touched no board, so it has no item to write and
+ * its own sentence is the whole of it; and the run that *arms* that wait reports `blocked` over items that
+ * each say their own board's verdict, because the day's state is not any one board's answer. Both are
+ * spelled out where they are produced.
+ *
+ * `now` is consulted by three actions, and each reads a clock fact of its own rather than a verdict:
+ * 打卡分鱼丸's check-in window (the countdown the service sends points at the window opening and says
+ * nothing about it closing, §3.1), 清仓's 24-hour expiry cut-off, and 鱼吧签到's one re-check — which it
+ * schedules from the run that read the `1001`, and whose due time it reports. No other action here
+ * consults it.
+ *
+ * `dayKey` is deliberately not consulted **for a verdict**: every action here is idempotent at the
+ * service, "already done today" comes back as a code, and deriving the day locally is the guess those
+ * codes exist to prevent. 鱼吧 uses it as a *scope* and nothing else — the pending re-checks are keyed by
+ * it so that yesterday's entries are dropped — and it never turns a day key into an answer.
  */
 async function reconcile(context: ReconcileContext): Promise<ActionOutcome[]> {
   const credential = parseCredential(context.account.credentials)
@@ -1398,7 +1421,9 @@ async function reconcileAction(
     case ActionKey.Fishball:
       return await reconcileFishBall(credential)
     case ActionKey.YubaSign:
-      return await reconcileYubaSign(credential, context.log)
+      // The only action here that reads a clock it keeps itself: a `1001` is not the day's answer until
+      // it has been asked twice, and the second look is scheduled off the run that first read it.
+      return await reconcileYubaSign(context, credential)
     case ActionKey.FanshomeSign:
       // The other walk, and the only action here that needs the web session beside the token.
       return await reconcileFanshomeSign(credential, context.log)
@@ -1563,9 +1588,253 @@ const GROUPS_PER_PAGE = 30
 const MAX_GROUP_PAGES = 5
 
 /**
- * 鱼吧签到, one group at a time.
+ * Which of the two calls an answer came from — 极速签到 or the PC twin.
  *
- * Three measured facts shape this.
+ * Named once because three places have to say it: the `1001`'s log line and item, the refusal's log line,
+ * and the held entry a person reads the next day. Two spellings of "the PC twin" is how a record stops
+ * matching the log line it belongs to; the words themselves live in the two helpers below.
+ */
+type YubaCall = 'fast_sign' | 'pc_twin'
+
+/**
+ * One 鱼吧's `1001`, held until its second look.
+ *
+ * **This is process state and not storage, and that is a decision rather than an omission.** The seam
+ * hands a reconcile run a credential, a clock and a log — no store (`platform/types.ts`) — and the one
+ * durable thing the day needs is already written where it belongs: the `blocked` row that keeps the
+ * runner asking. So a restart forgets these entries and the next sweep walks the boards again, arming
+ * them from a fresh sighting, while the day itself stays open because the row survives it.
+ */
+interface YubaRecheck {
+  readonly groupId: string
+  /** The board's name, for the rows and the console lines that report the wait. */
+  readonly label: string
+  readonly source: YubaCall
+  /** The service's own sentence on that `1001`, verbatim, or `''` when the envelope carried none. */
+  readonly message: string
+  /** First sighting plus `YUBA_RECHECK_DELAY_MS`: the instant this entry may be asked again. */
+  readonly dueAt: number
+  /** Set once the second look has happened; the entry then only stops the board from being re-armed today. */
+  rechecked: boolean
+}
+
+/** Keyed `<day>:<account>:<group>`; every key that is not today's day is dropped on sight. */
+const yubaRechecks = new Map<string, YubaRecheck>()
+
+/**
+ * Forget every pending second look.
+ *
+ * **For tests, and named for it.** The map above is this module's own process state, and a test file
+ * drives many runs of the same account and day inside one process: without this, the first case that
+ * read a `1001` would hold the day open in every case after it. Nothing in production calls it — a
+ * restart is the real equivalent, and the row that keeps the day open survives one.
+ */
+export function forgetYubaRechecks(): void {
+  yubaRechecks.clear()
+}
+
+/**
+ * How long a 鱼吧's 「今天已经签到过了」 is left unverified before this process asks again.
+ *
+ * **Set from the one measurement there is, and that measurement is a floor rather than a duration.**
+ * Board 11254805 was signable through the twin at 01:30:50 after the walk of 00:04:38 read its `1001` —
+ * 86 minutes later (see the walk's doc) — so a re-ask placed *before* +86 min is one the only sample
+ * says would have failed. 90 minutes sits just past that point. **How long a false `1001` can last was
+ * not measured at all**, and neither reading of that morning bounds it: a later re-check, or a second
+ * round, is what a future occurrence showing a longer window would need — the numbers are not in this
+ * repository, and the sentence the row now keeps (the twin's own words) is what such a decision would
+ * be made from.
+ *
+ * **The cost is bounded, whatever this number is.** One round per board per day: a board the second look
+ * reached is not asked about again that day (see `recheckYubaSigns`), and the sweeps in between answer
+ * with the state and make no request at all (see `yubaWaitOutcome`).
+ */
+const YUBA_RECHECK_DELAY_MS = 90 * 60 * 1000
+
+const RECHECK_CLOCK = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: DAY_TIME_ZONE,
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false
+})
+
+/** `HH:MM` on the Platform's own clock — the time a person compares against their own day. */
+function clockOf(instant: number): string {
+  return RECHECK_CLOCK.format(new Date(instant))
+}
+
+/** The board names a sentence lists, in walk order. */
+function namesOf(entries: readonly { readonly label: string }[]): string {
+  return entries.map(entry => entry.label).join('、')
+}
+
+/** Which look at a `1001` this is: the walk's first sighting, the re-check itself, or a later walk today. */
+type YubaLook = 'first' | 'again' | 'after'
+
+/**
+ * What one board's item says about a `1001`, and the one place that wording lives.
+ *
+ * `message` is the service's own sentence, appended when there is one and dropped when the envelope
+ * carried none — it is what makes the *next* occurrence readable from the row instead of from a probe
+ * the day after (see the walk's doc). `look` is which visit this is, and it is the whole of the
+ * difference between the three: nothing here judges the sentence, it only keeps it.
+ */
+function yubaAlreadyDetail(message: string, look: YubaLook): string {
+  if (look === 'first') return message === '' ? '已签' : `已签（${message}）`
+  const said = message === '' ? '' : `：${message}`
+  return look === 'again' ? `已签（复核过${said}）` : `已签（今日已复核${said}）`
+}
+
+/** How one of the two calls is named in a sentence that has to say which one it was. */
+function callNameOf(call: YubaCall): string {
+  return call === 'pc_twin' ? 'PC 端点' : '极速签到'
+}
+
+/**
+ * The prefix a refusal line carries: the twin is named, the fast sign is not.
+ *
+ * `极速签到失败` says the caller twice in one word, so the walk's first call goes unnamed — it is the call
+ * the line's own action makes first — while a refusal from the twin has to name it, since that is the
+ * branch that exists only after the fast sign answered its zero.
+ */
+function refusalByOf(call: YubaCall): string {
+  return call === 'pc_twin' ? 'PC 端点' : ''
+}
+
+/**
+ * The console line one `1001` gets: which call answered it, the service's own sentence, and — where it is
+ * known — whether a second look is coming.
+ *
+ * The promise is **not** in the first-sighting line, and that is deliberate: a walk can still fail on a
+ * later board, and a failed walk arms no re-check (see `walkYubaSigns`). What it says is the part that
+ * holds either way — that the answer has been recorded as 已签 — and the one line the walk appends when
+ * it is done states what became of the day.
+ */
+function logYubaAlready(
+  log: (line: string) => void,
+  name: string,
+  source: YubaCall,
+  message: string,
+  look: YubaLook
+): void {
+  const said = message === '' ? '' : `；斗鱼答复：${message}`
+  const code = `status_code ${String(YUBA_ALREADY_SIGNED)}`
+  if (look === 'again') {
+    log(`鱼吧「${name}」：复核后仍是已签（${callNameOf(source)} ${code}${said}）`)
+    return
+  }
+  const rest = look === 'after' ? '；本日已复核过' : '；先记为已签'
+  log(`鱼吧「${name}」：今天已经签到过了（${callNameOf(source)} ${code}${said}）${rest}`)
+}
+
+/**
+ * One sweep's answer while the day waits for the re-check: the state, and when it moves.
+ *
+ * **No request and no item.** The run asked Douyu nothing and touched no board, so there is nothing an
+ * item could be about; the sentence names the boards and the time, and this row is what keeps the runner
+ * coming back — `blocked` is unsettled (`repo/action-logs.ts`), and `failure: 'none'` is what keeps it
+ * out of the event feed (`runner.ts` raises 动作受阻 only for a graded one). At the 300 s default that is
+ * 17 rows between a first sighting and a 90-minute-old one, each of them zero requests.
+ */
+function yubaWaitOutcome(actionKey: string, waiting: readonly YubaRecheck[], dueAt: number): ActionOutcome {
+  return {
+    actionKey,
+    targetKey: TARGET_KEY_ACCOUNT_SCOPED,
+    outcome: 'blocked',
+    detail: `已签待复核：${namesOf(waiting)}（共 ${String(waiting.length)} 个版块，最早 ${clockOf(dueAt)} 后重问）`,
+    code: LocalCode.RecheckPending,
+    failure: 'none',
+    items: []
+  }
+}
+
+/**
+ * One 鱼吧's sign, as both the walk's first pass and its second look read it.
+ *
+ * **The ladder is one function because two rounds now read the same two answers**, and the readings it
+ * carries are the measured ones the walk's doc states: `fastSign` first (a positive number is a sign this
+ * call made and its size is unmeasured; a `0` is no sign at all; its `1001` is the endpoint's own already
+ * verdict), then the PC twin for the `0` (a `200` with a positive `addLevelScore` is the sign it just
+ * placed, its `1001` is the already verdict, a `200` without one settles nothing).
+ *
+ * Two things are deliberately *not* here: what a verdict means for the day — a second look treats a `1001`
+ * as final where the walk holds the day open — and any console line or item, because the two rounds word
+ * their own (a row is read across, a log is read top to bottom). `round` names the two calls in a
+ * transport failure's sentence and does nothing else: the rounds must not be told apart by their answers,
+ * which are the same two calls either time.
+ */
+type YubaAttempt =
+  | { readonly kind: 'signed'; readonly code: number; readonly levelScore: number | null }
+  | { readonly kind: 'already'; readonly source: YubaCall; readonly message: string }
+  | {
+      readonly kind: 'refused'
+      readonly via: YubaCall
+      readonly code: string
+      readonly message: string
+      readonly classification: ErrorClassification
+    }
+  | { readonly kind: 'unsettled'; readonly code: string; readonly detail: string }
+  | { readonly kind: 'unreached'; readonly code: string; readonly detail: string }
+
+/** The PC twin's `200` with no positive score: not a verdict this build has measured, so it settles nothing. */
+const UNSETTLED_PC_SIGN = 'PC 端点签到没有给出等级分，今天是否已签判定不了，留待下次重试'
+
+async function attemptYubaGroup(token: string, groupId: string, round: 'first' | 'again'): Promise<YubaAttempt> {
+  const signed = await callGraded(
+    round === 'again' ? '鱼吧签到复核' : '鱼吧签到',
+    () => signGroupAndroid(token, groupId),
+    token
+  )
+  if (!signed.ok) return { kind: 'unreached', code: signed.code, detail: signed.detail }
+
+  const result = signed.reply
+  if (!result.ok) {
+    if (result.code === YUBA_ALREADY_SIGNED) {
+      return { kind: 'already', source: 'fast_sign', message: result.message }
+    }
+    return {
+      kind: 'refused',
+      via: 'fast_sign',
+      code: codeText(result.code),
+      message: result.message,
+      classification: result.classification
+    }
+  }
+
+  // A positive number is a sign this call performed, and its *size* is a different question that nothing
+  // here answers (see `signGroupAndroid`) — so it travels as `null` and is printed nowhere.
+  if (result.data > 0) return { kind: 'signed', code: result.code, levelScore: null }
+
+  const checked = await callGraded(
+    round === 'again' ? '鱼吧 PC 端点签到复核' : '鱼吧 PC 端点签到',
+    () => signGroupPc(token, groupId),
+    token
+  )
+  if (!checked.ok) return { kind: 'unreached', code: checked.code, detail: checked.detail }
+
+  const verdict = checked.reply
+  if (!verdict.ok) {
+    return {
+      kind: 'refused',
+      via: 'pc_twin',
+      code: codeText(verdict.code),
+      message: verdict.message,
+      classification: verdict.classification
+    }
+  }
+  if (verdict.data.alreadySigned) return { kind: 'already', source: 'pc_twin', message: verdict.data.message }
+  // A `200` with no positive score settles nothing: see `signGroupPc` for what has and has not been
+  // measured about it. The walk keeps its own sentence for this one.
+  if (verdict.data.levelScore <= 0) {
+    return { kind: 'unsettled', code: String(verdict.code), detail: UNSETTLED_PC_SIGN }
+  }
+  return { kind: 'signed', code: verdict.code, levelScore: verdict.data.levelScore }
+}
+
+/**
+ * 鱼吧签到, one group at a time — and the second look a `1001` gets before the day is allowed to end.
+ *
+ * Three measured facts shape the walk itself.
  *
  * **`is_signed` from `myFollow` is not a gate.** §2.4 measured groups reported as
  * `is_signed: 0` that answered 「今天已经签到过了」 when signed. So every group is
@@ -1586,6 +1855,26 @@ const MAX_GROUP_PAGES = 5
  * for the next sweep. A `fastSign` refusal with `1001` is still read as already, since that code is
  * the endpoint's own named verdict rather than a value that merely could mean it, though that reading
  * is not measured for `fastSign`.
+ *
+ * **A `1001` is not the day's answer until it has been read twice, and that is a defect fix rather
+ * than a reading.** 2026-10-11 00:04:38, board 11254805 (「Drop」): the twin answered `1001`, the walk
+ * reported 已签, the board was **not** signed, and the run settled the day anyway — other boards had
+ * signed, so `aggregateWalkOutcome` reported `done` and the runner stopped asking until tomorrow. A
+ * probe signed that board through the same twin at 01:30:50 (`200`, `addLevelScore` 4), which is what
+ * proves it had been unsigned at 00:04. **Why the answer was false is not established, and this file
+ * does not guess**: the twin being wrong and the walk having run before the service rolled its
+ * sign-day are both open, and nothing in this repository distinguishes them. So the behaviour is built
+ * to recover under either: the board is recorded as 已签 **with the service's own sentence**
+ * (`signGroupPc`'s `message` — the field the old record did not keep, which is why a true and a false
+ * `1001` were the same row a day later), the day is held open by a `blocked` run
+ * (`recheck_pending`), and exactly one re-check happens at `YUBA_RECHECK_DELAY_MS` after the first
+ * sighting. Until then every sweep answers with the state and **asks Douyu nothing** — no list read, no
+ * sign call — which is what keeps the hold's cost to one extra round per board per day.
+ *
+ * **What a walk that failed does instead.** The hold is committed only by a walk that reached every
+ * board without a failure: a run that failed is a retry, its next move is the whole walk again (exactly
+ * as before this change), and holding the day open for a re-check on top of it would settle the day
+ * afterwards over a board that had never been retried.
  *
  * **The list can span pages.** Each page is de-duplicated by `group_id` before
  * anything is attempted, which is what makes the walk safe to keep asking: a service
@@ -1608,11 +1897,42 @@ const MAX_GROUP_PAGES = 5
  * touch has no name to show.
  */
 async function reconcileYubaSign(
-  credential: ParsedCredential | null,
-  log: (line: string) => void
+  context: ReconcileContext,
+  credential: ParsedCredential | null
 ): Promise<ActionOutcome> {
   const key = ActionKey.YubaSign
   if (credential === null) return noCredentialOutcome(key)
+
+  // Entries are keyed by day, account and board, so anything that is not today's is a leftover from a day
+  // whose work is over: dropped here rather than left to accumulate for the process's life, and the day is
+  // the *outer* key so one account's run never has to read another's.
+  const day = `${context.dayKey}:`
+  const scope = `${day}${String(context.account.id)}:`
+  for (const stored of [...yubaRechecks.keys()]) {
+    if (!stored.startsWith(day)) yubaRechecks.delete(stored)
+  }
+
+  const waiting = [...yubaRechecks.entries()]
+    .filter(([stored, entry]) => stored.startsWith(scope) && !entry.rechecked)
+    .map(([, entry]) => entry)
+  if (waiting.length === 0) return await walkYubaSigns(context, credential)
+
+  // Every waiting entry was armed by one run, so one instant is due for all of them; `min` is what keeps
+  // a mixed set (a restart in between, say) from asking earlier than the delay allows.
+  const dueAt = Math.min(...waiting.map(entry => entry.dueAt))
+  if (context.now < dueAt) {
+    context.log(`鱼吧：${namesOf(waiting)} 的「已签」仍待复核（最早 ${clockOf(dueAt)} 后重问）`)
+    return yubaWaitOutcome(key, waiting, dueAt)
+  }
+
+  return await recheckYubaSigns(context, credential, waiting)
+}
+
+/** The walk itself, on a day with nothing waiting for a second look. */
+async function walkYubaSigns(context: ReconcileContext, credential: ParsedCredential): Promise<ActionOutcome> {
+  const key = ActionKey.YubaSign
+  const log = context.log
+  const scope = `${context.dayKey}:${String(context.account.id)}:`
 
   const seen = new Set<string>()
   const groups: YubaGroup[] = []
@@ -1667,6 +1987,7 @@ async function reconcileYubaSign(
 
   const failures: ItemFailure[] = []
   const items: ActionItem[] = []
+  const armed: YubaRecheck[] = []
   let done = 0
   let already = 0
 
@@ -1675,152 +1996,257 @@ async function reconcileYubaSign(
     // The item's label is the one thing rendered in the main UI, so an unnamed group
     // is described rather than shown as its id — while the console line above keeps
     // the id, which is what a person debugging the walk actually wants.
-    // The item's `detail` is the second thing rendered there, and it is a fact — 「已签」,
-    // 「等级分 +3」 — because the group's name already sits beside it; the console lines below
-    // stay sentences, since a log is read top to bottom and a row is read across. The level score
-    // appears there only where it is measured — the PC twin's `addLevelScore` — and never for the
-    // `fastSign` number, which is not an earned score at all as far as anything here knows.
+    // The item's `detail` is the second thing rendered there, and it is a fact — 「已签」 or
+    // 「等级分 +3」 plus the service's own sentence where it gave one — because the group's name already
+    // sits beside it; the console lines below stay sentences, since a log is read top to bottom and a row
+    // is read across. The level score appears there only where it is measured — the PC twin's
+    // `addLevelScore` — and never for the `fastSign` number, which is not an earned score at all as far
+    // as anything here knows.
     const label = group.group_name === '' ? UNNAMED_GROUP : group.group_name
 
-    const signed = await callGraded(
-      '鱼吧签到',
-      () => signGroupAndroid(credential.token, group.group_id),
-      credential.token
-    )
-    if (!signed.ok) {
+    const attempt = await attemptYubaGroup(credential.token, group.group_id, 'first')
+
+    if (attempt.kind === 'unreached') {
       // The call never reached Douyu, so what became of *this* group is unknown — the request
       // may even have landed. That is a reason to report it and stop, never to invent a verdict
       // for it: the ladder below grades Douyu's answers, and there is no answer here.
-      failures.push({ name, code: signed.code, message: signed.detail, classification: 'retry' })
-      log(`鱼吧「${name}」：${signed.detail}（code ${signed.code}），其余版块本次不再尝试`)
-      items.push({ kind: 'group', label, outcome: 'failed', detail: signed.detail, code: signed.code })
+      failures.push({ name, code: attempt.code, message: attempt.detail, classification: 'retry' })
+      log(`鱼吧「${name}」：${attempt.detail}（code ${attempt.code}），其余版块本次不再尝试`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: attempt.detail, code: attempt.code })
       break
     }
 
-    const result = signed.reply
-    if (!result.ok) {
-      if (result.code === YUBA_ALREADY_SIGNED) {
-        already += 1
-        log(`鱼吧「${name}」：今天已经签到过了（status_code ${String(YUBA_ALREADY_SIGNED)}）`)
+    if (attempt.kind === 'refused') {
+      failures.push({
+        name,
+        code: attempt.code,
+        message: attempt.message,
+        classification: attempt.classification
+      })
+      // The twin is named because a refusal from *it* is a different call's answer than one from the fast
+      // sign; the fast sign needs no prefix, since it is the walk's own first call (see `refusalByOf`).
+      log(`鱼吧「${name}」：${refusalByOf(attempt.via)}签到失败（code ${attempt.code}）`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: attempt.message, code: attempt.code })
+      continue
+    }
+
+    if (attempt.kind === 'unsettled') {
+      failures.push({ name, code: attempt.code, message: attempt.detail, classification: 'retry' })
+      log(`鱼吧「${name}」：${attempt.detail}`)
+      items.push({ kind: 'group', label, outcome: 'failed', detail: attempt.detail, code: attempt.code })
+      continue
+    }
+
+    if (attempt.kind === 'signed') {
+      done += 1
+      // A positive number is a sign this call performed — and its *size* is a different question that
+      // nothing here answers (see `signGroupAndroid`), so it is printed nowhere. The one new-sign reading
+      // of the `fastSign` call on record is 24 (group 历史, an `action_logs` row of 2026-10-09), and a
+      // single sign cannot be worth an EXP of 24: board 11254805's twin reported the 3 it added for that
+      // same day, and Douyu's own published table for that board is 3–5 a day. What is stated here is the
+      // fact the branch does establish: the sign went in.
+      if (attempt.levelScore === null) {
+        log(`鱼吧「${name}」：签到成功`)
+        items.push({ kind: 'group', label, outcome: 'done', detail: '签到成功', code: String(attempt.code) })
+      } else {
+        // The one level score this walk may print as an increment (see `signGroupPc`): board 11254805's
+        // twin answered the 3 points it added for the sign it placed, and a later read of the same board
+        // answered 4 — both inside Douyu's own published table for it (连续签到 1天 +3, 2天 +4, 10天 +4,
+        // 20天 +4, 30天 +5).
+        log(`鱼吧「${name}」：PC 端点签到成功，等级分 +${String(attempt.levelScore)}`)
         items.push({
           kind: 'group',
           label,
-          outcome: 'already',
-          detail: '已签',
-          code: codeText(result.code)
+          outcome: 'done',
+          detail: `等级分 +${String(attempt.levelScore)}`,
+          code: String(attempt.code)
         })
-        continue
       }
-
-      failures.push({
-        name,
-        code: codeText(result.code),
-        message: result.message,
-        classification: result.classification
-      })
-      log(`鱼吧「${name}」：签到失败（code ${codeText(result.code)}）`)
-      items.push({ kind: 'group', label, outcome: 'failed', detail: result.message, code: codeText(result.code) })
       continue
     }
 
-    // A positive number is a sign this call performed — and its *size* is a different question that
-    // nothing here answers (see `signGroupAndroid`), so it is not printed. The one new-sign reading of
-    // this call on record is 24 (group 历史, an `action_logs` row of 2026-10-09), and a single sign
-    // cannot be worth an EXP of 24: board 11254805's twin reported the 3 it added for that same day,
-    // and Douyu's own published table for that board is 3–5 a day. Printing it as 「等级分 +24」 read
-    // as though this sign had earned it, and the owner read it exactly that way. What is stated here is
-    // the fact this branch does establish: the sign went in.
-    if (result.data > 0) {
-      done += 1
-      log(`鱼吧「${name}」：签到成功`)
-      items.push({
-        kind: 'group',
+    // `already`: the service says today is in. The row keeps its own sentence, and the day is held open
+    // for one second look — unless this board has already had one today, in which case this answer is
+    // final and the item says so.
+    already += 1
+    const stored = yubaRechecks.get(`${scope}${group.group_id}`)
+    const look: YubaLook = stored?.rechecked === true ? 'after' : 'first'
+    if (look === 'first') {
+      armed.push({
+        groupId: group.group_id,
         label,
-        outcome: 'done',
-        detail: '签到成功',
-        code: String(result.code)
+        source: attempt.source,
+        message: attempt.message,
+        dueAt: context.now + YUBA_RECHECK_DELAY_MS,
+        rechecked: false
       })
-      continue
     }
-
-    // `fastSign`'s zero is measured as "this call placed no sign" (see `signGroupAndroid`), so the
-    // day's signature can only come from the PC twin: it either signs the board now (a `200` with a
-    // score) or answers that today is already in (`1001`). A transport failure ends the walk, as it
-    // does above.
-    const checked = await callGraded(
-      '鱼吧 PC 端点签到',
-      () => signGroupPc(credential.token, group.group_id),
-      credential.token
-    )
-    if (!checked.ok) {
-      failures.push({ name, code: checked.code, message: checked.detail, classification: 'retry' })
-      log(`鱼吧「${name}」：${checked.detail}（code ${checked.code}），其余版块本次不再尝试`)
-      items.push({ kind: 'group', label, outcome: 'failed', detail: checked.detail, code: checked.code })
-      break
-    }
-
-    const verdict = checked.reply
-    if (!verdict.ok) {
-      failures.push({
-        name,
-        code: codeText(verdict.code),
-        message: verdict.message,
-        classification: verdict.classification
-      })
-      log(`鱼吧「${name}」：PC 端点签到失败（code ${codeText(verdict.code)}）`)
-      items.push({ kind: 'group', label, outcome: 'failed', detail: verdict.message, code: codeText(verdict.code) })
-      continue
-    }
-
-    if (verdict.data.alreadySigned) {
-      already += 1
-      log(`鱼吧「${name}」：今天已经签到过了（PC 端点 status_code ${String(YUBA_ALREADY_SIGNED)}）`)
-      items.push({
-        kind: 'group',
-        label,
-        outcome: 'already',
-        detail: '已签',
-        code: String(YUBA_ALREADY_SIGNED)
-      })
-      continue
-    }
-
-    // A 200 from the PC twin with no positive score is not a verdict this walk has measured (its
-    // 1001 is, and so is its 200 with a score — see `signGroupPc`), so it settles nothing: the item
-    // fails with `retry`, and the next sweep asks again.
-    if (verdict.data.levelScore <= 0) {
-      const detail = 'PC 端点签到没有给出等级分，今天是否已签判定不了，留待下次重试'
-      failures.push({ name, code: String(verdict.code), message: detail, classification: 'retry' })
-      log(`鱼吧「${name}」：${detail}`)
-      items.push({ kind: 'group', label, outcome: 'failed', detail, code: String(verdict.code) })
-      continue
-    }
-
-    done += 1
-    // **This one is measured, and it is the only level score this walk may print as an increment.**
-    // `signGroupPc` answers `addLevelScore`, which is the EXP that sign earned: board 11254805's twin
-    // answered the 3 points it added for the sign it placed there, and a later read of the same board
-    // answered 4 — both inside Douyu's own published table for it (连续签到 1天 +3, 2天 +4, 10天 +4,
-    // 20天 +4, 30天 +5). The fastSign branch above prints no number at all, for the reason stated there.
-    log(`鱼吧「${name}」：PC 端点签到成功，等级分 +${String(verdict.data.levelScore)}`)
+    logYubaAlready(log, name, attempt.source, attempt.message, look)
     items.push({
       kind: 'group',
       label,
-      outcome: 'done',
-      detail: `等级分 +${String(verdict.data.levelScore)}`,
-      code: String(verdict.code)
+      outcome: 'already',
+      detail: yubaAlreadyDetail(attempt.message, look),
+      code: String(YUBA_ALREADY_SIGNED)
     })
+  }
+
+  const walk: WalkResult = {
+    actionKey: key,
+    unit: '版块',
+    alreadyCode: YUBA_ALREADY_SIGNED,
+    detailLead: '',
+    total: groups.length,
+    done,
+    already,
+    failures,
+    items,
+    hold: null
+  }
+
+  if (armed.length === 0) return aggregateWalkOutcome(walk)
+
+  if (failures.length > 0) {
+    // **The hold is not committed by a run that failed.** Today's retry is the answer: the day stays open
+    // through this failure, the next sweep walks the whole list again, and a re-check armed here would
+    // settle the day afterwards over the board that failed. The items above still say what each board
+    // answered, sentence included; what they do not say is that a second look is coming, because none is.
+    log(`鱼吧：本次有失败，先整轮重试；${namesOf(armed)} 报「已签」，复核留到下一轮完整成功之后`)
+    return aggregateWalkOutcome(walk)
+  }
+
+  const dueAt = Math.min(...armed.map(entry => entry.dueAt))
+  for (const entry of armed) yubaRechecks.set(`${scope}${entry.groupId}`, entry)
+  log(`鱼吧：${namesOf(armed)} 已记为已签，待复核一次（最早 ${clockOf(dueAt)} 后重问）`)
+  return aggregateWalkOutcome({ ...walk, hold: `已签待复核 ${String(armed.length)}（最早 ${clockOf(dueAt)} 后重问）` })
+}
+
+/**
+ * The second look: one round, once, for every board the day was held open for.
+ *
+ * **What it is for.** A `1001` is the only thing this family answers a signed board with, and it has been
+ * measured to be wrong once (see the walk's doc) — so the same two calls are made again and the answer is
+ * taken as final this time. **What it costs**: `fastSign` and, when that answers its zero, the PC twin —
+ * two POSTs per board, once per day, and nothing at all in between. Whether it is *enough* is not
+ * measured either: a false answer that outlasts the delay would need a later re-check or a second round,
+ * and the numbers for that choice are not in this repository.
+ *
+ * **A board the second look reached is not asked about again today**, whichever way the look went —
+ * that is what bounds the day to one extra round per board (the entries stay, marked `rechecked`, and a
+ * later walk reads them rather than arming a new one). An entry whose call never reached Douyu keeps its
+ * place, and the next sweep asks it again; the delay has already passed, so that is a retry rather than
+ * a fresh hold.
+ */
+async function recheckYubaSigns(
+  context: ReconcileContext,
+  credential: ParsedCredential,
+  waiting: readonly YubaRecheck[]
+): Promise<ActionOutcome> {
+  const key = ActionKey.YubaSign
+  const log = context.log
+  const scope = `${context.dayKey}:${String(context.account.id)}:`
+  const failures: ItemFailure[] = []
+  const items: ActionItem[] = []
+  const answered: string[] = []
+  let done = 0
+  let already = 0
+
+  log(`鱼吧：复核 ${namesOf(waiting)}（共 ${String(waiting.length)} 个版块）`)
+
+  for (const entry of waiting) {
+    const attempt = await attemptYubaGroup(credential.token, entry.groupId, 'again')
+
+    if (attempt.kind === 'unreached') {
+      failures.push({ name: entry.label, code: attempt.code, message: attempt.detail, classification: 'retry' })
+      log(`鱼吧「${entry.label}」：${attempt.detail}（code ${attempt.code}），其余版块本次不再尝试`)
+      items.push({ kind: 'group', label: entry.label, outcome: 'failed', detail: attempt.detail, code: attempt.code })
+      break
+    }
+    answered.push(`${scope}${entry.groupId}`)
+
+    if (attempt.kind === 'refused') {
+      failures.push({
+        name: entry.label,
+        code: attempt.code,
+        message: attempt.message,
+        classification: attempt.classification
+      })
+      log(`鱼吧「${entry.label}」：复核：${refusalByOf(attempt.via)}签到失败（code ${attempt.code}）`)
+      items.push({
+        kind: 'group',
+        label: entry.label,
+        outcome: 'failed',
+        detail: attempt.message,
+        code: attempt.code
+      })
+      continue
+    }
+
+    if (attempt.kind === 'unsettled') {
+      failures.push({ name: entry.label, code: attempt.code, message: attempt.detail, classification: 'retry' })
+      log(`鱼吧「${entry.label}」：${attempt.detail}`)
+      items.push({
+        kind: 'group',
+        label: entry.label,
+        outcome: 'failed',
+        detail: attempt.detail,
+        code: attempt.code
+      })
+      continue
+    }
+
+    if (attempt.kind === 'signed') {
+      done += 1
+      if (attempt.levelScore === null) {
+        log(`鱼吧「${entry.label}」：复核时签到成功`)
+        items.push({
+          kind: 'group',
+          label: entry.label,
+          outcome: 'done',
+          detail: '签到成功',
+          code: String(attempt.code)
+        })
+      } else {
+        log(`鱼吧「${entry.label}」：复核时签到成功，等级分 +${String(attempt.levelScore)}`)
+        items.push({
+          kind: 'group',
+          label: entry.label,
+          outcome: 'done',
+          detail: `等级分 +${String(attempt.levelScore)}`,
+          code: String(attempt.code)
+        })
+      }
+      continue
+    }
+
+    already += 1
+    logYubaAlready(log, entry.label, attempt.source, attempt.message, 'again')
+    items.push({
+      kind: 'group',
+      label: entry.label,
+      outcome: 'already',
+      detail: yubaAlreadyDetail(attempt.message, 'again'),
+      code: String(YUBA_ALREADY_SIGNED)
+    })
+  }
+
+  for (const stored of answered) {
+    const entry = yubaRechecks.get(stored)
+    if (entry !== undefined) yubaRechecks.set(stored, { ...entry, rechecked: true })
   }
 
   return aggregateWalkOutcome({
     actionKey: key,
     unit: '版块',
     alreadyCode: YUBA_ALREADY_SIGNED,
-    total: groups.length,
+    // The row says which look it was; see `WalkResult.detailLead`.
+    detailLead: '复核：',
+    total: waiting.length,
     done,
     already,
     failures,
-    items
+    items,
+    hold: null
   })
 }
 
@@ -1857,11 +2283,27 @@ interface WalkResult {
   readonly unit: string
   /** The code an all-already walk reports — each family's own "already" number. */
   readonly alreadyCode: number
+  /**
+   * What the count line opens with, or `''` when the run needs no introduction.
+   *
+   * 鱼吧's second look passes 「复核：」 and nothing else does: its row reports the same two counts a walk
+   * does, and an item that says 「等级分 +4」 would otherwise not say whether the sign came from the first
+   * pass or from the look that exists because the first one was not trusted.
+   */
+  readonly detailLead: string
   readonly total: number
   readonly done: number
   readonly already: number
   readonly failures: readonly ItemFailure[]
   readonly items: readonly ActionItem[]
+  /**
+   * The sentence for a day this walk deliberately did **not** finish, or `null` when its work is done.
+   *
+   * 鱼吧 is the only walk that passes one, and only while a `1001` is waiting for its second look (see
+   * `reconcileYubaSign`). `null` for every other run — including a failed one, whose own failure is the
+   * reason the day stays open.
+   */
+  readonly hold: string | null
 }
 
 /**
@@ -1875,13 +2317,18 @@ interface WalkResult {
  *
  * The order is the point. An `account_stop` anywhere outranks everything: nothing that failed
  * that way will work again until a person re-binds, so a run that also signed two items must
- * not be reported as a success. Otherwise any fresh sign is a `done`, an all-already run is
+ * not be reported as a success. A run that says it is **not finished** comes next, and for the same
+ * reason in the other direction — the runner reads `done`/`already`/`skipped` as the action's day being
+ * over (`repo/action-logs.ts`) and stops asking, so a walk holding a day open has to say so even when it
+ * got work done. Otherwise any fresh sign is a `done`, an all-already run is
  * `already` and parks until tomorrow, and a run that accomplished nothing reports the worst
  * refusal it met.
  *
  * The `items` are passed through untouched, so the aggregate and its detail agree by
  * construction: whichever branch below decides the run's outcome, the item that caused it is
- * one of them and says the same thing.
+ * one of them and says the same thing. **A held day is the one shape that is not an item's own word**
+ * (`blocked` over items that each say 已签 or 签到成功): the day's state is not any one board's verdict,
+ * which is exactly what the extra clause in its `detail` is for.
  *
  * Its own `detail` is a line of facts — 「新签 0、已签 4（共 4 个版块）」 — and not a sentence
  * naming the action and closing with 「本日已完成」. The rows a person reads are the items below
@@ -1889,7 +2336,7 @@ interface WalkResult {
  * that made it say what the row's own label and heading already said.
  */
 function aggregateWalkOutcome(walk: WalkResult): ActionOutcome {
-  const counts = `新签 ${String(walk.done)}、已签 ${String(walk.already)}（共 ${String(walk.total)} 个${walk.unit}）`
+  const counts = `${walk.detailLead}新签 ${String(walk.done)}、已签 ${String(walk.already)}（共 ${String(walk.total)} 个${walk.unit}）`
   const failing = walk.failures.length === 0 ? '' : `、失败 ${String(walk.failures.length)}`
 
   let worst: ItemFailure | null = null
@@ -1905,6 +2352,20 @@ function aggregateWalkOutcome(walk: WalkResult): ActionOutcome {
       code: worst.code,
       detail: `${counts}${failing}；「${worst.name}」${worst.message}`,
       failure: 'account_stop',
+      items: walk.items
+    }
+  }
+  if (walk.hold !== null) {
+    // `blocked` with `failure: 'none'` is the seam's "parked, back on a later sweep": the runner keeps
+    // asking (an unsettled outcome) and raises no event (a graded one would), which is precisely a day
+    // waiting for a second look. See `WalkResult.hold` for which run passes one.
+    return {
+      actionKey: walk.actionKey,
+      targetKey: TARGET_KEY_ACCOUNT_SCOPED,
+      outcome: 'blocked',
+      code: LocalCode.RecheckPending,
+      detail: `${counts}${failing}；${walk.hold}`,
+      failure: 'none',
       items: walk.items
     }
   }
@@ -2203,11 +2664,15 @@ async function reconcileFanshomeSign(
     actionKey: key,
     unit: '直播间',
     alreadyCode: FANSHOME_ALREADY_SIGNED,
+    detailLead: '',
     total: badges.length,
     done,
     already,
     failures,
-    items
+    items,
+    // 粉丝家园 has no equivalent hold: its own already verdict (`-1`) is the service's answer for the
+    // room's day and nothing here has measured it to be wrong (see `reconcileFanshomeSign`).
+    hold: null
   })
 }
 

@@ -736,6 +736,20 @@ export interface YubaSignOutcome {
    * cannot.
    */
   readonly alreadySigned: boolean
+  /**
+   * The service's own sentence on this reply, **verbatim**, and `''` when the envelope carried none.
+   *
+   * **On the `1001` it is the sentence that identifies the answer** — the measured body's
+   * `"今天已经签到过了"` — and it is carried because the walk records it: the `1001` read on 2026-10-11
+   * for board 11254805 (「Drop」) was false, the board was not signed, and the only thing the record kept
+   * was the number, so a true `1001` and a false one were indistinguishable a day later. The caller puts
+   * this in the row and the log line rather than deciding anything with it; nothing here parses it.
+   *
+   * **Empty on a `200`, and the asymmetry is the reader's, not a claim about the service.** `settle`
+   * returns a success as `{ ok, code, data }` and drops the message — it is not this call's to widen a
+   * shared envelope shape — so a `200`'s sentence is not in hand and nothing here invents one.
+   */
+  readonly message: string
 }
 
 /**
@@ -844,9 +858,20 @@ const yubaTopicSignDataSchema = z.object({ addLevelScore: counter.optional() })
  * the EXP this call earned, and it is the number the owner's own table matched — whereas `fastSign`'s
  * number is not, and `signGroupAndroid` says so.
  *
+ * **`1001` has also been measured to be wrong, once, and that is a second fact about it.** 2026-10-11
+ * 00:04:38, board 11254805 (「Drop」): this call answered `1001` for a board that was **not** signed — a
+ * probe signed it through this same endpoint at 01:30:50 (`200`, `addLevelScore` 4), which is what proves
+ * the board had been unsigned at 00:04. Why that answer was false is not established here, and this
+ * module does not guess: this endpoint being wrong for a while, and the run having happened before the
+ * service rolled its sign-day, are both open and nothing in this repository distinguishes them. **What
+ * follows from it belongs to the walk** (`index.ts`'s `reconcileYubaSign`), which keeps the sentence
+ * above, holds the day open and asks this endpoint exactly once more; nothing in this module treats a
+ * `1001` as anything other than the refusal it is.
+ *
  * There is no read-back that verifies a sign. On 2026-10-10 board 11254805's `myFollow` `is_signed` and
  * its group page's `isSigned` both read 0 in every read that bracketed the sign the twin placed, and
  * that page's markup carried no account id at all — so neither is used as a gate or as a verification.
+ * The `1001` above is the other half of the same fact: asking again is the only check this family has.
  */
 export async function signGroupPc(
   token: string,
@@ -864,10 +889,13 @@ export async function signGroupPc(
   const result = await callYuba(spec, yubaTopicSignDataSchema)
   if (result.ok) {
     const levelScore = result.data.addLevelScore ?? 0
-    return { ok: true, code: result.code, data: { levelScore, alreadySigned: false } }
+    // No message: `settle` gives a success without one (see `YubaSignOutcome.message`).
+    return { ok: true, code: result.code, data: { levelScore, alreadySigned: false, message: '' } }
   }
   if (result.code === YUBA_ALREADY_SIGNED) {
-    return { ok: true, code: result.code, data: { levelScore: 0, alreadySigned: true } }
+    // The envelope's own sentence travels with the verdict — it is the field that tells this `1001` from
+    // any other, and the one the walk writes into its row.
+    return { ok: true, code: result.code, data: { levelScore: 0, alreadySigned: true, message: result.message } }
   }
   return result
 }

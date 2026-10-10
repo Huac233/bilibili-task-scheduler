@@ -8,7 +8,7 @@ import {
   DouyuTransportError,
   type ErrorClassification
 } from '../src/platform/douyu/errors.js'
-import { douyuPlatform, parseCredential } from '../src/platform/douyu/index.js'
+import { douyuPlatform, forgetYubaRechecks, parseCredential } from '../src/platform/douyu/index.js'
 import {
   ACTIVITY_SIGN_STATUS_URL,
   CSRF_COOKIE_URL,
@@ -231,6 +231,9 @@ function outcomeOf(outcomes: readonly ActionOutcome[], actionKey: string): Actio
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // The 鱼吧 walk's pending second looks are this module's process state, and every case below drives
+  // one process: a case that read a `1001` would otherwise hold the day open in the case after it.
+  forgetYubaRechecks()
   vi.stubGlobal('fetch', fetchMock)
 
   fetchCsrfCookieMock.mockResolvedValue({ ok: true, code: 0, data: 'dy_cookie_value' })
@@ -256,11 +259,12 @@ beforeEach(() => {
   listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1')] })
   signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 3 })
   // The PC twin's default is its already verdict: the walk's `fastSign` zero is then read as 已签
-  // because the twin says so, not because of the zero (measured 2026-10-10, see the pair case below).
+  // because the twin says so, not because of the zero (measured 2026-10-10, see the pair case below) —
+  // and the twin's own sentence travels with it, because a 1001 is recorded with the words it came in.
   signGroupPcMock.mockResolvedValue({
     ok: true,
     code: YUBA_ALREADY_SIGNED,
-    data: { levelScore: 0, alreadySigned: true }
+    data: { levelScore: 0, alreadySigned: true, message: '今天已经签到过了' }
   })
   // 粉丝家园's default: the badge wall answers, and both rooms answer the one 200 body this
   // endpoint has ever been seen to send — 「今日已签到」.
@@ -619,13 +623,25 @@ describe('send', () => {
     expect(outcome.detail).toContain('2 秒')
   })
 
-  it('grades res=356 as action_stop and names the content rule behind it', async () => {
+  it('grades res=356 as action_stop without naming one single cause for it', async () => {
     sendDanmakuMock.mockResolvedValue(refused(356, 'the message was refused with res 356'))
     const outcome = await douyuPlatform.send(account(), '12306', 'x')
 
+    // The measured case still parks the action, and that is the whole of the grade.
     expect(outcome).toMatchObject({ ok: false, code: '356', failure: 'action_stop' })
+    // The one measured cause is named as **one** cause, not as the cause.
+    expect(outcome.detail).toContain('已实测的原因之一')
     expect(outcome.detail).toContain('连续字母数字串')
-    expect(outcome.detail).toContain('URL')
+    // The rules this build has not measured, the banned-word case among them, and the one way a person
+    // can tell a room's own rule from a Douyu-wide one without this build inventing a distinction.
+    expect(outcome.detail).toContain('敏感词')
+    expect(outcome.detail).toContain('另一个版块')
+    // Two claims the captures cannot support are gone: that the text must have contained one of these,
+    // and that inserting separators is the remedy.
+    expect(outcome.detail).not.toContain('URL')
+    expect(outcome.detail).not.toContain('hash')
+    expect(outcome.detail).not.toContain('base64')
+    expect(outcome.detail).not.toContain('先插分隔符再发')
   })
 
   it('grades res=5 as a mute that pauses the task, never as something to retry or re-bind', async () => {
@@ -1012,6 +1028,13 @@ describe('resolveTarget', () => {
  */
 const BEFORE_WINDOW = 1_791_411_776_000
 
+/**
+ * The 鱼吧 re-check's delay, pinned here as a literal on purpose: the point of the number is that a
+ * change to it is noticed, and 90 minutes is what the one sample supports (see `YUBA_RECHECK_DELAY_MS`).
+ * The clock strings below (`07:52` from `06:22`) are what that delay plus this instant works out to.
+ */
+const RECHECK_DELAY_MS = 90 * 60 * 1000
+
 /** Shanghai 2026-10-09 19:30 — inside that window, the only two hours a day it opens. */
 const INSIDE_CLOCK_WINDOW = Date.parse('2026-10-09T11:30:00Z')
 
@@ -1189,21 +1212,140 @@ describe('reconcile', () => {
       const { outcomes, logs } = await reconcileWith([ActionKey.YubaSign])
 
       expect(outcomes).toHaveLength(1)
-      expect(outcomeOf(outcomes, ActionKey.YubaSign)).toMatchObject({ outcome: 'done', failure: 'none' })
+      // The run signed one board and read 已签 for two: the day is **held**, not settled, because those
+      // two 已签s have not had their second look yet (see the re-check cases below).
+      expect(outcomeOf(outcomes, ActionKey.YubaSign)).toMatchObject({
+        outcome: 'blocked',
+        code: 'recheck_pending',
+        failure: 'none'
+      })
       expect(outcomeOf(outcomes, ActionKey.YubaSign).detail).toContain('3 个版块')
       expect(outcomeOf(outcomes, ActionKey.YubaSign).detail).toContain('新签 1')
-      // One line per group, so a half-finished run is visible in the sweep's log.
-      expect(logs).toHaveLength(3)
+      expect(outcomeOf(outcomes, ActionKey.YubaSign).detail).toContain('已签待复核 2')
+      // One line per group, so a half-finished run is visible in the sweep's log — plus the one line that
+      // says what became of the day, which is a fact no single group's line can carry.
+      expect(logs).toHaveLength(4)
       expect(logs[0]).toContain('主版块')
+      expect(logs[3]).toBe('鱼吧：安卓版块、PC 版块 已记为已签，待复核一次（最早 07:52 后重问）')
     })
 
-    it('is only a success when nothing new happened — all already means already', async () => {
+    it('keeps a 1001 as 已签 and holds the day open until it has been read twice', async () => {
       listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1'), group('2')] })
       signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
 
-      const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+      const first = await reconcileWith([ActionKey.YubaSign])
+      const held = outcomeOf(first.outcomes, ActionKey.YubaSign)
 
-      expect(outcome).toMatchObject({ outcome: 'already', failure: 'action_stop' })
+      // **Reported as 已签, and not allowed to end the day.** `blocked` is the seam's "parked, back on a
+      // later sweep": the runner reads `already` as the action's day being over and would stop asking,
+      // which is exactly the state that let a false 1001 stand for a whole day.
+      expect(held).toMatchObject({ outcome: 'blocked', code: 'recheck_pending', failure: 'none' })
+      expect(held.detail).toContain('已签待复核 2')
+      expect(held.items).toEqual([
+        { kind: 'group', label: '鱼吧 1', outcome: 'already', detail: '已签（今天已经签到过了）', code: '1001' },
+        { kind: 'group', label: '鱼吧 2', outcome: 'already', detail: '已签（今天已经签到过了）', code: '1001' }
+      ])
+      // The diagnosis the row used to lack: the twin's own sentence, in the record and in the log.
+      expect(first.logs[0]).toContain('PC 端点 status_code 1001')
+      expect(first.logs[0]).toContain('斗鱼答复：今天已经签到过了')
+
+      // Nothing is asked while the delay runs: the wait is answered without a single request.
+      const waiting = outcomeOf(
+        (await reconcileWith([ActionKey.YubaSign], BEFORE_WINDOW + 5 * 60 * 1000)).outcomes,
+        ActionKey.YubaSign
+      )
+      expect(waiting).toMatchObject({ outcome: 'blocked', code: 'recheck_pending' })
+      expect(waiting.detail).toContain('鱼吧 1、鱼吧 2')
+      expect(signGroupPcMock).toHaveBeenCalledTimes(2)
+      expect(signGroupAndroidMock).toHaveBeenCalledTimes(2)
+      expect(listFollowedGroupsMock).toHaveBeenCalledTimes(1)
+
+      // The second look, one round later, answers the same thing — and now it is final: the day settles.
+      const settled = outcomeOf(
+        (await reconcileWith([ActionKey.YubaSign], BEFORE_WINDOW + RECHECK_DELAY_MS)).outcomes,
+        ActionKey.YubaSign
+      )
+      expect(settled).toMatchObject({ outcome: 'already', code: String(YUBA_ALREADY_SIGNED), failure: 'action_stop' })
+      // The row says which look it was: the same two counts a walk reports, and the items below it cannot
+      // say whether a sign came from the first pass or from this one.
+      expect(settled.detail).toContain('复核：新签 0、已签 2')
+      expect(settled.items.map(item => item.detail)).toEqual([
+        '已签（复核过：今天已经签到过了）',
+        '已签（复核过：今天已经签到过了）'
+      ])
+
+      // One round per board per day: a later run the same day walks the boards again (it does not
+      // re-check the same board twice), which is what keeps this cost bounded rather than per-sweep.
+      const later = outcomeOf(
+        (await reconcileWith([ActionKey.YubaSign], BEFORE_WINDOW + 4 * RECHECK_DELAY_MS)).outcomes,
+        ActionKey.YubaSign
+      )
+      expect(later.items[0]).toMatchObject({ outcome: 'already', detail: '已签（今日已复核：今天已经签到过了）' })
+      expect(listFollowedGroupsMock).toHaveBeenCalledTimes(2)
+    })
+
+    it('re-asks a board whose 1001 was false, and signs it the same day', async () => {
+      // The defect this shape exists for. 2026-10-11 00:04:38, board 11254805 (「Drop」): the twin
+      // answered 1001, the board was **not** signed, and a probe signed it through the same twin at
+      // 01:30:50 — 86 minutes later, which is what proves it had been unsigned at 00:04.
+      listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('11254805', 'Drop')] })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+
+      const first = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+      expect(first).toMatchObject({ outcome: 'blocked', code: 'recheck_pending' })
+      expect(first.items[0]).toMatchObject({ outcome: 'already', detail: '已签（今天已经签到过了）' })
+
+      // The second look is the call that can still put the sign in — and that is the whole recovery.
+      signGroupPcMock.mockResolvedValue({
+        ok: true,
+        code: 200,
+        data: { levelScore: 4, alreadySigned: false, message: '' }
+      })
+      const saved = outcomeOf(
+        (await reconcileWith([ActionKey.YubaSign], BEFORE_WINDOW + RECHECK_DELAY_MS)).outcomes,
+        ActionKey.YubaSign
+      )
+
+      expect(saved).toMatchObject({ outcome: 'done', failure: 'none' })
+      expect(saved.detail).toContain('复核：新签 1')
+      expect(saved.items).toEqual([{ kind: 'group', label: 'Drop', outcome: 'done', detail: '等级分 +4', code: '200' }])
+      expect(signGroupPcMock).toHaveBeenCalledTimes(2)
+      // The re-check asks the boards it recorded, not the service's follow list.
+      expect(listFollowedGroupsMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not hold the day open when the walk itself failed: the next sweep retries the walk', async () => {
+      listFollowedGroupsMock.mockResolvedValue({
+        ok: true,
+        code: 200,
+        data: [group('1', 'Drop'), group('2', '安卓版块')]
+      })
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 0 })
+      signGroupPcMock
+        .mockResolvedValueOnce({
+          ok: true,
+          code: YUBA_ALREADY_SIGNED,
+          data: { levelScore: 0, alreadySigned: true, message: '今天已经签到过了' }
+        })
+        .mockRejectedValueOnce(new DouyuTransportError(YUBA_TOPIC_SIGN_URL, 0, 'fetch failed'))
+
+      const first = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
+
+      // A walk that broke off is today's retry, not a held day: the whole run is asked again, including
+      // the board that never got an answer, and the 1001 is recorded without promising a re-check.
+      expect(first).toMatchObject({ outcome: 'failed', code: 'transport', failure: 'retry' })
+      expect(first.items[0]).toEqual({
+        kind: 'group',
+        label: 'Drop',
+        outcome: 'already',
+        detail: '已签（今天已经签到过了）',
+        code: '1001'
+      })
+      expect(first.detail).not.toContain('待复核')
+
+      await reconcileWith([ActionKey.YubaSign], BEFORE_WINDOW + 5 * 60 * 1000)
+
+      expect(listFollowedGroupsMock).toHaveBeenCalledTimes(2)
     })
 
     it('never reads fastSign zero as already on its own: a PC sign with a score is a sign', async () => {
@@ -1837,6 +1979,13 @@ describe('reconcile', () => {
      * The check is one-directional on purpose: a record may report a worse outcome than
      * its items (an `account_stop` in one group outweighs two successes in others), but
      * its own verdict has to be one its items agree with.
+     *
+     * **One shape stands outside it, and this is where that is written down.** A 鱼吧 walk that is
+     * holding the day open for a 1001 re-check reports `blocked` (`recheck_pending`) while its items are
+     * each board's own verdict — `已签` for the board whose second look is still owed. That record is not
+     * claiming a worse outcome than its items; it is saying the day is not finished (see
+     * `reconcileYubaSign`), so the check below asserts what such a record *is* rather than the relation
+     * the others keep.
      */
     async function expectItemsToAgree(enabled: readonly string[] = RECONCILE_ACTIONS): Promise<void> {
       const { outcomes } = await reconcileWith(enabled)
@@ -1844,6 +1993,11 @@ describe('reconcile', () => {
       expect(outcomes.length).toBeGreaterThan(0)
       for (const outcome of outcomes) {
         expect(outcome.items.length).toBeGreaterThan(0)
+        if (outcome.code === 'recheck_pending') {
+          expect(outcome.outcome).toBe('blocked')
+          expect(outcome.items.every(item => item.outcome === 'already')).toBe(true)
+          continue
+        }
         expect(outcome.items.map(item => item.outcome)).toContain(outcome.outcome)
       }
     }
@@ -1895,12 +2049,20 @@ describe('reconcile', () => {
 
       expect(outcome.items).toEqual([
         { kind: 'group', label: '主版块', outcome: 'done', detail: '签到成功', code: '200' },
-        { kind: 'group', label: '安卓版块', outcome: 'already', detail: '已签', code: String(YUBA_ALREADY_SIGNED) },
+        // The 已签 rows now carry the service's own sentence: the bare number is what made the false
+        // 1001 of 2026-10-11 undiagnosable from the record a day later.
+        {
+          kind: 'group',
+          label: '安卓版块',
+          outcome: 'already',
+          detail: '已签（今天已经签到过了）',
+          code: String(YUBA_ALREADY_SIGNED)
+        },
         {
           kind: 'group',
           label: 'PC 版块',
           outcome: 'already',
-          detail: '已签',
+          detail: '已签（今天已经签到过了）',
           code: String(YUBA_ALREADY_SIGNED)
         }
       ])

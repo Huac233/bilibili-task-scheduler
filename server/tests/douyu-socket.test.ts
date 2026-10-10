@@ -156,8 +156,11 @@ describe('sendDanmaku', () => {
     await wait(30)
 
     // `res=356` fired on two different 40-character payloads in the capture while 30 of either was
-    // answered `res=0`: a content rule, and retrying it unchanged repeats it forever. The shared table
-    // has never seen the code and answers `retry`, which is why the socket names it itself.
+    // answered `res=0` — **one** measured content rule, not the only one this code can carry (the 35-letter
+    // refusal and the spaced-40 pass in the same record narrow nothing about the others). What the stop
+    // rests on is smaller than "the text hit this rule": a retry reposts the same text at a refusal no
+    // response explains, which is why the socket names the code itself rather than leaving the shared
+    // table's `retry` in place.
     socket.deliver(frame({ type: 'chatres', res: String(DANMAKU_CONTENT_RULE) }))
 
     const result = await pending
