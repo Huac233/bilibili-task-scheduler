@@ -1,6 +1,6 @@
 import { NDialogProvider, NMessageProvider } from 'naive-ui'
 import { createPinia } from 'pinia'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type App, createApp, h, nextTick } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 
@@ -341,12 +341,25 @@ function setupStateOf(app: App): Record<string, unknown> {
   return found
 }
 
-/** Flushes microtasks and one macrotask, so the `onMounted` chain lands. */
+/**
+ * Flushes microtasks and what the clock owes at 0 ms, so the `onMounted` chain lands.
+ *
+ * This file holds the clock (see `beforeEach`), so the macrotask it used to wait for is now one
+ * it has to run itself: `advanceTimersByTimeAsync(0)` is that same "let the queued work land",
+ * minus the wall clock. **It deliberately does not move time past 0**: the delays belong to
+ * naive-ui — a toast's own auto-hide at the provider's 3 s default, the wave animation's second,
+ * the click raiser's 64 ms — and none of them is this file's to fire. What they are is work that
+ * outlives the environment if it is still scheduled when the file ends, which is the defect the
+ * teardown below closes.
+ */
 async function settle(): Promise<void> {
   for (let i = 0; i < 12; i += 1) await nextTick()
-  await new Promise(resolve => setTimeout(resolve, 0))
+  await vi.advanceTimersByTimeAsync(0)
   for (let i = 0; i < 6; i += 1) await nextTick()
 }
+
+/** The app the current test mounted, so the teardown can take the tree down before it ends. */
+let mountedApp: App | null = null
 
 async function mountView(): Promise<ViewState> {
   const host = document.createElement('div')
@@ -375,6 +388,7 @@ async function mountView(): Promise<ViewState> {
   app.use(createPinia())
   app.use(router)
   app.mount(host)
+  mountedApp = app
   await settle()
 
   return setupStateOf(app) as unknown as ViewState
@@ -470,6 +484,11 @@ async function typeInto(label: string, value: string): Promise<void> {
 }
 
 beforeEach(() => {
+  // The file drives its own clock. Everything the mounts below schedule — naive-ui's toast
+  // auto-hide, its wave animation, the click raiser, Vue's transition frames — is therefore this
+  // file's to answer for, and the teardown can make them stop existing instead of racing them.
+  vi.useFakeTimers()
+
   catalogue = [SEND, SIGN_IN, LIKE, GROWTH_POOL]
   switchedOff = []
   accountsRefused = false
@@ -483,6 +502,54 @@ beforeEach(() => {
   createdStatus = 'running'
   requests = []
   document.body.innerHTML = ''
+})
+
+/**
+ * The tree goes down, and the clock it scheduled against goes with it.
+ *
+ * Reported from CI, this file passed all 23 tests and failed the run:
+ *
+ *   Uncaught Exception: ReferenceError: window is not defined
+ *    ❯ Timeout.hide [as _onTimeout] ../node_modules/…/naive-ui/…/lib/message/src/MessageEnvironment.js
+ *
+ * The timer is the toast's own auto-hide. `MessageEnvironment` schedules it on mount
+ * (`setHideTimeout` — `window.setTimeout(hide, duration)`, the provider's 3 s default) and clears
+ * it in `hide()` — reached when it fires, on a manual close, and by `deactivate` — and on hover;
+ * **never on unmount**. Its callback is also the one place in that component that reaches for
+ * `window` (`hide`'s own `window.clearTimeout(timerId)`), which is why this leak throws where the
+ * other timers a mounted tree leaves behind would only write to a ref.
+ *
+ * Vitest tears the environment down when the file ends and deletes the globals it copied,
+ * `window` with them. So whether the run is green is decided by a race — the 3 s timer against
+ * the end of the file — and that is the whole of the flakiness: locally the file finishes first,
+ * on a loaded runner the timer wins and the environment is already gone. Unmounting alone would
+ * not have closed it: `app.unmount()` runs the components' own unmount hooks, and the toast's
+ * timer has none, so the 3 s would still have been pending.
+ *
+ * What closes it, in order, and why this shape rather than a `setTimeout`-waiting drain:
+ * 1. `unmount()` — the tree stops, and the timers whose owners *do* clean up on unmount (the
+ *    wave's 1 s, the click raiser's 64 ms) are cleared here, while `window` still exists.
+ * 2. `clearAllTimers()` — everything the mounts scheduled is dropped, the toast's auto-hide among
+ *    it. Cleared rather than run: running it would *start* a leave transition and hand the file a
+ *    fresh batch of pending frames, while the point of teardown is to leave nothing scheduled.
+ * 3. `useRealTimers()` — the fake clock is restored, so nothing about this file's clock reaches
+ *    the next one.
+ *
+ * A drain built on real time cannot close this: the pending work is a 3 s delay, and the only two
+ * ways to answer it are to fake the clock or to wait three real seconds per test.
+ */
+afterEach(() => {
+  mountedApp?.unmount()
+  mountedApp = null
+  // The teardown's own claims, checked where they can be checked. The form items are what this
+  // file mounted, so their absence is the `unmount()` above having run — drop that line and this
+  // fails instead of passing quietly. And the clock is handed back with nothing on it: every timer
+  // these mounts scheduled was the fake clock's to begin with, never the environment's, so
+  // clearing it is the whole of 「nothing this file scheduled can outlive the environment」.
+  expect(document.querySelectorAll('.n-form-item').length).toBe(0)
+  vi.clearAllTimers()
+  expect(vi.getTimerCount()).toBe(0)
+  vi.useRealTimers()
 })
 
 describe('TaskCreateView, after switching action', () => {

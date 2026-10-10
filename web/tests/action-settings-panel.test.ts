@@ -565,11 +565,26 @@ async function mountPanel(): Promise<App<Element>> {
   // The two providers the component asks for, in the order `App.vue` nests them: `useMessage` and
   // `useDialog` both throw without one above them, and the panel uses both — a costly action's
   // confirmation comes from `useDialog`.
+  //
+  // `duration: 0` is the one deviation from that nesting, and it is about what a test may leave
+  // behind: a toast's default 3 s auto-hide is a timer `MessageEnvironment` schedules on mount and
+  // clears only in `hide()` — never on unmount — so every toast this file made left a callback
+  // armed, and that callback is the one place in the component that reaches for `window`. Measured
+  // on this file, five of them were still pending when it ended. Vitest deletes `window` when it
+  // tears the environment down, so whichever toast of those lost the race to that teardown would
+  // have failed the run with an uncaught `window is not defined` *after* every test passed —
+  // `task-create.test.ts` is where that race was already lost once. No assertion here is about a
+  // toast going away, so mounting with the auto-hide off states what this file actually exercises
+  // instead of arming three seconds of work it can never answer for.
   const app = createApp({
     render: () =>
-      h(NMessageProvider, null, {
-        default: () => h(NDialogProvider, null, { default: () => h(ActionSettingsPanel) })
-      })
+      h(
+        NMessageProvider,
+        { duration: 0 },
+        {
+          default: () => h(NDialogProvider, null, { default: () => h(ActionSettingsPanel) })
+        }
+      )
   })
   app.use(createPinia())
   apps.push(app)
