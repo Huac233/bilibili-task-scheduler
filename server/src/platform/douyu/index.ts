@@ -4735,17 +4735,29 @@ const GROWTH_POOL_JOINED = 1
  * would have left this action clocking a round it had already settled, for as long as the round
  * lasted.
  *
- * **One run does one half, and 「打完卡瓜分完鱼丸后又报名一次」 is therefore two runs.** The latch
+ * **One run does one half, and the two halves run in that order on one platform day.** The latch
  * is read once, at the top, and one branch is taken from it; neither half re-reads the latch
- * afterwards, and each returns a settled outcome — `done`, or `already` when the half was in place
- * before the run looked (`57004` on the check-in, and see `growthPoolCheckIn`) — which `runner.ts`
- * counts as settled for the platform-day.
- * So the re-join lands on a later run, which is where the new round wants it anyway: a join opens
- * the *next* day's 19:00–21:00 window. That reading is confirmed rather than assumed, and the shape
- * it confirms is the one already here: `growthPoolSignUp` and `growthPoolCheckIn` are single-purpose
- * by construction, and a single run doing both halves would have to decide the second from a latch
- * read *before* the write that changed it — which is the one way this action could spend 200 鱼丸
- * twice. Nothing changes for it.
+ * afterwards. What is deliberate is which outcomes settle: the join returns `done` and settles the
+ * day, and the check-in returns `blocked` and does **not** settle it — because the re-join that
+ * follows a check-in is not a later day's business. A sign-up is what makes the *next* day's
+ * 19:00–21:00 window available (「支付 200 鱼丸可报名参加活动，获得次日打卡机会」), so a re-join
+ * deferred to the next platform day skips a whole day of check-in eligibility and the 200 鱼丸 paid
+ * for that round buys nothing. This block used to argue the opposite — that a later run was "where
+ * the new round wants it anyway" — and that reading, acted on by `runner.ts`'s `settledToday`, is
+ * what the owner's account hit on 2026-10-10: checked in at 19:02:39, and no run after it for the
+ * rest of the evening.
+ *
+ * The cycle itself is measured, and this is the shape the measurement confirms. The check-in leaves
+ * the latch at `0` (see above), so the run that follows the check-in reads `0` on its very first
+ * latch read and offers **报名** — which is the half that spends. The join puts the latch back to
+ * `1` and is the day's `done`, so the day settles there and the sweep stops asking. What stays
+ * impossible is spending twice for one round: 报名 is reachable *only* from a `0` latch, and a join
+ * that landed is read back as `1` rather than inferred, so the state the next run sees is the state
+ * the service is in. The order is what keeps one latch read enough: the check-in is what clears the
+ * latch, and the join that follows it is only reachable once it has been cleared. A single run
+ * doing both would have to decide the second from a latch read *before* the write that changed it —
+ * which is the one way this action could spend 200 鱼丸 twice, and why the second half is the next
+ * run's.
  */
 async function reconcileGrowthPool(credential: ParsedCredential | null, now: number): Promise<ActionOutcome> {
   const key = ActionKey.GrowthPool
@@ -4786,10 +4798,12 @@ async function reconcileGrowthPool(credential: ParsedCredential | null, now: num
  *
  * Only reachable on a `0` latch, which is what keeps it from spending twice for one round:
  * the join moves the latch because the account really did join, and the next run reads that
- * back rather than inferring it. A success is the day's `done` — the check-in cannot happen
- * today whatever happens, because the window a join opens is tomorrow's (the measured reply
- * counted 107999 s down at 13:00, i.e. to the next day's 19:00) — and a shortage of 鱼丸
- * parks the day instead.
+ * back rather than inferring it. The latch reads `0` exactly when this account has no entry in the
+ * current round — a round nobody has entered yet, and a round whose predecessor was just clocked in
+ * — which is why the run that follows a check-in arrives here a sweep later. A success is the day's
+ * `done` and settles it, because the check-in cannot happen today whatever happens next: the
+ * window a join opens is tomorrow's (the measured reply counted 107999 s down at 13:00, i.e. to
+ * the next day's 19:00). A shortage of 鱼丸 parks the day instead.
  */
 async function growthPoolSignUp(key: string, token: string, dyCookie: string): Promise<ActionOutcome> {
   const joined = await callGraded('报名', () => joinGrowthPool(token, dyCookie), token, dyCookie)
@@ -4842,12 +4856,23 @@ function poolClauseOf(join: GrowthPoolJoin): string {
  * `growthPoolRefusal`'s (retry, never a parked day).
  *
  * **The call has two verdicts that mean the card is in place, and they are told apart because they
- * are different facts about this run.** `0` is "written now", which is the day's `done`; `57004` is
- * "it was already there when this run asked", which is the day's `already` — the 19:00:20 check-in
- * of 2026-10-09 against the two runs at 19:45 and 19:50 (see `GROWTH_POOL_ALREADY_CLOCKED`). The
- * second one is why this half no longer reports 「打卡失败」 for a day that was successfully checked
- * in: the sentence it shows is the state the code read, and its grading is what lets `runner.ts`'s
- * `settledToday` stop asking for the rest of the day instead of repeating that line every sweep.
+ * are different facts about this run.** `0` is "written now", and `57004` is "it was already there
+ * when this run asked" — the 19:00:20 check-in of 2026-10-09 against the two runs at 19:45 and
+ * 19:50 (see `GROWTH_POOL_ALREADY_CLOCKED`). The second one is why this half no longer reports
+ * 「打卡失败」 for a day that was successfully checked in: the sentence it shows is the state the
+ * code read, and `already` lets `runner.ts`'s `settledToday` stop asking for the rest of the day
+ * instead of repeating that line every sweep.
+ *
+ * **Only the `57004` half of that pair is settled, and the difference is the next step rather than
+ * who wrote the card.** `0` clears the latch this action reads, and the cleared latch is what the
+ * *next* sweep's **报名** is reached from — so a `0` that settled the day would end the evening at
+ * the check-in and defer the re-join to a platform day that is too late (the defect of 2026-10-10;
+ * the doc above has the accounts). It reports `blocked` with `failure: 'none'` for that reason:
+ * `blocked` is deliberately not settled, so the sweep comes back and lands the join, and `none`
+ * keeps a run that did its work exactly as designed off the 动作受阻 feed — the same choice, and
+ * for the same reason, as the window gate below. `57004` is the other shape: the card was already
+ * there before this run looked and this run has cleared nothing, so the day's check-in obligation
+ * is done and `already` + `action_stop` is the fact.
  *
  * **The two verdicts that mean "not this run" sit next to each other here and must not be merged**:
  * this gate's `blocked` + `window_not_open` + `failure: 'none'` is *现在不能打*, and the receipt's
@@ -4907,8 +4932,11 @@ async function growthPoolCheckIn(key: string, token: string, dyCookie: string, n
 
   return accountOutcome(
     key,
-    'done',
-    '已打卡、瓜分结果 21:00 后开始结算、22:00 前发放（本次运行看不到数额）',
+    'blocked',
+    '已打卡、瓜分结果 21:00 后开始结算、22:00 前发放（本次运行看不到数额）；下一轮报名由下一次运行补上',
+    // The platform's own code, not a local one: the clock answered, and this row is the only
+    // record of what it said. A local code here would name our next step and drop the receipt,
+    // and the next step is already spelled out in the sentence above.
     String(receipt.code),
     'none'
   )

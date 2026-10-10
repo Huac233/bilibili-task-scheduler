@@ -17,6 +17,7 @@ import {
   FANSHOME_CSRF_COOKIE,
   FISH_BALL_ALREADY_CLAIMED,
   FISH_BALL_BALANCE_URL,
+  GROWTH_POOL_ALREADY_CLOCKED,
   GROWTH_POOL_CLOCK_URL,
   GROWTH_POOL_STATUS_URL,
   growthPoolJoinSchema,
@@ -1573,15 +1574,42 @@ describe('reconcile', () => {
       expect(joinGrowthPoolMock).not.toHaveBeenCalled()
     })
 
-    it('checks in once the window is open, and only then', async () => {
+    it('checks in once the window is open, and leaves the day unsettled for the half that follows', async () => {
       readGrowthPoolStatusMock.mockResolvedValue(inThisRound(1))
 
       const outcome = await poolRun(INSIDE_CLOCK_WINDOW)
 
       expect(clockGrowthPoolMock).toHaveBeenCalledWith(TOKEN, 'dy_cookie_value')
       expect(joinGrowthPoolMock).not.toHaveBeenCalled()
-      expect(outcome).toMatchObject({ outcome: 'done', code: '0', failure: 'none' })
+      // The clock half happened, so the sentence says so and names no failure…
+      expect(outcome.detail).toContain('已打卡')
       expect(outcome.detail).toContain('21:00')
+      expect(outcome.failure).toBe('none')
+      // …but the day is deliberately **not** settled. `done` here was the defect the owner hit on
+      // 2026-10-10: `runner.ts`'s `settledToday` reads it as the day being over, stops asking, and
+      // the 报名 that must follow the check-in is deferred to a platform day that is too late.
+      // One of the two unsettled values is what makes the next sweep come back and do it.
+      expect(outcome.outcome).not.toBe('done')
+      expect(outcome).not.toMatchObject({ outcome: 'already' })
+    })
+
+    it('takes 57004 as a day whose card is already in place, and writes nothing more', async () => {
+      readGrowthPoolStatusMock.mockResolvedValue(inThisRound(1))
+      clockGrowthPoolMock.mockResolvedValue(refused(GROWTH_POOL_ALREADY_CLOCKED, ''))
+
+      const outcome = await poolRun(INSIDE_CLOCK_WINDOW)
+
+      // Read as 今天已经打过卡 — never as an error, and never as a reason to re-attempt: the
+      // service has said this day's check-in is in place, and this run made no write at all.
+      expect(outcome).toMatchObject({
+        outcome: 'already',
+        code: String(GROWTH_POOL_ALREADY_CLOCKED),
+        failure: 'action_stop'
+      })
+      expect(outcome.detail).toContain('已打卡')
+      expect(outcome.detail).not.toContain('打卡失败')
+      expect(joinGrowthPoolMock).not.toHaveBeenCalled()
+      expect(clockGrowthPoolMock).toHaveBeenCalledTimes(1)
     })
 
     it('signs up when the latch says the account is not in this round, and reports the pool', async () => {

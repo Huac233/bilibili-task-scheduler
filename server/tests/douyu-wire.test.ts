@@ -468,7 +468,10 @@ describe('打卡分鱼丸 at the wire', () => {
     // The reply above names a field no version of this code knows. The run succeeds on the
     // code alone, which is what "the shape has never been captured, so do not depend on it"
     // has to mean in practice.
-    expect(outcome).toMatchObject({ outcome: 'done', code: '0', failure: 'none' })
+    expect(outcome).toMatchObject({ outcome: 'blocked', code: '0', failure: 'none' })
+    // `blocked` and not `done` is the check-in half of the day being left open: the code above *is*
+    // the clock's own success code, and the row is what tells the sweep to come back and land the
+    // 报名 that follows. Nothing here reads the reply's body — the field it carries is not named.
     expect(outcome.detail).not.toContain('nobodyHasModelledThis')
   })
 
@@ -546,6 +549,11 @@ describe('打卡分鱼丸 at the wire', () => {
   it('takes 57004 as today’s card already in place, and settles the day on it', async () => {
     // 2026-10-09 19:45 and 19:50, the owner's own runs: the check-in had landed at 19:00:20, the
     // latch still said 已报名, and `clockSignActivity` answered this — with an empty `msg`, twice.
+    // The same pair of runs is what a later round of the day looks like *after* the fix, when it
+    // gets that far: the check-in lands, the next sweep joins the new round, and the sweeps after
+    // the join read a latch of `1` and reach the clock half again. Either way the number means the
+    // same thing and settles the day; what changed is that it is no longer the only way an evening
+    // can end.
     script.poolStatus = { json: { error: 0, data: ALREADY_CLOCKED_STATE, msg: '' } }
     script.clock = { json: { error: GROWTH_POOL_ALREADY_CLOCKED, msg: '' } }
 
@@ -569,30 +577,99 @@ describe('打卡分鱼丸 at the wire', () => {
     expect(settledForTheDay(outcome, INSIDE_CLOCK_WINDOW)).toBe(true)
   })
 
-  it('re-offers 报名 on the next run, because the check-in clears the latch', async () => {
-    // The two-run design, at the wire and with tonight's own numbers. Run 1 finds the latch at `1`
-    // and checks in; run 2 reads the latch the service hands back after a check-in — `0`, with the
-    // new round's pool — and joins, which is the half that spends.
+  it('leaves the day UNSETTLED after a check-in, so a later sweep lands the next round’s 报名', async () => {
+    // The defect the owner reported on 2026-10-10, at the wire and with tonight's own numbers.
+    // 「到19:00打卡瓜分完就没有动作了 不会自动报名下一轮」 — and the loss is a real one: a sign-up
+    // makes the *next* day's window available, so a re-join deferred to the next platform day
+    // skips a whole day of check-in eligibility and the 200 鱼丸 paid for that round buys nothing.
+    //
+    // Three sweeps now, in the order the real ones run. Sweep 1 reads the latch at `1` and clocks.
+    // Sweep 2 — the very next one — reads the `0` the check-in left behind and joins. Sweep 3
+    // reads the `1` that join put back, finds the window shut, and writes nothing.
     script.poolStatus = { json: { error: 0, data: { ...BEFORE_CHECK_IN }, msg: '' } }
     script.clock = { json: { error: 0, data: { ywTotal: 78400, joinTotal: 392 }, msg: '' } }
 
-    const first = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
-    expect(first).toMatchObject({ outcome: 'done', code: '0' })
-    expect(first.detail).toContain('21:00')
+    const clocked = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
 
+    // The clock half did land, and the sentence says so — the record must not read as a failure
+    // for a run that checked the account in.
+    expect(clocked.detail).toContain('已打卡')
+    expect(clocked.detail).not.toContain('打卡失败')
+    expect(clocked.code).toBe('0')
+    // What it is *not* is settled. `done`, `already` and `skipped` are the three values
+    // `runner.ts`'s `settledToday` reads, and a settled row here is exactly the behaviour that
+    // stops the sweep for the rest of the day — after which the 报名 below never happens.
+    expect(clocked.outcome).not.toBe('done')
+    expect(clocked.outcome).not.toBe('already')
+    expect(clocked.outcome).not.toBe('skipped')
+    expect(settledForTheDay(clocked, INSIDE_CLOCK_WINDOW)).toBe(false)
+    // The clock landed on the wire, and the join did not: this run did one half.
+    expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    expect(sentTo(POOL_JOIN_PATH)).toHaveLength(0)
+
+    // The latch the check-in leaves behind, as the live probe of 2026-10-09 measured it.
     script.poolStatus = { json: { error: 0, data: { ...AFTER_CHECK_IN }, msg: '' } }
     script.join = { json: { error: 0, data: { ...AFTER_JOIN }, msg: '' } }
 
-    const second = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+    const joined = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
 
-    expect(second).toMatchObject({ outcome: 'done', code: '0' })
+    expect(joined).toMatchObject({ outcome: 'done', code: '0' })
     // The join reply's two counters reach exactly one sentence, and it names them 本场奖池 /
     // 人已报名: the night's own reads are what proved that pair is the pool and not a balance.
-    expect(second.detail).toContain('本场奖池')
-    expect(second.detail).toContain('78800')
-    // One half per run, which is the design rather than an accident: the second run joined
-    // without clocking again, because the latch it read is the only thing selecting the branch.
+    expect(joined.detail).toContain('本场奖池')
+    expect(joined.detail).toContain('78800')
+    // And this is what closes the day: the row the join writes is the settled one, so no later
+    // sweep asks about this action until the Platform's day rolls over.
+    expect(settledForTheDay(joined, INSIDE_CLOCK_WINDOW)).toBe(true)
     expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    expect(sentTo(POOL_JOIN_PATH)).toHaveLength(1)
+
+    // Sweep 3, on the state sweeps 1 and 2 left behind: the join put the latch back to `1`, so this
+    // run is registered for a new round and the only question is its window. Here it is not open
+    // yet — every sweep from the join until the next day's 19:00 looks exactly like this — so the
+    // run parks without a write and the round just entered is not clocked a day early.
+    script.poolStatus = { json: { error: 0, data: { ...BEFORE_CHECK_IN }, msg: '' } }
+
+    const parked = await outcomeOf([ActionKey.GrowthPool], BEFORE_WINDOW)
+
+    expect(parked).toMatchObject({ outcome: 'blocked', code: 'window_not_open', failure: 'none' })
+    expect(parked.detail).toContain('19:00–21:00')
+    expect(settledForTheDay(joined, INSIDE_CLOCK_WINDOW)).toBe(true)
+    expect(sentTo(POOL_CLOCK_PATH)).toHaveLength(1)
+    expect(sentTo(POOL_JOIN_PATH)).toHaveLength(1)
+  })
+
+  it('re-offers neither half after the re-join lands, because the join is what settles the day', async () => {
+    // The same three sweeps, with the settle question asked in the direction that costs money: a
+    // join is reachable *only* from a `0` latch, and the join itself is what turns the latch back
+    // into `1`. The join count is the assertion, so a design that could reach 报名 twice inside one
+    // round would have to show two join requests here.
+    script.poolStatus = { json: { error: 0, data: { ...BEFORE_CHECK_IN }, msg: '' } }
+    script.clock = { json: { error: 0, data: {}, msg: '' } }
+
+    const clocked = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+    expect(settledForTheDay(clocked, INSIDE_CLOCK_WINDOW)).toBe(false)
+
+    // Every read from here on reports the round the join entered — `1` — which is the state the
+    // service is in once 报名 has been accepted.
+    script.poolStatus = { json: { error: 0, data: { ...AFTER_CHECK_IN }, msg: '' } }
+    script.join = { json: { error: 0, data: { ...AFTER_JOIN }, msg: '' } }
+    const joined = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+    expect(joined.outcome).toBe('done')
+    expect(settledForTheDay(joined, INSIDE_CLOCK_WINDOW)).toBe(true)
+
+    // The late sweeps of that day, on the state the join created: the latch says 已报名 again — for
+    // the round just entered — so they reach the check-in half and the service answers 57004, which
+    // settles the day. This is the shape the owner's own 19:45 and 19:50 runs took, one round later.
+    script.poolStatus = { json: { error: 0, data: { ...ALREADY_CLOCKED_STATE }, msg: '' } }
+    script.clock = { json: { error: GROWTH_POOL_ALREADY_CLOCKED, msg: '' } }
+
+    const later = await outcomeOf([ActionKey.GrowthPool], INSIDE_CLOCK_WINDOW)
+
+    expect(later).toMatchObject({ outcome: 'already', failure: 'action_stop' })
+    expect(settledForTheDay(later, INSIDE_CLOCK_WINDOW)).toBe(true)
+    // One join for one round, whatever the sweep does afterwards: the join of the third round is
+    // not reachable from a `1` latch, and the row above is the day's own stop.
     expect(sentTo(POOL_JOIN_PATH)).toHaveLength(1)
   })
 

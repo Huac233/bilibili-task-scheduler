@@ -1067,7 +1067,10 @@ export async function signActivity(
  * it, and nothing says what it answers outside 19:00–21:00 — a window no run can ask from, because
  * `growthPoolCheckIn`'s own gate sits above the call. The reading that is safe under both of the
  * open possibilities is the adapter's: today's card is in place, so the run writes nothing and the
- * day is settled (see `growthPoolCheckIn`).
+ * day is settled (see `growthPoolCheckIn`). **That is no longer where the adapter's day ends when
+ * this call is the one that clocks, because the re-join for the next round follows on a later
+ * sweep** — so `57004` now answers the *later* sweeps of a day whose check-in has landed, and the
+ * equality measured above (`signStatus: 1`) still holds at each of them.
  */
 export const GROWTH_POOL_TOKEN_REJECTED = 10001
 export const GROWTH_POOL_CSRF_REJECTED = 152101
