@@ -134,10 +134,11 @@ curl -H "Authorization: Bearer bts_xxx" \
 | `task_went_live` | 检测到开播 |
 | `task_finished` | 发送窗口结束 |
 | `task_failed` | 任务因不可恢复的错误停止 |
+| `task_paused` | 任务自己暂停了：平台正在拒绝这个账号的写入，而这件事只有人能做主（目前只有斗鱼弹幕被禁言，`chatres` res 5）。任务停在「已暂停」，原因写在任务的 `lastError` 里；斗鱼解除禁言后在任务列表里按「恢复」，发送接着原来的进度走。不会自动恢复，也不会反复重试 |
 | `action_failed` | 日常动作失败，本轮其余动作照常继续 |
 | `action_blocked` | 日常动作被平台拒绝、因此停到明天（余额不足、账号没有网页会话等） |
 | `session_expired` | 登录失效或续期失败 |
-| `account_restricted` | 账号被平台限制：B 站的 `-403`，以及斗鱼弹幕被禁言（`chatres` res 5）。重新绑定不会解除；斗鱼解除后按「重置进度」再跑。房间级的拒绝仍走 `action_blocked` |
+| `account_restricted` | 账号被平台限制：B 站的 `-403`。重新绑定不会解除限制。房间级的拒绝仍走 `action_blocked` |
 | `other` | 服务端读到它不认识的 kind 时用它回答，消费方必须处理 |
 | `task_started` | 只声明，本版本不会发出 |
 | `task_sending_trouble` | 只声明，本版本不会发出 |

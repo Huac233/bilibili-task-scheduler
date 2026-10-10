@@ -1036,7 +1036,17 @@ export class Scheduler {
     detail: string,
     code: string,
     now: number
-  ): 'continuing' | 'fail' {
+  ): 'continuing' | 'fail' | 'pause' {
+    // A state a person has to end parks the Task instead of ending it — see `pauseTask`, and
+    // `FailureKind`'s `pause` member for why this is a grade of its own rather than one of the two
+    // account-level kinds below. This comes first because it is the one account-level verdict that must
+    // *not* fail the Task, and `isAccountStop` below cannot say so: it answers about the two kinds that
+    // end one.
+    if (failure === 'pause') {
+      this.pauseTask(task, detail, code, now)
+      return 'pause'
+    }
+
     if (isAccountStop(failure)) {
       this.failTask(task, detail, now)
       this.emitAccountStop(task, platform, failure, detail)
@@ -1078,9 +1088,14 @@ export class Scheduler {
    * A refusal is not swallowed. The log line below is the only trace a person's write and a sweep
    * crossing will leave, and the caller is told by the answer so it can stop short of whatever the
    * write was licensing — the send in `runSend`, the Platform run in `runReconcile`.
+   *
+   * `error` is the reason the row will display, and its only caller is `pauseTask`: the two writes that
+   * travel through here are `offline` and `running`, both of which *end* a reason rather than state one.
+   * It defaults to the empty string those two need, so the default is the whole of the existing
+   * behaviour and a caller that forgets it clears the reason instead of leaving a stale one.
    */
-  private writeStatusUnlessMoved(task: Task, status: TaskStatus, now: number): boolean {
-    const landed = updateTaskStatus(this.deps.db, task.id, status, '', now, task.status)
+  private writeStatusUnlessMoved(task: Task, status: TaskStatus, now: number, error = ''): boolean {
+    const landed = updateTaskStatus(this.deps.db, task.id, status, error, now, task.status)
     if (!landed) {
       this.log(`task ${String(task.id)}: status write to ${status} refused, the row is no longer ${task.status}`)
     }
@@ -1107,6 +1122,43 @@ export class Scheduler {
   private failTask(task: Task, reason: string, now: number): void {
     updateTaskStatus(this.deps.db, task.id, TaskStatus.Failed, reason, now)
     this.emitOnce(task, platformFor(task.platform), EventKind.TaskFailed, EventSeverity.Error, '任务失败', reason, now)
+  }
+
+  /**
+   * The one place a task pauses itself.
+   *
+   * The verdict is the Platform's and the remedy is a person's: an adapter grades `pause` where the
+   * account's writes are being refused for a condition nothing local can end or detect the end of —
+   * Douyu's `chatres` res 5 is the case it was added for. So the Task is parked in the state its own
+   * routes already offer a 恢复 button for, the Platform's sentence is kept as the reason on the row,
+   * and nothing here schedules a second attempt: a retry would repost the same refusal, and a timer
+   * would be a guess about when a condition reported by a bare code is over.
+   *
+   * **The reason is written with the state's own word in front of it.** `last_error` is rendered on the
+   * tasks screen beside an 「错误」 label and on the detail page inside a red alert, so the Platform's
+   * sentence alone would read there as a failure to be retried — the one reading this verdict exists to
+   * remove. 「已暂停：…」 is what makes the card and the tag agree with the status badge beside them, and
+   * it is the runner's half of the sentence rather than the adapter's: whether a Task paused is the
+   * scheduler's fact, and an adapter that spelled it would be describing a state it does not own.
+   *
+   * The write goes through `writeStatusUnlessMoved` for that method's reason — the pause a *person* asked
+   * for outranks the one this sweep decided — and the event only rides a write that landed, so a refusal
+   * puts nothing on the feed about a state the row is not in. Resuming clears the reason like any other
+   * status write (`updateTaskStatus` writes an empty `last_error`), so a resumed Task stops displaying it.
+   */
+  private pauseTask(task: Task, reason: string, code: string, now: number): void {
+    const detail = `已暂停：${reason}`
+    if (!this.writeStatusUnlessMoved(task, TaskStatus.Paused, now, detail)) return
+
+    this.emitOnce(
+      task,
+      platformFor(task.platform),
+      EventKind.TaskPaused,
+      EventSeverity.Warning,
+      '任务已暂停',
+      code === '' ? detail : `${detail}（${code}）`,
+      now
+    )
   }
 
   /**

@@ -19,7 +19,9 @@ import IntegrationsView from '../src/views/IntegrationsView.vue'
  * **The catalogue, spelled out.** `EVENT_KINDS` is `EventKind` as `server/src/repo/events.ts`
  * declares it, written here rather than read out of the app, because a mirror is what this asserts:
  * a kind added on the server fails this line, and that is the moment the checkbox list needs the
- * same edit. `other` is in it on purpose — the server labels a row from a newer build 「未知事件」,
+ * same edit. (`task_paused` is the last one to arrive that way — the scheduler pauses a Task itself
+ * when the Platform is refusing the account's writes and only a person can end that, which Douyu's
+ * 弹幕 mute is.) `other` is in it on purpose — the server labels a row from a newer build 「未知事件」,
  * so it is a kind the feed can carry and the owner can hide like any other.
  */
 const EVENT_KINDS = [
@@ -27,6 +29,7 @@ const EVENT_KINDS = [
   'task_went_live',
   'task_finished',
   'task_failed',
+  'task_paused',
   'task_sending_trouble',
   'action_failed',
   'action_blocked',

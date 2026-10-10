@@ -242,8 +242,36 @@ export interface ActionDescriptor {
  * `account_stop` sends someone to re-bind an account that is already bound, and reports
  * success when they do it. Adapters grade a credential problem `account_stop` and a
  * restriction `account_restricted`; nothing else separates the two.
+ *
+ * `pause` is the fourth account-level verdict, and the one where the *Task's own state* is
+ * the answer rather than a message: the Platform is refusing this account's writes for as
+ * long as a condition lasts, the condition is one **only a person can end**, and nothing
+ * local can tell when it has ended. Douyu's mute is what this member exists for — while
+ * one lasts every send is refused (so `retry` is hammering), and re-binding clears it no
+ * more than it clears a restriction (so `account_stop` names the wrong remedy twice over).
+ * The scheduler writes `TaskStatus.Paused` — the state its own routes already let a person
+ * resume — records the Platform's sentence as the reason, and stops; it builds no retry
+ * and no timer, because a schedule for re-testing a condition reported by a bare code
+ * would be a guess wearing a policy's clothes. An adapter grades this kind only where
+ * resuming really is the whole of the remedy.
  */
-export type FailureKind = 'none' | 'retry' | 'action_stop' | 'account_stop' | 'account_restricted'
+export type FailureKind = 'none' | 'retry' | 'action_stop' | 'account_stop' | 'account_restricted' | 'pause'
+
+/**
+ * `FailureKind` less `pause` — the grades a verdict can carry **where there is no Task to park**.
+ *
+ * `pause` is a member of the union and not of this one because the two answer different questions.
+ * `FailureKind` is what an adapter grades a verdict with; this is what the shapes a verdict is carried
+ * *in* can hold, and two of them have no Task that a pause could move. A `ProbeResult` is a read about
+ * a Room, asked by a sweep that has not decided to act yet; an `ActionOutcome` is one action inside a
+ * reconcile run, written to `action_logs` before the runner decides anything about the Task and settled
+ * for the day either way. A Platform whose probe or chore meets a state a person has to end has the
+ * vocabulary to say so precisely (`action_stop` parks the day, `account_restricted` fails the Task and
+ * names the remedy) — what it must not do is answer `pause` there, because nothing would happen, and a
+ * grade that changes no state is worse than one that changes the wrong state: it reads as a policy
+ * where there is none. The `send` path, which does have a Task to park, is where the member is spent.
+ */
+export type ActionFailureKind = Exclude<FailureKind, 'pause'>
 
 export interface SendOutcome {
   readonly ok: boolean
@@ -285,7 +313,15 @@ export interface ActionItem {
   readonly code: string
 }
 
-/** One action's result inside a reconcile run. */
+/**
+ * One action's result inside a reconcile run.
+ *
+ * `failure` is `ActionFailureKind` rather than the whole union, and the one member that leaves is
+ * `pause`: it is a verdict only the `send` executor can act on, because this shape has no Task to park —
+ * see `ActionFailureKind` for why that is a fact about the door rather than a preference. So the member
+ * is excluded at the type level rather than left for an adapter author to discover by watching a
+ * reconcile action answer `pause` and nothing happen.
+ */
 export interface ActionOutcome {
   readonly actionKey: string
   /** The Room or account the action was aimed at; empty for account-scoped ones. */
@@ -293,7 +329,7 @@ export interface ActionOutcome {
   readonly outcome: ActionOutcomeValue
   readonly detail: string
   readonly code: string
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
   /**
    * What this action was about, one entry per thing it touched.
    *
@@ -394,7 +430,7 @@ export interface ProbeResult {
   readonly title: string
   readonly code: string
   readonly detail: string
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
 }
 
 export interface ReconcileContext {

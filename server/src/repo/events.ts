@@ -24,6 +24,16 @@ export const EventKind = {
   TaskFinished: 'task_finished',
   /** A task stopped because of an unrecoverable error. */
   TaskFailed: 'task_failed',
+  /**
+   * A task paused itself, because the Platform is refusing this account's writes for a condition only a
+   * person can end.
+   *
+   * Douyu's 弹幕 mute is the case this was added for, and the difference from `TaskFailed` is the whole
+   * point: a failed task is over until somebody resets it, while this one is waiting for a 恢复 that the
+   * person is being asked for. The Task's own row carries the same fact as the reason it is paused; this
+   * kind is what puts it on the feed a notification bridge reads, so a silent stop is not one.
+   */
+  TaskPaused: 'task_paused',
   /** Sending hit a run of failures — usually rate limiting or content filtering. */
   TaskSendingTrouble: 'task_sending_trouble',
   /** A reconcile action reported a failure; the run continued. */

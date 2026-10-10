@@ -6,8 +6,8 @@ import { platformFor, registerPlatform } from '../src/platform/registry.js'
 import { dayKeyOf } from '../src/platform/time.js'
 import type {
   ActionDescriptor,
+  ActionFailureKind,
   ActionOutcome,
-  FailureKind,
   ProbeResult,
   ReconcileContext,
   RefreshResult,
@@ -15,6 +15,7 @@ import type {
 } from '../src/platform/types.js'
 import { listAccountsByPlatform } from '../src/repo/accounts.js'
 import { appendActionLog } from '../src/repo/action-logs.js'
+import { EventKind } from '../src/repo/events.js'
 import { listSendLogs } from '../src/repo/send-logs.js'
 import { TaskAction, TaskStatus } from '../src/repo/tasks.js'
 import { Scheduler } from '../src/scheduler/runner.js'
@@ -123,7 +124,7 @@ function liveProbe(liveStatus: number): ProbeResult {
   return { ok: true, liveStatus, title: '', code: '0', detail: '', failure: 'none' }
 }
 
-function failedProbe(code: string, detail: string, failure: FailureKind): ProbeResult {
+function failedProbe(code: string, detail: string, failure: ActionFailureKind): ProbeResult {
   return { ok: false, liveStatus: 0, title: '', code, detail, failure }
 }
 
@@ -167,8 +168,14 @@ function hangingProbe(): HangingProbe {
   }
 }
 
-/** A plan that answers the same way for every action it is asked about. */
-function planOf(outcome: ActionOutcome['outcome'], failure: FailureKind = 'none') {
+/**
+ * A plan that answers the same way for every action it is asked about.
+ *
+ * `failure` is `ActionFailureKind`, not the whole union: a reconcile outcome has no Task to park, so
+ * `pause` is not a grade this shape can carry — which is why the pause cases below drive the *send*
+ * path, where a Task really is parked.
+ */
+function planOf(outcome: ActionOutcome['outcome'], failure: ActionFailureKind = 'none') {
   return (context: ReconcileContext): Promise<ActionOutcome[]> =>
     Promise.resolve(
       context.enabledActions.map(actionKey => ({
@@ -1283,6 +1290,98 @@ describe('account-level failures', () => {
     expect(statusOf(desk, taskId)).toBe(TaskStatus.Failed)
     expect(eventCount(desk, 'account_restricted')).toBe(1)
     expect(eventCount(desk, 'session_expired')).toBe(0)
+  })
+})
+
+/**
+ * The third account-level verdict: a state the Platform is refusing the account's writes for, which a
+ * **person** has to end.
+ *
+ * The two kinds above are one report each — one ends the Task, one tells somebody to re-bind — and this
+ * one is neither. Douyu's `chatres` res 5 is the case: while a mute lasts every send is refused (so
+ * retrying is hammering), nothing local can tell when it is lifted (so an automatic resume would be a
+ * guess), and re-binding is not a remedy for it. The Task therefore **pauses** — the state a person
+ * already has a 恢复 button for — and says why.
+ *
+ * What these cases pin: the status, the sentence left on the row, the event, and the quiet after it.
+ */
+describe('an account-level state a person has to end', () => {
+  it('pauses the task, records why, and stops sending into it', async ({ desk }) => {
+    const { scheduler } = sweeping(desk)
+    const taskId = await makeTask(desk)
+    stub.sendPlan = async () => ({
+      ok: false,
+      code: '5',
+      detail: '被禁言（res=5）：斗鱼把账号禁言了，禁言期间每一条弹幕都会被拒。',
+      failure: 'pause'
+    })
+
+    await scheduler.tick(Date.now())
+
+    // The row a person looks at: paused, with the reason, and not failed.
+    expect(statusOf(desk, taskId)).toBe(TaskStatus.Paused)
+
+    const row = desk.server.ctx.db.prepare('SELECT status, last_error FROM tasks WHERE id = ?').get(taskId)
+    expect(row?.['status']).toBe(TaskStatus.Paused)
+    // The state is stated in the row's own words as well as the Platform's, because this field is
+    // rendered beside an 「错误」 label on the list and beside a red alert on the detail page: a
+    // sentence that only said 「被禁言」 there would read as a failure to be retried.
+    expect(String(row?.['last_error'])).toContain('已暂停')
+    expect(String(row?.['last_error'])).toContain('被禁言')
+
+    // The feed carries it as a pause, and nothing about it as a session.
+    expect(eventCount(desk, EventKind.TaskPaused)).toBe(1)
+    expect(eventCount(desk, 'task_failed')).toBe(0)
+    expect(eventCount(desk, 'session_expired')).toBe(0)
+    expect(eventCount(desk, 'account_restricted')).toBe(0)
+
+    const event = desk.server.ctx.db
+      .prepare('SELECT title, detail FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1')
+      .get(EventKind.TaskPaused)
+    expect(event?.['title']).toBe('任务已暂停')
+    expect(String(event?.['detail'])).toContain('被禁言')
+
+    // The attempt itself is on the record: the refusal is one send log, and the send did happen.
+    expect(stub.sendCalls).toBe(1)
+
+    // **Nothing sends after that.** `paused` is outside the sweep's set, so three more sweeps must not
+    // reach the Platform again — the point of pausing rather than retrying is exactly this quiet.
+    await scheduler.tick(Date.now())
+    await scheduler.tick(Date.now())
+    await scheduler.tick(Date.now())
+
+    expect(stub.sendCalls).toBe(1)
+    expect(stub.probeCalls).toBe(1)
+    expect(statusOf(desk, taskId)).toBe(TaskStatus.Paused)
+  })
+
+  it('raises the pause once, not once per sweep', async ({ desk }) => {
+    // The suppression window is keyed by (user, kind, task), so this also pins that the pause is a kind
+    // of its own: folding it into `task_failed` would put the failure's own thirty-minute rule on it and
+    // a second mute inside the window would go to the feed silently.
+    const { scheduler } = sweeping(desk)
+    const taskId = await makeTask(desk)
+    stub.sendPlan = async () => ({ ok: false, code: '5', detail: '被禁言（res=5）', failure: 'pause' })
+
+    await scheduler.tick(Date.now())
+    await scheduler.tick(Date.now())
+
+    expect(eventCount(desk, EventKind.TaskPaused)).toBe(1)
+    expect(statusOf(desk, taskId)).toBe(TaskStatus.Paused)
+  })
+
+  it('still fails a Task whose account the Platform refused outright', async ({ desk }) => {
+    // The direction that is easy to lose when a new kind is added beside the two that end a Task: a
+    // restriction is still a failure, and its own event still says re-binding is not the remedy.
+    const { scheduler } = sweeping(desk)
+    const taskId = await makeTask(desk)
+    stub.sendPlan = async () => ({ ok: false, code: '-403', detail: '账号被封禁', failure: 'account_restricted' })
+
+    await scheduler.tick(Date.now())
+
+    expect(statusOf(desk, taskId)).toBe(TaskStatus.Failed)
+    expect(eventCount(desk, 'account_restricted')).toBe(1)
+    expect(eventCount(desk, EventKind.TaskPaused)).toBe(0)
   })
 })
 

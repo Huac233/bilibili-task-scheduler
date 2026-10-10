@@ -15,7 +15,9 @@ import {
  * One reconcile run's actions, with what each of them got done.
  *
  * **The facts lead.** A row is the action's name and then what happened today, in as few
- * words as the thing takes — 「客户端签到 连签 7 天」, 「鱼吧签到 · 主版块 等级分 +3」. The
+ * words as the thing takes — 「客户端签到 连签 7 天」, 「鱼吧签到 · 主版块 等级分 +3」 (that last one
+ * is a *measured* per-sign EXP, the only reading the 鱼吧 walk prints that way — the other sign path's
+ * number has no established meaning and the adapter prints none of it). The
  * record's own `detail` used to be *every* row's text, and it said the same thing three times
  * over: the action's name appeared both as the row's label and inside the sentence, the
  * sentence ended 「…，本日已完成」 under a heading that had already said so, and the tag beside

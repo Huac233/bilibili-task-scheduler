@@ -628,10 +628,11 @@ describe('send', () => {
     expect(outcome.detail).toContain('URL')
   })
 
-  it('grades res=5 as a mute of the account, and stops rather than retrying it', async () => {
-    // The socket's own words for this code, and the classification it answers with: the account-level
-    // stop. What this test pins is the grade and the sentence the *seam* consumes, which are a member
-    // `ErrorClassification` does not have — `account_restricted`, because re-binding cannot clear a mute.
+  it('grades res=5 as a mute that pauses the task, never as something to retry or re-bind', async () => {
+    // The socket's own words for this code. What this test pins is the grade and the sentence the
+    // *seam* consumes, and neither is `retry`: a mute refuses every send for as long as it lasts, so a
+    // retry reposts the same refusal. The grade is `pause` — the runner pauses the Task and leaves it
+    // until a person resumes it, because nothing local can tell when Douyu lifts one.
     sendDanmakuMock.mockResolvedValue(
       refused(
         DANMAKU_MUTED,
@@ -641,10 +642,20 @@ describe('send', () => {
     )
     const outcome = await douyuPlatform.send(account(), '12306', 'x')
 
-    expect(outcome).toMatchObject({ ok: false, code: String(DANMAKU_MUTED), failure: 'account_restricted' })
+    expect(outcome).toMatchObject({ ok: false, code: String(DANMAKU_MUTED), failure: 'pause' })
     expect(outcome.detail).toContain('被禁言')
-    expect(outcome.detail).toContain('重新绑定')
-    expect(outcome.detail).toContain('重置进度')
+    // The state, what it does to the run, and the one move that starts it again.
+    expect(outcome.detail).toContain('暂停')
+    expect(outcome.detail).toContain('恢复')
+    // **Re-binding is never asked for**, which is the whole reason this verdict is not `account_stop`:
+    // no credential clears a mute. Naming it in order to rule it out is allowed and is what the
+    // sentence does; asking for it is not.
+    expect(outcome.detail).not.toContain('请重新绑定')
+    expect(outcome.detail).not.toContain('需要重新绑定')
+    // And 「重置进度」 is not it either: the Task is paused rather than failed, so the button a person
+    // needs is 恢复, and pointing at the reset next to a state it cannot start would send them to the
+    // wrong one.
+    expect(outcome.detail).not.toContain('重置进度')
   })
 
   it.each([401000206, 1002, 999999])('grades %i as account_stop', async code => {
@@ -1138,6 +1149,27 @@ describe('reconcile', () => {
   })
 
   describe('yuba_sign', () => {
+    it('never prints the fastSign number as an increment: its meaning is unmeasured', async () => {
+      listFollowedGroupsMock.mockResolvedValue({ ok: true, code: 200, data: [group('1', '主版块')] })
+      // The one new-sign reading of this call on record: board 历史 answered `data: 24`, and a single
+      // sign cannot be worth an EXP of 24 — board 11254805's twin reported 3 for the sign it placed, and
+      // Douyu's own published table for it is 3–5 a day. What this call's number means is **not measured**.
+      signGroupAndroidMock.mockResolvedValue({ ok: true, code: 200, data: 24 })
+
+      const { outcomes, logs } = await reconcileWith([ActionKey.YubaSign])
+      const outcome = outcomeOf(outcomes, ActionKey.YubaSign)
+
+      expect(outcome).toMatchObject({ outcome: 'done', failure: 'none' })
+      // The sign did happen, and that is what is reported — with no number printed as though the call
+      // had earned it.
+      expect(logs[0]).toContain('签到成功')
+      expect(logs[0]).not.toContain('等级分')
+      expect(logs[0]).not.toContain('24')
+      expect(outcome.items[0]).toMatchObject({ kind: 'group', label: '主版块', outcome: 'done', code: '200' })
+      expect(outcome.items[0]?.detail).not.toContain('等级分')
+      expect(outcome.items[0]?.detail).not.toContain('24')
+    })
+
     it('attempts every followed group and aggregates them into one outcome', async () => {
       listFollowedGroupsMock.mockResolvedValue({
         ok: true,
@@ -1185,6 +1217,10 @@ describe('reconcile', () => {
       expect(signGroupPcMock).toHaveBeenCalledTimes(1)
       expect(outcome).toMatchObject({ outcome: 'done', failure: 'none' })
       expect(outcome.detail).toContain('新签 1')
+      // **This is the measured number, and it stays exactly as it was.** `addLevelScore` is the EXP the
+      // twin's sign added — board 11254805 answered 3 for the sign it placed, and a later read of the
+      // same board answered 4, both inside Douyu's own published table for it — so it is the one place a
+      // level score may be printed as an increment.
       expect(outcome.items).toEqual([
         { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +5', code: '200' }
       ])
@@ -1193,6 +1229,7 @@ describe('reconcile', () => {
       // 0.2 s later by this call signing that same board (200, `addLevelScore` 3).
       expect(logs).toHaveLength(1)
       expect(logs[0]).toContain('PC 端点')
+      expect(logs[0]).toContain('等级分 +5')
     })
 
     it('does not settle a day on a fastSign zero that the PC twin answers with a score of zero', async () => {
@@ -1857,7 +1894,7 @@ describe('reconcile', () => {
       const outcome = outcomeOf((await reconcileWith([ActionKey.YubaSign])).outcomes, ActionKey.YubaSign)
 
       expect(outcome.items).toEqual([
-        { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +3', code: '200' },
+        { kind: 'group', label: '主版块', outcome: 'done', detail: '签到成功', code: '200' },
         { kind: 'group', label: '安卓版块', outcome: 'already', detail: '已签', code: String(YUBA_ALREADY_SIGNED) },
         {
           kind: 'group',
@@ -1881,7 +1918,7 @@ describe('reconcile', () => {
       // "新签 1、失败 1" is not the last thing a person can learn from the database.
       expect(outcome).toMatchObject({ outcome: 'failed', failure: 'account_stop' })
       expect(outcome.items).toEqual([
-        { kind: 'group', label: '主版块', outcome: 'done', detail: '等级分 +3', code: '200' },
+        { kind: 'group', label: '主版块', outcome: 'done', detail: '签到成功', code: '200' },
         { kind: 'group', label: '鱼吧 2', outcome: 'failed', detail: '用户未登陆或token已过期', code: '1002' }
       ])
     })

@@ -711,7 +711,18 @@ export async function listFollowedGroups(
 }
 
 export interface YubaSignOutcome {
-  /** 本次获得的鱼吧等级分 — not 鱼丸. The two twins answer it inside different envelopes. */
+  /**
+   * The level score **the PC twin's `200` answered as `addLevelScore`** — the EXP the sign that call
+   * placed added. This is the measured half of the pair: board 11254805's `200` answered 3, later reads
+   * of that same board answered 4, and both sit inside Douyu's published table for it (连续签到 1天 +3,
+   * 2天 +4, 10天 +4, 20天 +4, 30天 +5) — so it may be printed as an increment.
+   *
+   * **It is not, and must not be, the `fastSign` envelope's number.** That number travels as that
+   * function's own `DouyuResult<number>` data and has never been shown to be an amount this call earned
+   * — see `signGroupAndroid`, whose reading of a positive value is "a sign was placed" and nothing about
+   * its size. Reading either number as the other's quantity is the defect this field's documentation
+   * exists to prevent.
+   */
   readonly levelScore: number
   /**
    * Whether the PC twin answered its already-signed verdict, `status_code: 1001`, and nothing else.
@@ -728,32 +739,41 @@ export interface YubaSignOutcome {
 }
 
 /**
- * `POST mapi-yuba/wb/v3/fastSign` — the level score the envelope carries, and a `0` that is measured
- * to mean **this call placed no sign**.
+ * `POST mapi-yuba/wb/v3/fastSign` — the number its envelope carries, with a `0` that is measured to
+ * mean **this call placed no sign**.
  *
- * `data` is `levelScore`, and the `0` is no longer an open question. 2026-10-10, board 11254805
- * (「Drop」, followed that morning): this call answered `{"data":0,"status_code":200}`, and 0.2 s later
- * the PC twin **signed that same board** and reported the `3` level points it added (see
- * `signGroupPc`). So the `0` left the day open — the board was unsigned when this call answered — and
- * the day's signature could only come from the twin. The reading this file used to carry, a `0` as
- * 已签, is refuted by that same sequence: a board whose sign is already in has nothing for the twin to
- * sign, and the twin refuses in exactly that case with its `1001`.
+ * **The `0` is measured, and the number's meaning is not.** 2026-10-10, board 11254805 (「Drop」,
+ * followed that morning): this call answered `{"data":0,"status_code":200}`, and 0.2 s later the PC twin
+ * **signed that same board** and reported the `3` level points it added (see `signGroupPc`). So the `0`
+ * left the day open — the board was unsigned when this call answered — and the day's signature could
+ * only come from the twin. The reading this file used to carry, a `0` as 已签, is refuted by that same
+ * sequence: a board whose sign is already in has nothing for the twin to sign, and the twin refuses in
+ * exactly that case with its `1001`.
  *
- * The three `0`s measured before that — 2026-10-10, groups 7366311 (twice, the second a repeat) and
+ * The three other `0`s measured on 2026-10-10 — groups 7366311 (twice, the second a repeat) and
  * 6672975 (once) — settled nothing by themselves, because nothing established those boards' states;
- * they stay on record as what they are, three calls that answered `0`. The one new-sign score on record
- * is still `24` (group 历史, an `action_logs` row of 2026-10-09).
+ * they stay on record as what they are, three calls that answered `0`.
  *
- * So the walk reads a positive score as a sign this call made, and puts a `0` to the PC twin, where the
- * day's two answers live: a `200` with a positive score is the sign it placed, and its `1001` is "today
- * is already in". This stays the first call for two reasons: it needs no `Referer`, and the walk has
- * always made it first, so a positive score from it is a known sign.
+ * **What a positive value is, and what it is not.** One is on record: group 历史 answered `24`, an
+ * `action_logs` row of 2026-10-09. Nothing establishes what 24 counts — a per-sign EXP of 24 for one
+ * board is not credible, since Douyu's own published table for board 11254805 gives 3–5 a day and the
+ * twin reported 3 for the sign it placed — so the size of this number stays **unmeasured**, and no
+ * caller may print it as an amount this sign earned. Its positive-ness is a different claim, and it is
+ * the one the walk reads: a positive value is a sign this call made, which is also what the maintained
+ * third-party implementation this endpoint's shape was reconstructed from concludes (its own `data == 0`
+ * is read there as 「没有7级以上的鱼吧或极速签到已完成」, evidence of its author's reading rather than a
+ * measurement of the service). The numbers 0 and 24 are what is on record; what the field is *called* is
+ * not evidence of what it means.
+ *
+ * So the walk reads a positive number as a sign this call made, prints no number from it, and puts a `0`
+ * to the PC twin, where the day's two answers live: a `200` with a positive score is the sign it placed,
+ * and its `1001` is "today is already in". This stays the first call for two reasons: it needs no
+ * `Referer`, and the walk has always made it first, so a positive answer from it is a known sign.
  *
  * **What is not measured, and may not be read into the above.** One board, one call, one moment: that a
  * `0` accompanies "nothing signed" is measured exactly once. Whether `0` also encodes something else —
- * a threshold, say — is not measured here at all: the maintained third-party implementation this
- * endpoint's shape was reconstructed from reads its own `data == 0` as 「没有7级以上的鱼吧或极速签到
- * 已完成」, and that is evidence of its author's reading rather than a measurement of the service. And
+ * a threshold, say, the reading the third-party implementation above gives it — is not measured here at
+ * all, and neither is what any positive value counts. And
  * the two calls of 2026-10-10 kept no raw bytes (the probe recorded the parsed verdicts beside the HTTP
  * statuses), so what is on record for them is `status_code` 200 with `data` 0 and `addLevelScore` 3 —
  * not a body.
@@ -820,7 +840,9 @@ const yubaTopicSignDataSchema = z.object({ addLevelScore: counter.optional() })
  * The walk reads a `200` with a positive `addLevelScore` as a sign performed, and a `200` without a
  * positive score as unsettled. That whole sentence was the conservative reading while only the `1001`
  * half had been measured; its first half now has one sample behind it (above) and its second half still
- * has none.
+ * has none. **The positive score is printed, and it is the only one in this file that may be**: it is
+ * the EXP this call earned, and it is the number the owner's own table matched — whereas `fastSign`'s
+ * number is not, and `signGroupAndroid` says so.
  *
  * There is no read-back that verifies a sign. On 2026-10-10 board 11254805's `myFollow` `is_signed` and
  * its group page's `isSigned` both read 0 in every read that bracketed the sign the twin placed, and

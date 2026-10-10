@@ -81,12 +81,12 @@ export const DANMAKU_CONTENT_RULE = 356
  *
  * **`5` is the entry whose grade is not one word, and saying so here is the point of the entry.** What a
  * caller must do about a mute is stop, and `ErrorClassification` has one member for "the account":
- * `account_stop`. What a person must be *told* is a different member of a different union —
- * `FailureKind.account_restricted`, which `account_stop` is not — because re-binding cannot clear a mute
- * and telling someone to re-bind is how a restriction gets reported with the remedy that cannot help
- * (`platform/types.ts` states that rule, and `runner.ts`'s `emitAccountStop` is where it reaches a
- * person). The sentence is therefore the adapter's to give: `gradeDanmaku` reads this code and answers
- * `account_restricted`. Nothing but the verdict family is being decided here.
+ * `account_stop`. What the Task must then *do* is a member of the seam's other union —
+ * `FailureKind.pause`, which `account_stop` is not — because a mute is lifted by Douyu and resumed by a
+ * person, not cleared by a re-bind and not ended by anything this program can do or watch for
+ * (`platform/types.ts` states the rule; `runner.ts`'s `pauseTask` is where it reaches the Task). The
+ * sentence is therefore the adapter's to give: `gradeDanmaku` reads this code and answers `pause`.
+ * Nothing but the verdict family is being decided here.
  */
 function classifySocketError(code: number): ErrorClassification {
   if (code === DANMAKU_CONTENT_RULE) return 'action_stop'

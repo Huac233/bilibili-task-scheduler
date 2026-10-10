@@ -45,6 +45,7 @@ import { roomIdOf } from '../room.js'
 import { TargetRefusal, TargetRefusalKind } from '../target.js'
 import {
   type ActionDescriptor,
+  type ActionFailureKind,
   type ActionItem,
   type ActionOutcome,
   type ActionOutcomeValue,
@@ -1625,7 +1626,7 @@ function markUnconfirmed(
   failures: Map<number, MedalFailure>,
   code: string,
   detail: string,
-  classification: FailureKind
+  classification: ActionFailureKind
 ): void {
   for (const subject of toLight) {
     if (failures.has(subject.anchorId)) continue
@@ -1653,7 +1654,7 @@ interface MedalFailure {
   readonly label: string
   readonly code: string
   readonly detail: string
-  readonly classification: FailureKind
+  readonly classification: ActionFailureKind
 }
 
 /**
@@ -1923,7 +1924,7 @@ type ReadyGate = Extract<LikeGate, { readonly allowed: true }>
 type LikeReading =
   | { readonly kind: 'ready'; readonly gate: ReadyGate; readonly task: MedalTask }
   | { readonly kind: 'refused'; readonly refusal: LikeRefusal; readonly detail: string }
-  | { readonly kind: 'unreadable'; readonly code: string; readonly detail: string; readonly failure: FailureKind }
+  | { readonly kind: 'unreadable'; readonly code: string; readonly detail: string; readonly failure: ActionFailureKind }
 
 async function readLike(http: BiliHttp, csrf: string, roomId: number, anchorId: number): Promise<LikeReading> {
   const panelRead = await readGraded('读取粉丝牌任务', () => fetchMedalTasks(http, csrf, anchorId))
@@ -2032,11 +2033,14 @@ const TARGET_KEY_ACCOUNT_SCOPED = ''
  * Worst-first, so a walk reports the failure that matters most.
  *
  * `none` is not a kind a `MedalFailure` carries; it is here so the table can name every member of
- * `FailureKind` and adding one to that union is a compile error here until it is ranked. Douyu's
+ * `ActionFailureKind` and adding one to that union is a compile error here until it is ranked. It is
+ * `ActionFailureKind` and not the whole `FailureKind` because a reconcile outcome is written to
+ * `action_logs` before the runner decides anything, so `pause` — the one member the *send* path spends —
+ * cannot arrive here and would have no rank to be given. Douyu's
  * adapter keeps its own copy of this ranking over its own `ErrorClassification`, for the reason the
  * two adapters keep separate outcome builders: the values are different vocabularies.
  */
-const FAILURE_RANK: Readonly<Record<FailureKind, number>> = {
+const FAILURE_RANK: Readonly<Record<ActionFailureKind, number>> = {
   none: 0,
   retry: 1,
   action_stop: 2,
@@ -2073,7 +2077,7 @@ function roomOutcome(
   outcome: ActionOutcomeValue,
   detail: string,
   code: string,
-  failure: FailureKind
+  failure: ActionFailureKind
 ): ActionOutcome {
   return {
     actionKey,
@@ -2103,7 +2107,7 @@ function accountOutcome(
   outcome: ActionOutcomeValue,
   detail: string,
   code: string,
-  failure: FailureKind
+  failure: ActionFailureKind
 ): ActionOutcome {
   return {
     actionKey,
@@ -2164,7 +2168,10 @@ function blockedOutcome(actionKey: string, targetKey: string, code: string, deta
  * its debug section.
  */
 const LIKE_REFUSAL_REPORT: Readonly<
-  Record<LikeRefusal, { readonly outcome: ActionOutcomeValue; readonly failure: FailureKind; readonly detail: string }>
+  Record<
+    LikeRefusal,
+    { readonly outcome: ActionOutcomeValue; readonly failure: ActionFailureKind; readonly detail: string }
+  >
 > = {
   [LikeRefusal.NotLoggedIn]: {
     outcome: 'failed',
@@ -2299,7 +2306,7 @@ async function refresh(account: PlatformAccount): Promise<RefreshResult> {
  * caller not to read it. Reporting anything else would be the same invention as the
  * substring match.
  */
-function probeFailure(code: string, detail: string, failure: FailureKind): ProbeResult {
+function probeFailure(code: string, detail: string, failure: ActionFailureKind): ProbeResult {
   return { ok: false, liveStatus: LIVE_STATUS_OFFLINE, title: '', code, detail, failure }
 }
 

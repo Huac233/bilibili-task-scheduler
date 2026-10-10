@@ -14,6 +14,7 @@ import { TargetRefusal, TargetRefusalKind } from '../target.js'
 import { DAY_TIME_ZONE, withinLocalWindow } from '../time.js'
 import {
   type ActionDescriptor,
+  type ActionFailureKind,
   type ActionItem,
   type ActionOutcome,
   type ActionOutcomeValue,
@@ -1277,29 +1278,33 @@ async function send(account: PlatformAccount, targetKey: string, text: string): 
  * repeats it forever — and a novel imported with URLs, hashes, ids or base64 in it
  * will hit it.
  *
- * **`res=5` is the one verdict here that is about the account rather than the message, and it is
- * graded `account_restricted` rather than parked or retried.** A mute refuses *every* send for as long
- * as it lasts, so the two answers around this one are both wrong in their own way: `retry` reposts a
- * refusal the service has already given (this file's own reason for parking 356, and worse here,
- * because no rewrite of the text can help), and `action_stop` reaches a person as 动作受阻 while the
- * send loop carries on unchanged — `runner.ts`'s `applyFailure` only raises the event and writes
- * `last_error` for that grade, so the Task would keep posting into a mute. `account_restricted` is the
- * seam's word for the state that is actually true: the platform is refusing this account's writes, and
- * **re-binding cannot clear it** — the remedy `account_stop` would name. So the Task stops
- * (`applyFailure` fails it) and `emitAccountStop` tells the person the state in these words.
+ * **`res=5` is the one verdict here that is about the account rather than the message, and it is graded
+ * `pause` rather than parked, retried or failed.** A mute refuses *every* send for as long as it lasts,
+ * so the three answers around this one are each wrong in their own way: `retry` reposts a refusal the
+ * service has already given (this file's own reason for parking 356, and worse here, because no rewrite
+ * of the text can help), `action_stop` reaches a person as 动作受阻 while the send loop carries on
+ * unchanged — `runner.ts`'s `applyFailure` only raises the event and writes `last_error` for that grade,
+ * so the Task would keep posting into a mute — and `account_restricted` fails the Task, which ends it and
+ * makes the person press 重置进度 after Douyu lifts the mute, whereas the state it is really in is 「等
+ * 我来恢复」. `pause` says exactly that: `runner.ts` parks the Task in the state its own routes already
+ * offer a 恢复 button for, keeps this sentence as the reason on the row, and stops. **Nothing re-probes a
+ * mute** — the only thing that could tell whether one has been lifted is another send, and sending into
+ * a mute is the thing being avoided — so resuming it is a person's move, and that is what the sentence
+ * below asks for. The owner chose that over a timer: a long-backoff retry would repost into the mute
+ * until it happened to be lifted, which is the hammering this whole verdict exists to stop.
  *
  * Two consequences worth stating, because neither is obvious from the grade:
  *
- *  - **Nothing re-probes a mute.** The only thing that could tell whether one has been lifted is
- *    another send, and this grade stops sending; so the Task stays failed until a person presses
- *    重置进度 on it after Douyu lifts the mute. That is the deliberate half — the alternative is a
- *    task that posts into a mute for as long as it lasts — and it is what the sentence below tells
- *    the person to do.
- *  - **The evidence is the owner's report, not a capture.** No refusal frame with this code exists in
- *    this repository (`socket.ts`'s `DANMAKU_MUTED` says which numbers the captures do hold), and what
- *    that leaves unverified is whether one mute covers the whole account or a single room. No answer
- *    here depends on it: the danmaku of this Task's room are refused either way, and a room-wide mute
- *    stops them for the same reason an account-wide one does.
+ *  - **Resuming is the remedy, and 重置进度 is not part of it.** The Task is paused, not failed, so it
+ *    keeps its cursor and its window: Douyu lifting the mute and the person pressing 恢复 is the whole
+ *    sequence. (The old sentence sent them to 重置进度 because `account_restricted` had failed the row.)
+ *  - **The evidence is the owner's report, not a capture — at the same level as before this change.**
+ *    No refusal frame with this code exists in this repository (`socket.ts`'s `DANMAKU_MUTED` says which
+ *    numbers the captures do hold), and what that leaves unverified is whether one mute covers the whole
+ *    account or a single room. No answer here depends on it: the danmaku of this Task's room are refused
+ *    either way, and a room-wide mute stops them for the same reason an account-wide one does. This is
+ *    also the whole sample there is: the code has never been seen by anything but the owner's own
+ *    account, one report, and nothing in this file may be read as more than that.
  *
  * `code === null` is the socket's "no verdict at all": the session went quiet, timed
  * out, or answered an `error` frame with no numeric code. `socket.ts` already
@@ -1330,14 +1335,15 @@ function gradeDanmaku(code: number | null, message: string): SendOutcome {
         'action_stop'
       )
     case DANMAKU_MUTED:
-      // What is said here is the socket's sentence for every other refusal — "the message was refused
-      // with res 5" — put into a person's words instead: the state, what it does to the run, the one
-      // remedy it rules out, and the one it leaves. The socket's own English line is deliberately not
-      // appended: it says the number this sentence already leads with.
+      // What is said here is the state, what it does to the run, the one remedy it rules out, and the
+      // one it leaves. The socket's own English line is deliberately not appended: it says the number
+      // this sentence already leads with. 重置进度 is not named either — the Task pauses rather than
+      // fails, so nothing needs resetting, and naming a button next to a state it does not affect is
+      // how an instruction gets followed for nothing.
       return sendFailure(
         String(code),
-        `被禁言（res=${String(DANMAKU_MUTED)}）：斗鱼把账号禁言了，禁言期间每一条弹幕都会被拒，重试不会改变结果，所以这个任务会停下；这不是登录态的问题——重新绑定账号也解除不了禁言，斗鱼解除之后在任务列表里按「重置进度」才会接着发。`,
-        'account_restricted'
+        `被禁言（res=${String(DANMAKU_MUTED)}）：斗鱼把账号禁言了，禁言期间每一条弹幕都会被拒，重试也不会改变，所以任务已暂停，不会再发；这不是登录态的问题——重新绑定账号也解除不了禁言。斗鱼解除禁言后，在任务列表里按「恢复」，发送就从原来的进度接着走。`,
+        'pause'
       )
     default:
       // An unknown code is not guessed at. Retrying keeps the loop alive, and the
@@ -1573,8 +1579,9 @@ const MAX_GROUP_PAGES = 5
  * when this call answered — and the walk has to get the day's signature from the twin. The reading
  * this code used to carry (a `0` as 已签) is refuted by that same sequence: a board whose sign is
  * already in has nothing for the twin to sign, and the twin refuses in exactly that case with its
- * `1001`, measured once (see `signGroupPc`). A positive score from `fastSign` stays a sign this run
- * made; a `0` is put to the twin, whose `200` with a positive score is the sign it just placed and
+ * `1001`, measured once (see `signGroupPc`). A positive number from `fastSign` stays a sign this run
+ * made — the number's own size is unmeasured and is never printed as an earned score (see the branch
+ * itself); a `0` is put to the twin, whose `200` with a positive score is the sign it just placed and
  * whose `1001` is the already verdict. A `200` with no score stays unsettled — a failed item, left
  * for the next sweep. A `fastSign` refusal with `1001` is still read as already, since that code is
  * the endpoint's own named verdict rather than a value that merely could mean it, though that reading
@@ -1594,8 +1601,8 @@ const MAX_GROUP_PAGES = 5
  * run is visible in the sweep's log rather than collapsed into a count.
  *
  * **Every group also gets its own item**, carrying what the console line said: which
- * 版块, whether it signed or was already in, and what it earned. That is the detail a
- * person asks for, and until now it lived only in the console — the row in the
+ * 版块, whether it signed or was already in, and what it earned where that is measured. That is the
+ * detail a person asks for, and until now it lived only in the console — the row in the
  * database carried the count and nothing else. When the walk never reached a group,
  * the item is the action itself (`accountOutcome`), because a group the run did not
  * touch has no name to show.
@@ -1670,7 +1677,9 @@ async function reconcileYubaSign(
     // the id, which is what a person debugging the walk actually wants.
     // The item's `detail` is the second thing rendered there, and it is a fact — 「已签」,
     // 「等级分 +3」 — because the group's name already sits beside it; the console lines below
-    // stay sentences, since a log is read top to bottom and a row is read across.
+    // stay sentences, since a log is read top to bottom and a row is read across. The level score
+    // appears there only where it is measured — the PC twin's `addLevelScore` — and never for the
+    // `fastSign` number, which is not an earned score at all as far as anything here knows.
     const label = group.group_name === '' ? UNNAMED_GROUP : group.group_name
 
     const signed = await callGraded(
@@ -1714,15 +1723,21 @@ async function reconcileYubaSign(
       continue
     }
 
-    // A positive score is a sign this call performed: the one new-sign reading on record is 24.
+    // A positive number is a sign this call performed — and its *size* is a different question that
+    // nothing here answers (see `signGroupAndroid`), so it is not printed. The one new-sign reading of
+    // this call on record is 24 (group 历史, an `action_logs` row of 2026-10-09), and a single sign
+    // cannot be worth an EXP of 24: board 11254805's twin reported the 3 it added for that same day,
+    // and Douyu's own published table for that board is 3–5 a day. Printing it as 「等级分 +24」 read
+    // as though this sign had earned it, and the owner read it exactly that way. What is stated here is
+    // the fact this branch does establish: the sign went in.
     if (result.data > 0) {
       done += 1
-      log(`鱼吧「${name}」：签到成功，等级分 +${String(result.data)}`)
+      log(`鱼吧「${name}」：签到成功`)
       items.push({
         kind: 'group',
         label,
         outcome: 'done',
-        detail: `等级分 +${String(result.data)}`,
+        detail: '签到成功',
         code: String(result.code)
       })
       continue
@@ -1782,6 +1797,11 @@ async function reconcileYubaSign(
     }
 
     done += 1
+    // **This one is measured, and it is the only level score this walk may print as an increment.**
+    // `signGroupPc` answers `addLevelScore`, which is the EXP that sign earned: board 11254805's twin
+    // answered the 3 points it added for the sign it placed there, and a later read of the same board
+    // answered 4 — both inside Douyu's own published table for it (连续签到 1天 +3, 2天 +4, 10天 +4,
+    // 20天 +4, 30天 +5). The fastSign branch above prints no number at all, for the reason stated there.
     log(`鱼吧「${name}」：PC 端点签到成功，等级分 +${String(verdict.data.levelScore)}`)
     items.push({
       kind: 'group',
@@ -2342,7 +2362,7 @@ interface JudgedTask {
    * could not say so. `gradeOfVerdict` still decides every other verdict.
    */
   readonly outcome: ActionOutcomeValue
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
   /** The record's `code` when this item governs it — a state this adapter named, never a Douyu number. */
   readonly recordCode: string
   /** What the record's line adds when this item governs it, or `''` when nothing needs adding. */
@@ -2354,7 +2374,7 @@ interface JudgedTask {
 /** The outcome value and the failure grade one verdict carries, for its item and for the record. */
 function gradeOfVerdict(verdict: DailyTaskVerdict): {
   readonly outcome: ActionOutcomeValue
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
 } {
   switch (verdict) {
     case 'settled':
@@ -2450,7 +2470,7 @@ function judgeDailyTask(task: RoomDailyTask, allowlist: readonly string[], gift:
     detail: string,
     recordCode: string,
     clause: string,
-    overrides: { readonly word?: string; readonly failure?: FailureKind } = {}
+    overrides: { readonly word?: string; readonly failure?: ActionFailureKind } = {}
   ): JudgedTask => {
     const grade = gradeOfVerdict(verdict)
     return {
@@ -2785,7 +2805,7 @@ interface GiftRun {
   readonly recordCode: string
   readonly clause: string
   /** The grade of the call that stopped this walk, or `none` for a walk that reached its own bound. */
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
 }
 
 /** One gift that went out, as its receipt described it. */
@@ -3009,7 +3029,7 @@ async function walkGifts(
   const sent: SentGift[] = []
 
   /** The walk's one failure shape: what did go out, and what stopped it — with the failed call's grade. */
-  const failed = (reason: string, recordCode: string, failure: FailureKind, clause: string): GiftRun => ({
+  const failed = (reason: string, recordCode: string, failure: ActionFailureKind, clause: string): GiftRun => ({
     verdict: 'failed',
     sent: sent.length,
     act: sent.length === 0 ? `未送成（${reason}）` : `${giftActClause(sent, '')}；之后一次没能送出：${reason}`,
@@ -3405,7 +3425,7 @@ interface ClearoutRoom {
 }
 
 /** 一次走法的一个「什么都没倒」结局，形状与走法自己的结局完全一样。 */
-function clearoutStop(recordCode: string, failure: FailureKind, act: string, clause: string): GiftWalkStart {
+function clearoutStop(recordCode: string, failure: ActionFailureKind, act: string, clause: string): GiftWalkStart {
   return { stop: { verdict: 'unheld', sent: 0, act, recordCode, clause, failure } }
 }
 
@@ -4014,7 +4034,7 @@ interface FishingHalt {
   readonly code: string
   /** The sentence the item carries: what did not happen, and the fact that stopped it. */
   readonly detail: string
-  readonly failure: FailureKind
+  readonly failure: ActionFailureKind
 }
 
 /** One finished run, as the record below needs it. */
@@ -5258,7 +5278,7 @@ function roomOutcome(
   outcome: ActionOutcomeValue,
   detail: string,
   code: string,
-  failure: FailureKind
+  failure: ActionFailureKind
 ): ActionOutcome {
   return {
     actionKey,
@@ -5326,7 +5346,7 @@ function accountOutcome(
   outcome: ActionOutcomeValue,
   detail: string,
   code: string,
-  failure: FailureKind,
+  failure: ActionFailureKind,
   itemCode = code
 ): ActionOutcome {
   return {
@@ -5340,7 +5360,7 @@ function accountOutcome(
   }
 }
 
-function actionFailure(actionKey: string, code: string, detail: string, failure: FailureKind): ActionOutcome {
+function actionFailure(actionKey: string, code: string, detail: string, failure: ActionFailureKind): ActionOutcome {
   return accountOutcome(actionKey, 'failed', detail, code, failure)
 }
 
@@ -5376,7 +5396,7 @@ function blockedOutcome(actionKey: string, code: string, detail: string): Action
  * probe did not learn whether the stream is up, and `ok: false` is what tells the
  * caller not to read it.
  */
-function probeFailure(code: string, detail: string, failure: FailureKind): ProbeResult {
+function probeFailure(code: string, detail: string, failure: ActionFailureKind): ProbeResult {
   return { ok: false, liveStatus: LIVE_STATUS_OFFLINE, title: '', code, detail, failure }
 }
 

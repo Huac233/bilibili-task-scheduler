@@ -964,6 +964,7 @@ export const EVENT_LABEL: Readonly<Record<string, string>> = {
   task_went_live: '目标开播',
   task_finished: '任务完成',
   task_failed: '任务失败',
+  task_paused: '任务已暂停',
   task_sending_trouble: '发送异常',
   action_failed: '动作失败',
   action_blocked: '动作受阻',
