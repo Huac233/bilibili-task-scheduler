@@ -36,28 +36,76 @@ export const DEFAULT_DANMAKU_ENDPOINT = 'wss://wsproxy.douyu.com:6671'
 /**
  * `chatres`' `res` values, which are not business codes.
  *
- * `chatres` arrives on this socket and not over HTTP, so these two numbers are this module's own
+ * `chatres` arrives on this socket and not over HTTP, so these numbers are this module's own
  * vocabulary — which is why they are named here rather than in `errors.ts`, a table that must not claim
  * they mean anything anywhere else. They are **exported**, and the reason is the classification right
- * below: the adapter that reads a verdict names the same two numbers when it reports one, and a code
- * with two homes is a code that can drift into two grades.
+ * below: the adapter that reads a verdict names the same numbers when it reports one, and a code with
+ * two homes is a code that can drift into two grades.
  */
+
+/**
+ * `res=5` — the account is muted (被禁言), so every `chatmessage` is refused until Douyu lifts it.
+ *
+ * **One person's account of the live service is the whole of the evidence, and this comment says so
+ * rather than dressing it up as a measurement.** No capture this project holds has a refused `chatres`
+ * carrying this code: the numbers they produced are `0`, `290` and `356` (§2.7) plus a `288` in the chat
+ * capture kept beside this repository. So the code is the owner's report —
+ * 「斗鱼发弹幕 被系统禁言了会报 5」 — and two things only a capture can settle are therefore unknown,
+ * and are not claimed anywhere below: whether the mute is per-room or account-wide, and how long one
+ * lasts. Neither changes the answer this code needs, because a mute is a state under both readings and
+ * `retry` is wrong under both.
+ *
+ * **A state, not a transient refusal — which is the whole reason it is named at all.** An unrecognised
+ * `res` keeps the shared table's `retry` on purpose (`errors.ts` gives the reason: an unknown code is
+ * more often a race than a permanent state), and that reasoning is exactly what a mute falsifies: while
+ * one lasts, every send is refused, so a retry reposts the same refusal as fast as the Task's interval
+ * allows, and the person whose task it is reads a number instead of the state their account is in. The
+ * grade and the sentence are two layers away — `classifySocketError` here, `gradeDanmaku` in
+ * `index.ts` — and both name this constant rather than the literal.
+ */
+export const DANMAKU_MUTED = 5
+
 /** `res=290` — sent too fast. The measured floor is ~2 s (§2.7). */
 export const DANMAKU_RATE_LIMITED = 290
 /** `res=356` — the content rule rejects a long consecutive alphanumeric run (§2.7). */
 export const DANMAKU_CONTENT_RULE = 356
 
 /**
- * The classification for a code read off this socket: the shared table, plus the one socket-only verdict.
+ * The classification for a code read off this socket: the shared table, plus the two socket-only verdicts.
  *
- * **`356` is the reason this exists.** `classifyError` has never seen it and answers `retry`, while the
+ * **`356` is why this exists at all.** `classifyError` has never seen it and answers `retry`, while the
  * measurement says it is a deterministic *content* refusal: the same 40-character payload came back
  * `res=356` twice — 40 digits, then 40 Latin letters — where 30 of either was answered `res=0`, so
  * retrying it unchanged repeats it forever. `290` needs no entry: the cadence refusal is a `retry`, and
  * that is what the shared table already answers for it.
+ *
+ * **`5` is the entry whose grade is not one word, and saying so here is the point of the entry.** What a
+ * caller must do about a mute is stop, and `ErrorClassification` has one member for "the account":
+ * `account_stop`. What a person must be *told* is a different member of a different union —
+ * `FailureKind.account_restricted`, which `account_stop` is not — because re-binding cannot clear a mute
+ * and telling someone to re-bind is how a restriction gets reported with the remedy that cannot help
+ * (`platform/types.ts` states that rule, and `runner.ts`'s `emitAccountStop` is where it reaches a
+ * person). The sentence is therefore the adapter's to give: `gradeDanmaku` reads this code and answers
+ * `account_restricted`. Nothing but the verdict family is being decided here.
  */
 function classifySocketError(code: number): ErrorClassification {
-  return code === DANMAKU_CONTENT_RULE ? 'action_stop' : classifyError(code)
+  if (code === DANMAKU_CONTENT_RULE) return 'action_stop'
+  if (code === DANMAKU_MUTED) return 'account_stop'
+  return classifyError(code)
+}
+
+/**
+ * What this module says about a `chatres` verdict that is not `0`.
+ *
+ * Two shapes of refusal arrive here and only one of them is about the text that was sent: a mute's
+ * subject is the account, so a mute reported as `refused with res 5` is the defect `DANMAKU_MUTED`
+ * exists to end. Everything else this socket can only report as the number it was given — the verdict
+ * that would say more is the adapter's (`gradeDanmaku` names 290 and 356 in a person's words).
+ */
+function refusalMessageOf(res: number): string {
+  return res === DANMAKU_MUTED
+    ? `the account is muted, so the danmaku was refused (chatres res ${String(DANMAKU_MUTED)})`
+    : `the message was refused with res ${String(res)}`
 }
 
 /**
@@ -503,10 +551,7 @@ export async function sendDanmaku(
               })
               break
             }
-            fail(
-              res,
-              res === null ? 'chatres arrived with no res code' : `the message was refused with res ${String(res)}`
-            )
+            fail(res, res === null ? 'chatres arrived with no res code' : refusalMessageOf(res))
             break
           }
 

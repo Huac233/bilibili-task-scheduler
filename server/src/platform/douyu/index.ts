@@ -104,7 +104,13 @@ import {
   YUBA_ALREADY_SIGNED,
   type YubaGroup
 } from './protocol.js'
-import { DANMAKU_CONTENT_RULE, DANMAKU_RATE_LIMITED, type DanmakuSession, sendDanmaku } from './socket.js'
+import {
+  DANMAKU_CONTENT_RULE,
+  DANMAKU_MUTED,
+  DANMAKU_RATE_LIMITED,
+  type DanmakuSession,
+  sendDanmaku
+} from './socket.js'
 
 /**
  * Douyu, behind the Platform seam.
@@ -1271,6 +1277,30 @@ async function send(account: PlatformAccount, targetKey: string, text: string): 
  * repeats it forever — and a novel imported with URLs, hashes, ids or base64 in it
  * will hit it.
  *
+ * **`res=5` is the one verdict here that is about the account rather than the message, and it is
+ * graded `account_restricted` rather than parked or retried.** A mute refuses *every* send for as long
+ * as it lasts, so the two answers around this one are both wrong in their own way: `retry` reposts a
+ * refusal the service has already given (this file's own reason for parking 356, and worse here,
+ * because no rewrite of the text can help), and `action_stop` reaches a person as 动作受阻 while the
+ * send loop carries on unchanged — `runner.ts`'s `applyFailure` only raises the event and writes
+ * `last_error` for that grade, so the Task would keep posting into a mute. `account_restricted` is the
+ * seam's word for the state that is actually true: the platform is refusing this account's writes, and
+ * **re-binding cannot clear it** — the remedy `account_stop` would name. So the Task stops
+ * (`applyFailure` fails it) and `emitAccountStop` tells the person the state in these words.
+ *
+ * Two consequences worth stating, because neither is obvious from the grade:
+ *
+ *  - **Nothing re-probes a mute.** The only thing that could tell whether one has been lifted is
+ *    another send, and this grade stops sending; so the Task stays failed until a person presses
+ *    重置进度 on it after Douyu lifts the mute. That is the deliberate half — the alternative is a
+ *    task that posts into a mute for as long as it lasts — and it is what the sentence below tells
+ *    the person to do.
+ *  - **The evidence is the owner's report, not a capture.** No refusal frame with this code exists in
+ *    this repository (`socket.ts`'s `DANMAKU_MUTED` says which numbers the captures do hold), and what
+ *    that leaves unverified is whether one mute covers the whole account or a single room. No answer
+ *    here depends on it: the danmaku of this Task's room are refused either way, and a room-wide mute
+ *    stops them for the same reason an account-wide one does.
+ *
  * `code === null` is the socket's "no verdict at all": the session went quiet, timed
  * out, or answered an `error` frame with no numeric code. `socket.ts` already
  * refused to classify it, and grading it as anything but `retry` would be the old
@@ -1298,6 +1328,16 @@ function gradeDanmaku(code: number | null, message: string): SendOutcome {
         String(code),
         `内容被拒（res=356）：命中「连续字母数字串过长」的内容规则，与长度无关——含 URL、hash、长 ID 或 base64 的文本会撞上它，先插分隔符再发；${message}`,
         'action_stop'
+      )
+    case DANMAKU_MUTED:
+      // What is said here is the socket's sentence for every other refusal — "the message was refused
+      // with res 5" — put into a person's words instead: the state, what it does to the run, the one
+      // remedy it rules out, and the one it leaves. The socket's own English line is deliberately not
+      // appended: it says the number this sentence already leads with.
+      return sendFailure(
+        String(code),
+        `被禁言（res=${String(DANMAKU_MUTED)}）：斗鱼把账号禁言了，禁言期间每一条弹幕都会被拒，重试不会改变结果，所以这个任务会停下；这不是登录态的问题——重新绑定账号也解除不了禁言，斗鱼解除之后在任务列表里按「重置进度」才会接着发。`,
+        'account_restricted'
       )
     default:
       // An unknown code is not guessed at. Retrying keeps the loop alive, and the

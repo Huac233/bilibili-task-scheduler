@@ -5,7 +5,8 @@ import {
   CLIENT_SIGN_ALREADY_SIGNED,
   classifyError,
   DouyuProtocolError,
-  DouyuTransportError
+  DouyuTransportError,
+  type ErrorClassification
 } from '../src/platform/douyu/errors.js'
 import { douyuPlatform, parseCredential } from '../src/platform/douyu/index.js'
 import {
@@ -27,6 +28,7 @@ import {
   YUBA_FAST_SIGN_URL,
   YUBA_TOPIC_SIGN_URL
 } from '../src/platform/douyu/protocol.js'
+import { DANMAKU_MUTED } from '../src/platform/douyu/socket.js'
 import { TargetRefusal, TargetRefusalKind } from '../src/platform/target.js'
 import type { ActionOutcome, PlatformAccount, RefreshResult } from '../src/platform/types.js'
 import { ActionKey, TaskAction } from '../src/repo/tasks.js'
@@ -157,9 +159,19 @@ function roomResponse(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
 }
 
-/** A `DouyuResult` refusal, classified by the real table so the mock cannot drift. */
-function refused(code: number | null, message = 'refused') {
-  return { ok: false, code, message, classification: classifyError(code ?? 0) }
+/**
+ * A `DouyuResult` refusal, classified by the real table so the mock cannot drift.
+ *
+ * The third parameter exists for the one code the shared table has no answer for: the socket names a
+ * mute itself (`classifySocketError`), so a fixture for it has to say what the socket says rather than
+ * what `classifyError` would say about a number it has never seen.
+ */
+function refused(
+  code: number | null,
+  message = 'refused',
+  classification: ErrorClassification = classifyError(code ?? 0)
+) {
+  return { ok: false, code, message, classification }
 }
 
 /** A group as `myFollow` reports it. */
@@ -614,6 +626,25 @@ describe('send', () => {
     expect(outcome).toMatchObject({ ok: false, code: '356', failure: 'action_stop' })
     expect(outcome.detail).toContain('连续字母数字串')
     expect(outcome.detail).toContain('URL')
+  })
+
+  it('grades res=5 as a mute of the account, and stops rather than retrying it', async () => {
+    // The socket's own words for this code, and the classification it answers with: the account-level
+    // stop. What this test pins is the grade and the sentence the *seam* consumes, which are a member
+    // `ErrorClassification` does not have — `account_restricted`, because re-binding cannot clear a mute.
+    sendDanmakuMock.mockResolvedValue(
+      refused(
+        DANMAKU_MUTED,
+        `the account is muted, so the danmaku was refused (chatres res ${String(DANMAKU_MUTED)})`,
+        'account_stop'
+      )
+    )
+    const outcome = await douyuPlatform.send(account(), '12306', 'x')
+
+    expect(outcome).toMatchObject({ ok: false, code: String(DANMAKU_MUTED), failure: 'account_restricted' })
+    expect(outcome.detail).toContain('被禁言')
+    expect(outcome.detail).toContain('重新绑定')
+    expect(outcome.detail).toContain('重置进度')
   })
 
   it.each([401000206, 1002, 999999])('grades %i as account_stop', async code => {

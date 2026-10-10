@@ -137,7 +137,7 @@ curl -H "Authorization: Bearer bts_xxx" \
 | `action_failed` | 日常动作失败，本轮其余动作照常继续 |
 | `action_blocked` | 日常动作被平台拒绝、因此停到明天（余额不足、账号没有网页会话等） |
 | `session_expired` | 登录失效或续期失败 |
-| `account_restricted` | 只有 B 站的 `-403` 会写它：账号级封禁，重新绑定不会解除（房间禁言走 `action_blocked`） |
+| `account_restricted` | 账号被平台限制：B 站的 `-403`，以及斗鱼弹幕被禁言（`chatres` res 5）。重新绑定不会解除；斗鱼解除后按「重置进度」再跑。房间级的拒绝仍走 `action_blocked` |
 | `other` | 服务端读到它不认识的 kind 时用它回答，消费方必须处理 |
 | `task_started` | 只声明，本版本不会发出 |
 | `task_sending_trouble` | 只声明，本版本不会发出 |

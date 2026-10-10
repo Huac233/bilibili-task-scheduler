@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   DANMAKU_CONTENT_RULE,
+  DANMAKU_MUTED,
   type DanmakuSession,
   decodeFrame,
   decodeStt,
@@ -161,6 +162,27 @@ describe('sendDanmaku', () => {
 
     const result = await pending
     expect(result).toMatchObject({ ok: false, code: DANMAKU_CONTENT_RULE, classification: 'action_stop' })
+  })
+
+  it('names a muted account as an account-level stop rather than retrying the same refusal', async () => {
+    const pending = send()
+    const socket = connected()
+    socket.deliver(frame({ type: 'loginres' }))
+    await wait(30)
+
+    // `res=5` is the owner's account of the live service — 「斗鱼发弹幕 被系统禁言了会报 5」 — and it is the
+    // one refusal this module meets whose subject is the account's standing rather than the frame that was
+    // sent. While a mute lasts **every** `chatmessage` is refused, so the shared table's `retry` is the one
+    // answer that cannot be right: it reposts the same refusal as fast as the Task's interval allows, and
+    // what the person reads is a number. The socket's own table has no member for a restriction, so it
+    // answers the account-level stop it does have; `gradeDanmaku` is what puts the state into a person's
+    // words, and `douyu-adapter.test.ts` is where that grade is pinned.
+    socket.deliver(frame({ type: 'chatres', res: String(DANMAKU_MUTED) }))
+
+    const result = await pending
+    expect(result).toMatchObject({ ok: false, code: DANMAKU_MUTED, classification: 'account_stop' })
+    expect(result.ok ? '' : result.message).toContain('muted')
+    expect(result.ok ? '' : result.message).not.toContain(`refused with res ${String(DANMAKU_MUTED)}`)
   })
 
   it('leaves a quiet session as a retry, because there is nothing to classify', async () => {
